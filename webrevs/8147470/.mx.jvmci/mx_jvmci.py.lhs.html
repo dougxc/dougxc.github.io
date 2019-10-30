@@ -1,0 +1,1089 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 #
+   2 # ----------------------------------------------------------------------------------------------------
+   3 #
+   4 # Copyright (c) 2007, 2015, Oracle and/or its affiliates. All rights reserved.
+   5 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   6 #
+   7 # This code is free software; you can redistribute it and/or modify it
+   8 # under the terms of the GNU General Public License version 2 only, as
+   9 # published by the Free Software Foundation.
+  10 #
+  11 # This code is distributed in the hope that it will be useful, but WITHOUT
+  12 # ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  13 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  14 # version 2 for more details (a copy is included in the LICENSE file that
+  15 # accompanied this code).
+  16 #
+  17 # You should have received a copy of the GNU General Public License version
+  18 # 2 along with this work; if not, write to the Free Software Foundation,
+  19 # Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  20 #
+  21 # Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  22 # or visit www.oracle.com if you need additional information or have any
+  23 # questions.
+  24 #
+  25 # ----------------------------------------------------------------------------------------------------
+  26 
+  27 import os, shutil, zipfile, re, time, sys, datetime, platform
+  28 from os.path import join, exists, dirname, isdir
+  29 from argparse import ArgumentParser, REMAINDER
+  30 import StringIO
+  31 import xml.dom.minidom
+  32 import subprocess
+  33 
+  34 import mx
+  35 import mx_gate
+  36 import mx_unittest
+  37 
+  38 from mx_gate import Task
+  39 from mx_unittest import unittest
+  40 
+  41 _suite = mx.suite('jvmci')
+  42 
+<a name="1" id="anc1"></a>
+
+  43 """
+  44 Top level directory of the JDK source workspace.
+  45 """
+  46 _jdkSourceRoot = dirname(_suite.dir)
+  47 
+  48 _JVMCI_JDK_TAG = 'jvmci'
+  49 
+  50 _minVersion = mx.VersionSpec('1.9')
+  51 
+  52 # max version (first _unsupported_ version)
+  53 _untilVersion = None
+  54 
+  55 _jvmciModes = {
+  56     'hosted' : ['-XX:+UnlockExperimentalVMOptions', '-XX:+EnableJVMCI'],
+  57     'jit' : ['-XX:+UnlockExperimentalVMOptions', '-XX:+EnableJVMCI', '-XX:+UseJVMCICompiler'],
+  58     'disabled' : []
+  59 }
+  60 
+  61 # TODO: can optimized be built without overriding release build?
+  62 _jdkDebugLevels = ['release', 'fastdebug', 'slowdebug']
+  63 
+  64 # TODO: add client once/if it can be built on 64-bit platforms
+  65 _jdkJvmVariants = ['server']
+  66 
+  67 """
+  68 Translation table from mx_jvmci:8 --vmbuild values to mx_jvmci:9 --jdk-debug-level values.
+  69 """
+  70 _legacyVmbuilds = {
+  71     'product' : 'release',
+  72     'debug' : 'slowdebug'
+  73 }
+  74 
+  75 """
+  76 Translates a mx_jvmci:8 --vmbuild value to a mx_jvmci:9 --jdk-debug-level value.
+  77 """
+  78 def _translateLegacyDebugLevel(debugLevel):
+  79     return _legacyVmbuilds.get(debugLevel, debugLevel)
+  80 
+  81 """
+  82 Translation table from mx_jvmci:8 --vm values to mx_jvmci:9 (--jdk-jvm-variant, --jvmci-mode) tuples.
+  83 """
+  84 _legacyVms = {
+  85     'jvmci' : ('server', 'jit')
+  86 }
+  87 
+  88 """
+  89 A VM configuration composed of a JDK debug level, JVM variant and a JVMCI mode.
+  90 This is also a context manager that can be used with the 'with' statement to set/change
+  91 a VM configuration within a dynamic scope. For example:
+  92 
+  93     with ConfiguredJDK(debugLevel='fastdebug'):
+  94         dacapo(['pmd'])
+  95 """
+  96 class VM:
+  97     def __init__(self, jvmVariant=None, debugLevel=None, jvmciMode=None):
+  98         self.update(jvmVariant, debugLevel, jvmciMode)
+  99 
+ 100     def update(self, jvmVariant=None, debugLevel=None, jvmciMode=None):
+ 101         if jvmVariant in _legacyVms:
+ 102             # Backwards compatibility for mx_jvmci:8 API
+ 103             jvmVariant, newJvmciMode = _legacyVms[jvmVariant]
+ 104             if jvmciMode is not None and jvmciMode != newJvmciMode:
+ 105                 mx.abort('JVM variant "' + jvmVariant + '" implies JVMCI mode "' + newJvmciMode +
+ 106                          '" which conflicts with explicitly specified JVMCI mode of "' + jvmciMode + '"')
+ 107             jvmciMode = newJvmciMode
+ 108         debugLevel = _translateLegacyDebugLevel(debugLevel)
+ 109         assert jvmVariant is None or jvmVariant in _jdkJvmVariants, jvmVariant
+ 110         assert debugLevel is None or debugLevel in _jdkDebugLevels, debugLevel
+ 111         assert jvmciMode is None or jvmciMode in _jvmciModes, jvmciMode
+ 112         self.jvmVariant = jvmVariant or _vm.jvmVariant
+ 113         self.debugLevel = debugLevel or _vm.debugLevel
+ 114         self.jvmciMode = jvmciMode or _vm.jvmciMode
+ 115 
+ 116     def __enter__(self):
+ 117         global _vm
+ 118         self.previousVm = _vm
+ 119         _vm = self
+ 120 
+ 121     def __exit__(self, exc_type, exc_value, traceback):
+ 122         global _vm
+ 123         _vm = self.previousVm
+ 124 
+ 125 _vm = VM(jvmVariant=_jdkJvmVariants[0], debugLevel=_jdkDebugLevels[0], jvmciMode='hosted')
+ 126 
+ 127 def get_vm():
+ 128     """
+ 129     Gets the configured VM.
+ 130     """
+ 131     return _vm
+ 132 
+ 133 def relativeVmLibDirInJdk():
+ 134     mxos = mx.get_os()
+ 135     if mxos == 'darwin':
+ 136         return join('lib')
+ 137     if mxos == 'windows' or mxos == 'cygwin':
+ 138         return join('bin')
+ 139     return join('lib', mx.get_arch())
+ 140 
+ 141 def isJVMCIEnabled(vm):
+ 142     assert vm in _jdkJvmVariants
+ 143     return True
+ 144 
+ 145 class JvmciJDKDeployedDist(object):
+ 146     def __init__(self, name, compilers=False):
+ 147         self._name = name
+ 148         self._compilers = compilers
+ 149 
+ 150     def dist(self):
+ 151         return mx.distribution(self._name)
+ 152 
+ 153     def deploy(self, jdkDir):
+ 154         mx.nyi('deploy', self)
+ 155 
+ 156     def post_parse_cmd_line(self):
+ 157         self.set_archiveparticipant()
+ 158 
+ 159     def set_archiveparticipant(self):
+ 160         dist = self.dist()
+ 161         dist.set_archiveparticipant(JVMCIArchiveParticipant(dist))
+ 162 
+ 163 class ExtJDKDeployedDist(JvmciJDKDeployedDist):
+ 164     def __init__(self, name):
+ 165         JvmciJDKDeployedDist.__init__(self, name)
+ 166 
+<a name="2" id="anc2"></a><span class="removed"> 167 </span>
+ 168 """
+ 169 The monolithic JVMCI distribution is deployed through use of -Xbootclasspath/p
+ 170 so that it's not necessary to run JDK make after editing JVMCI sources.
+ 171 The latter causes all JDK Java sources to be rebuilt since JVMCI is
+ 172 (currently) in java.base.
+ 173 """
+ 174 _monolithicJvmci = JvmciJDKDeployedDist('JVMCI')
+ 175 
+ 176 """
+ 177 List of distributions that are deployed on the boot class path.
+ 178 Note: In jvmci-8, they were deployed directly into the JDK directory.
+ 179 """
+ 180 jdkDeployedDists = [_monolithicJvmci]
+ 181 
+ 182 def _makehelp():
+ 183     return subprocess.check_output([mx.gmake_cmd(), 'help'], cwd=_jdkSourceRoot)
+ 184 
+ 185 def _runmake(args):
+ 186     """run the JDK make process
+ 187 
+ 188 To build hotspot and import it into the JDK: "mx make hotspot import-hotspot"
+ 189 {0}"""
+ 190 
+ 191     jdkBuildDir = _get_jdk_build_dir()
+ 192     if not exists(jdkBuildDir):
+ 193         # JDK9 must be bootstrapped with a JDK8
+ 194         compliance = mx.JavaCompliance('8')
+ 195         jdk8 = mx.get_jdk(compliance.exactMatch, versionDescription=compliance.value)
+<a name="3" id="anc3"></a><span class="changed"> 196         cmd = ['sh', 'configure', '--with-debug-level=' + _vm.debugLevel, '--disable-debug-symbols', '--disable-precompiled-headers',</span>
+ 197                '--with-jvm-variants=' + _vm.jvmVariant, '--disable-warnings-as-errors', '--with-boot-jdk=' + jdk8.home]
+ 198         mx.run(cmd, cwd=_jdkSourceRoot)
+ 199     cmd = [mx.gmake_cmd(), 'CONF=' + _vm.debugLevel]
+ 200     if mx.get_opts().verbose:
+ 201         cmd.append('LOG=debug')
+ 202     cmd.extend(args)
+ 203     if mx.get_opts().use_jdk_image and 'images' not in args:
+ 204         cmd.append('images')
+ 205 
+ 206     if not mx.get_opts().verbose:
+ 207         mx.log('--------------- make execution ----------------------')
+ 208         mx.log('Working directory: ' + _jdkSourceRoot)
+ 209         mx.log('Command line: ' + ' '.join(cmd))
+ 210         mx.log('-----------------------------------------------------')
+ 211 
+ 212     mx.run(cmd, cwd=_jdkSourceRoot)
+ 213 
+ 214     if 'images' in cmd:
+<a name="4" id="anc4"></a><span class="changed"> 215         _create_jdk_bundle(jdkBuildDir)</span>
+
+
+
+
+
+
+
+
+ 216 
+ 217 def _get_jdk_bundle_arches():
+ 218     """
+ 219     Gets a list of names that will be the part of a JDK bundle's file name denoting the architecture.
+ 220     The first element in the list is the canonical name. Symlinks should be created for the
+ 221     remaining names.
+ 222     """
+ 223     cpu = mx.get_arch()
+ 224     if cpu == 'amd64':
+ 225         return ['x64', 'x86_64', 'amd64']
+ 226     elif cpu == 'sparcv9':
+ 227         return ['sparcv9']
+ 228     mx.abort('Unsupported JDK bundle arch: ' + cpu)
+ 229 
+<a name="5" id="anc5"></a><span class="changed"> 230 def _create_jdk_bundle(jdkBuildDir):</span>
+ 231     """
+ 232     Creates a tar.gz JDK archive, an accompanying tar.gz.sha1 file with its
+ 233     SHA1 signature plus symlinks to the archive for non-canonical architecture names.
+ 234     """
+<a name="6" id="anc6"></a><span class="removed"> 235     jdkImageDir = join(jdkBuildDir, 'images', 'jdk')</span>
+ 236 
+ 237     arches = _get_jdk_bundle_arches()
+<a name="7" id="anc7"></a><span class="changed"> 238     jdkTgzPath = join(_suite.get_output_root(), 'jdk-bundles', 'jdk9-{}-{}.tar.gz'.format(_get_openjdk_os(), arches[0]))</span>
+ 239     with mx.Archiver(jdkTgzPath, kind='tgz') as arc:
+ 240         mx.log('Creating ' + jdkTgzPath)
+ 241         for root, _, filenames in os.walk(jdkImageDir):
+ 242             for name in filenames:
+ 243                 f = join(root, name)
+ 244                 arcname = 'jdk1.9.0/' + os.path.relpath(f, jdkImageDir)
+ 245                 arc.zf.add(name=f, arcname=arcname, recursive=False)
+<a name="8" id="anc8"></a><span class="removed"> 246         # The OpenJDK build creates an empty cacerts file so grab one from</span>
+<span class="removed"> 247         # the default JDK which is assumed to be an OracleJDK</span>
+<span class="removed"> 248         cacerts = join(mx.get_jdk(tag='default').home, 'jre', 'lib', 'security', 'cacerts')</span>
+<span class="removed"> 249         arc.zf.add(name=cacerts, arcname='jdk1.9.0/lib/security/cacerts')</span>
+ 250 
+ 251     with open(jdkTgzPath + '.sha1', 'w') as fp:
+ 252         mx.log('Creating ' + jdkTgzPath + '.sha1')
+ 253         fp.write(mx.sha1OfFile(jdkTgzPath))
+ 254 
+ 255     def _create_link(source, link_name):
+ 256         if exists(link_name):
+ 257             os.remove(link_name)
+ 258         mx.log('Creating ' + link_name + ' -&gt; ' + source)
+ 259         os.symlink(source, link_name)
+ 260 
+ 261     for arch in arches[1:]:
+<a name="9" id="anc9"></a><span class="changed"> 262         link_name = join(_suite.get_output_root(), 'jdk-bundles', 'jdk9-{}-{}.tar.gz'.format(_get_openjdk_os(), arch))</span>
+ 263         jdkTgzName = os.path.basename(jdkTgzPath)
+ 264         _create_link(jdkTgzName, link_name)
+ 265         _create_link(jdkTgzName + '.sha1', link_name + '.sha1')
+ 266 
+ 267 def _runmultimake(args):
+ 268     """run the JDK make process for one or more configurations"""
+ 269 
+ 270     jvmVariantsDefault = ','.join(_jdkJvmVariants)
+ 271     debugLevelsDefault = ','.join(_jdkDebugLevels)
+ 272 
+ 273     parser = ArgumentParser(prog='mx multimake')
+ 274     parser.add_argument('--jdk-jvm-variants', '--vms', help='a comma separated list of VMs to build (default: ' + jvmVariantsDefault + ')', metavar='&lt;args&gt;', default=jvmVariantsDefault)
+ 275     parser.add_argument('--jdk-debug-levels', '--builds', help='a comma separated list of JDK debug levels (default: ' + debugLevelsDefault + ')', metavar='&lt;args&gt;', default=debugLevelsDefault)
+ 276     parser.add_argument('-n', '--no-check', action='store_true', help='omit running "java -version" after each build')
+ 277     select = parser.add_mutually_exclusive_group()
+ 278     select.add_argument('-c', '--console', action='store_true', help='send build output to console instead of log files')
+ 279     select.add_argument('-d', '--output-dir', help='directory for log files instead of current working directory', default=os.getcwd(), metavar='&lt;dir&gt;')
+ 280 
+ 281     args = parser.parse_args(args)
+ 282     jvmVariants = args.jdk_jvm_variants.split(',')
+ 283     debugLevels = [_translateLegacyDebugLevel(dl) for dl in args.jdk_debug_levels.split(',')]
+ 284 
+ 285     allStart = time.time()
+ 286     for jvmVariant in jvmVariants:
+ 287         for debugLevel in debugLevels:
+ 288             if not args.console:
+ 289                 logFile = join(mx.ensure_dir_exists(args.output_dir), jvmVariant + '-' + debugLevel + '.log')
+ 290                 log = open(logFile, 'wb')
+ 291                 start = time.time()
+ 292                 mx.log('BEGIN: ' + jvmVariant + '-' + debugLevel + '\t(see: ' + logFile + ')')
+ 293                 verbose = ['-v'] if mx.get_opts().verbose else []
+ 294                 # Run as subprocess so that output can be directed to a file
+ 295                 cmd = [sys.executable, '-u', mx.__file__] + verbose + ['--jdk-jvm-variant=' + jvmVariant, '--jdk-debug-level=' + debugLevel, 'make']
+ 296                 mx.logv("executing command: " + str(cmd))
+ 297                 subprocess.check_call(cmd, cwd=_suite.dir, stdout=log, stderr=subprocess.STDOUT)
+ 298                 duration = datetime.timedelta(seconds=time.time() - start)
+ 299                 mx.log('END:   ' + jvmVariant + '-' + debugLevel + '\t[' + str(duration) + ']')
+ 300             else:
+ 301                 with VM(jvmVariant=jvmVariant, debugLevel=debugLevel):
+ 302                     _runmake([])
+ 303             if not args.no_check:
+ 304                 with VM(jvmciMode='jit'):
+ 305                     run_vm(['-XX:-BootstrapJVMCI', '-version'])
+ 306     allDuration = datetime.timedelta(seconds=time.time() - allStart)
+ 307     mx.log('TOTAL TIME:   ' + '[' + str(allDuration) + ']')
+ 308 
+ 309 class HotSpotProject(mx.NativeProject):
+ 310     """
+ 311     Defines a NativeProject representing the HotSpot binaries built via make.
+ 312     """
+ 313     def __init__(self, suite, name, deps, workingSets, **args):
+ 314         assert name == 'hotspot'
+ 315         mx.NativeProject.__init__(self, suite, name, "", [], deps, workingSets, None, None, join(suite.mxDir, name))
+ 316 
+ 317     def eclipse_config_up_to_date(self, configZip):
+ 318         # Assume that any change to this module might imply changes to the generated IDE files
+ 319         if configZip.isOlderThan(__file__):
+ 320             return False
+ 321         for _, source in self._get_eclipse_settings_sources().iteritems():
+ 322             if configZip.isOlderThan(source):
+ 323                 return False
+ 324         return True
+ 325 
+ 326     def _get_eclipse_settings_sources(self):
+ 327         """
+ 328         Gets a dictionary from the name of an Eclipse settings file to
+ 329         the file providing its generated content.
+ 330         """
+ 331         if not hasattr(self, '_eclipse_settings'):
+ 332             esdict = {}
+ 333             templateSettingsDir = join(self.dir, 'templates', 'eclipse', 'settings')
+ 334             if exists(templateSettingsDir):
+ 335                 for name in os.listdir(templateSettingsDir):
+ 336                     source = join(templateSettingsDir, name)
+ 337                     esdict[name] = source
+ 338             self._eclipse_settings = esdict
+ 339         return self._eclipse_settings
+ 340 
+ 341     def _eclipseinit(self, files=None, libFiles=None):
+ 342         """
+ 343         Generates an Eclipse project for each HotSpot build configuration.
+ 344         """
+ 345 
+ 346         roots = [
+ 347             'ASSEMBLY_EXCEPTION',
+ 348             'LICENSE',
+ 349             'README',
+ 350             'THIRD_PARTY_README',
+ 351             'agent',
+ 352             'make',
+ 353             'src',
+ 354             'test'
+ 355         ]
+ 356 
+ 357         for jvmVariant in _jdkJvmVariants:
+ 358             for debugLevel in _jdkDebugLevels:
+ 359                 name = jvmVariant + '-' + debugLevel
+ 360                 eclProjectDir = join(self.dir, 'eclipse', name)
+ 361                 mx.ensure_dir_exists(eclProjectDir)
+ 362 
+ 363                 out = mx.XMLDoc()
+ 364                 out.open('projectDescription')
+ 365                 out.element('name', data='hotspot:' + name)
+ 366                 out.element('comment', data='')
+ 367                 out.element('projects', data='')
+ 368                 out.open('buildSpec')
+ 369                 out.open('buildCommand')
+ 370                 out.element('name', data='org.eclipse.cdt.managedbuilder.core.ScannerConfigBuilder')
+ 371                 out.element('triggers', data='full,incremental')
+ 372                 out.element('arguments', data='')
+ 373                 out.close('buildCommand')
+ 374 
+ 375                 out.close('buildSpec')
+ 376                 out.open('natures')
+ 377                 out.element('nature', data='org.eclipse.cdt.core.cnature')
+ 378                 out.element('nature', data='org.eclipse.cdt.core.ccnature')
+ 379                 out.element('nature', data='org.eclipse.cdt.managedbuilder.core.managedBuildNature')
+ 380                 out.element('nature', data='org.eclipse.cdt.managedbuilder.core.ScannerConfigNature')
+ 381                 out.close('natures')
+ 382 
+ 383                 if roots:
+ 384                     out.open('linkedResources')
+ 385                     for r in roots:
+ 386                         f = join(_suite.dir, r)
+ 387                         out.open('link')
+ 388                         out.element('name', data=r)
+ 389                         out.element('type', data='2' if isdir(f) else '1')
+ 390                         out.element('locationURI', data=mx.get_eclipse_project_rel_locationURI(f, eclProjectDir))
+ 391                         out.close('link')
+ 392 
+ 393                     out.open('link')
+ 394                     out.element('name', data='generated')
+ 395                     out.element('type', data='2')
+ 396                     generated = join(_get_hotspot_build_dir(jvmVariant, debugLevel), 'generated')
+ 397                     out.element('locationURI', data=mx.get_eclipse_project_rel_locationURI(generated, eclProjectDir))
+ 398                     out.close('link')
+ 399 
+ 400                     out.close('linkedResources')
+ 401                 out.close('projectDescription')
+ 402                 projectFile = join(eclProjectDir, '.project')
+ 403                 mx.update_file(projectFile, out.xml(indent='\t', newl='\n'))
+ 404                 if files:
+ 405                     files.append(projectFile)
+ 406 
+ 407                 cprojectTemplate = join(self.dir, 'templates', 'eclipse', 'cproject')
+ 408                 cprojectFile = join(eclProjectDir, '.cproject')
+ 409                 with open(cprojectTemplate) as f:
+ 410                     content = f.read()
+ 411                 mx.update_file(cprojectFile, content)
+ 412                 if files:
+ 413                     files.append(cprojectFile)
+ 414 
+ 415                 settingsDir = join(eclProjectDir, ".settings")
+ 416                 mx.ensure_dir_exists(settingsDir)
+ 417                 for name, source in self._get_eclipse_settings_sources().iteritems():
+ 418                     out = StringIO.StringIO()
+ 419                     print &gt;&gt; out, '# GENERATED -- DO NOT EDIT'
+ 420                     print &gt;&gt; out, '# Source:', source
+ 421                     with open(source) as f:
+ 422                         print &gt;&gt; out, f.read()
+ 423                     content = out.getvalue()
+ 424                     mx.update_file(join(settingsDir, name), content)
+ 425                     if files:
+ 426                         files.append(join(settingsDir, name))
+ 427 
+ 428     def getBuildTask(self, args):
+ 429         return JDKBuildTask(self, args, _vm.debugLevel, _vm.jvmVariant)
+ 430 
+ 431 
+ 432 class JDKBuildTask(mx.NativeBuildTask):
+ 433     def __init__(self, project, args, debugLevel, jvmVariant):
+ 434         mx.NativeBuildTask.__init__(self, args, project)
+ 435         self.jvmVariant = jvmVariant
+ 436         self.debugLevel = debugLevel
+ 437 
+ 438     def __str__(self):
+ 439         return 'Building JDK[{}, {}]'.format(self.debugLevel, self.jvmVariant)
+ 440 
+ 441     def build(self):
+ 442         if mx.get_opts().use_jdk_image:
+ 443             _runmake(['images'])
+ 444         else:
+ 445             _runmake([])
+ 446         self._newestOutput = None
+ 447 
+ 448     def clean(self, forBuild=False):
+ 449         if forBuild:  # Let make handle incremental builds
+ 450             return
+ 451         if exists(_get_jdk_build_dir(self.debugLevel)):
+ 452             _runmake(['clean'])
+ 453         self._newestOutput = None
+ 454 
+ 455 # Backwards compatibility for mx_jvmci:8 API
+ 456 def buildvms(args):
+ 457     _runmultimake(args)
+ 458 
+ 459 def run_vm(args, vm=None, nonZeroIsFatal=True, out=None, err=None, cwd=None, timeout=None, debugLevel=None, vmbuild=None):
+ 460     """run a Java program by executing the java executable in a JVMCI JDK"""
+ 461     jdkTag = mx.get_jdk_option().tag
+ 462     if jdkTag and jdkTag != _JVMCI_JDK_TAG:
+ 463         mx.abort('The "--jdk" option must have the tag "' + _JVMCI_JDK_TAG + '" when running a command requiring a JVMCI VM')
+ 464     jdk = get_jvmci_jdk(debugLevel=debugLevel or _translateLegacyDebugLevel(vmbuild))
+ 465     return jdk.run_java(args, nonZeroIsFatal=nonZeroIsFatal, out=out, err=err, cwd=cwd, timeout=timeout)
+ 466 
+ 467 def _unittest_vm_launcher(vmArgs, mainClass, mainClassArgs):
+ 468     run_vm(vmArgs + [mainClass] + mainClassArgs)
+ 469 
+ 470 mx_unittest.set_vm_launcher('JVMCI VM launcher', _unittest_vm_launcher)
+ 471 
+ 472 def _jvmci_gate_runner(args, tasks):
+ 473     # Build release server VM now so we can run the unit tests
+ 474     with Task('BuildHotSpotJVMCIHosted: release', tasks) as t:
+ 475         if t: _runmultimake(['--jdk-jvm-variants', 'server', '--jdk-debug-levels', 'release'])
+ 476 
+ 477     # Run unit tests in hosted mode
+ 478     with VM(jvmVariant='server', debugLevel='release', jvmciMode='hosted'):
+ 479         with Task('JVMCI UnitTests: hosted-release', tasks) as t:
+ 480             if t: unittest(['--suite', 'jvmci', '--enable-timing', '--verbose', '--fail-fast'])
+ 481 
+ 482     # Build the other VM flavors
+ 483     with Task('BuildHotSpotJVMCIOthers: fastdebug', tasks) as t:
+ 484         if t: _runmultimake(['--jdk-jvm-variants', 'server', '--jdk-debug-levels', 'fastdebug'])
+ 485 
+ 486     with Task('CleanAndBuildIdealGraphVisualizer', tasks, disableJacoco=True) as t:
+ 487         if t and platform.processor() != 'sparc':
+ 488             buildxml = mx._cygpathU2W(join(_suite.dir, 'src', 'share', 'tools', 'IdealGraphVisualizer', 'build.xml'))
+ 489             mx.run(['ant', '-f', buildxml, '-q', 'clean', 'build'], env=_igvBuildEnv())
+ 490 
+ 491 mx_gate.add_gate_runner(_suite, _jvmci_gate_runner)
+ 492 mx_gate.add_gate_argument('-g', '--only-build-jvmci', action='store_false', dest='buildNonJVMCI', help='only build the JVMCI VM')
+ 493 
+ 494 def _igvJdk():
+ 495     v8u20 = mx.VersionSpec("1.8.0_20")
+ 496     v8u40 = mx.VersionSpec("1.8.0_40")
+ 497     v8 = mx.VersionSpec("1.8")
+ 498     def _igvJdkVersionCheck(version):
+ 499         return version &gt;= v8 and (version &lt; v8u20 or version &gt;= v8u40)
+ 500     return mx.get_jdk(_igvJdkVersionCheck, versionDescription='&gt;= 1.8 and &lt; 1.8.0u20 or &gt;= 1.8.0u40', purpose="building &amp; running IGV").home
+ 501 
+ 502 def _igvBuildEnv():
+ 503         # When the http_proxy environment variable is set, convert it to the proxy settings that ant needs
+ 504     env = dict(os.environ)
+ 505     proxy = os.environ.get('http_proxy')
+ 506     if not (proxy is None) and len(proxy) &gt; 0:
+ 507         if '://' in proxy:
+ 508             # Remove the http:// prefix (or any other protocol prefix)
+ 509             proxy = proxy.split('://', 1)[1]
+ 510         # Separate proxy server name and port number
+ 511         proxyName, proxyPort = proxy.split(':', 1)
+ 512         proxyEnv = '-DproxyHost="' + proxyName + '" -DproxyPort=' + proxyPort
+ 513         env['ANT_OPTS'] = proxyEnv
+ 514 
+ 515     env['JAVA_HOME'] = _igvJdk()
+ 516     return env
+ 517 
+ 518 def igv(args):
+ 519     """run the Ideal Graph Visualizer"""
+ 520     logFile = '.ideal_graph_visualizer.log'
+ 521     with open(join(_suite.dir, logFile), 'w') as fp:
+ 522         mx.logv('[Ideal Graph Visualizer log is in ' + fp.name + ']')
+ 523         nbplatform = join(_suite.dir, 'src', 'share', 'tools', 'IdealGraphVisualizer', 'nbplatform')
+ 524 
+ 525         # Remove NetBeans platform if it is earlier than the current supported version
+ 526         if exists(nbplatform):
+ 527             updateTrackingFile = join(nbplatform, 'platform', 'update_tracking', 'org-netbeans-core.xml')
+ 528             if not exists(updateTrackingFile):
+ 529                 mx.log('Could not find \'' + updateTrackingFile + '\', removing NetBeans platform')
+ 530                 shutil.rmtree(nbplatform)
+ 531             else:
+ 532                 dom = xml.dom.minidom.parse(updateTrackingFile)
+ 533                 currentVersion = mx.VersionSpec(dom.getElementsByTagName('module_version')[0].getAttribute('specification_version'))
+ 534                 supportedVersion = mx.VersionSpec('3.43.1')
+ 535                 if currentVersion &lt; supportedVersion:
+ 536                     mx.log('Replacing NetBeans platform version ' + str(currentVersion) + ' with version ' + str(supportedVersion))
+ 537                     shutil.rmtree(nbplatform)
+ 538                 elif supportedVersion &lt; currentVersion:
+ 539                     mx.log('Supported NetBeans version in igv command should be updated to ' + str(currentVersion))
+ 540 
+ 541         if not exists(nbplatform):
+ 542             mx.logv('[This execution may take a while as the NetBeans platform needs to be downloaded]')
+ 543 
+ 544         env = _igvBuildEnv()
+ 545         # make the jar for Batik 1.7 available.
+ 546         env['IGV_BATIK_JAR'] = mx.library('BATIK').get_path(True)
+ 547         if mx.run(['ant', '-f', mx._cygpathU2W(join(_suite.dir, 'src', 'share', 'tools', 'IdealGraphVisualizer', 'build.xml')), '-l', mx._cygpathU2W(fp.name), 'run'], env=env, nonZeroIsFatal=False):
+ 548             mx.abort("IGV ant build &amp; launch failed. Check '" + logFile + "'. You can also try to delete 'src/share/tools/IdealGraphVisualizer/nbplatform'.")
+ 549 
+ 550 def c1visualizer(args):
+ 551     """run the Cl Compiler Visualizer"""
+ 552     libpath = join(_suite.dir, 'lib')
+ 553     if mx.get_os() == 'windows':
+ 554         executable = join(libpath, 'c1visualizer', 'bin', 'c1visualizer.exe')
+ 555     else:
+ 556         executable = join(libpath, 'c1visualizer', 'bin', 'c1visualizer')
+ 557 
+ 558     # Check whether the current C1Visualizer installation is the up-to-date
+ 559     if exists(executable) and not exists(mx.library('C1VISUALIZER_DIST').get_path(resolve=False)):
+ 560         mx.log('Updating C1Visualizer')
+ 561         shutil.rmtree(join(libpath, 'c1visualizer'))
+ 562 
+ 563     archive = mx.library('C1VISUALIZER_DIST').get_path(resolve=True)
+ 564 
+ 565     if not exists(executable):
+ 566         zf = zipfile.ZipFile(archive, 'r')
+ 567         zf.extractall(libpath)
+ 568 
+ 569     if not exists(executable):
+ 570         mx.abort('C1Visualizer binary does not exist: ' + executable)
+ 571 
+ 572     if mx.get_os() != 'windows':
+ 573         # Make sure that execution is allowed. The zip file does not always specfiy that correctly
+ 574         os.chmod(executable, 0777)
+ 575 
+ 576     mx.run([executable])
+ 577 
+ 578 def hsdis(args, copyToDir=None):
+ 579     """download the hsdis library
+ 580 
+ 581     This is needed to support HotSpot's assembly dumping features.
+ 582     By default it downloads the Intel syntax version, use the 'att' argument to install AT&amp;T syntax."""
+ 583     flavor = 'intel'
+ 584     if 'att' in args:
+ 585         flavor = 'att'
+ 586     if mx.get_arch() == "sparcv9":
+ 587         flavor = "sparcv9"
+ 588     lib = mx.add_lib_suffix('hsdis-' + mx.get_arch())
+ 589     path = join(_suite.dir, 'lib', lib)
+ 590 
+ 591     sha1s = {
+ 592         'att/hsdis-amd64.dll' : 'bcbd535a9568b5075ab41e96205e26a2bac64f72',
+ 593         'att/hsdis-amd64.so' : '58919ba085d4ef7a513f25bae75e7e54ee73c049',
+ 594         'intel/hsdis-amd64.dll' : '6a388372cdd5fe905c1a26ced614334e405d1f30',
+ 595         'intel/hsdis-amd64.so' : '844ed9ffed64fe9599638f29a8450c50140e3192',
+ 596         'intel/hsdis-amd64.dylib' : 'fdb13ef0d7d23d93dacaae9c98837bea0d4fc5a2',
+ 597         'sparcv9/hsdis-sparcv9.so': '970640a9af0bd63641f9063c11275b371a59ee60',
+ 598     }
+ 599 
+ 600     flavoredLib = flavor + "/" + lib
+ 601     if flavoredLib not in sha1s:
+ 602         mx.logv("hsdis not supported on this plattform or architecture")
+ 603         return
+ 604 
+ 605     if not exists(path):
+ 606         sha1 = sha1s[flavoredLib]
+ 607         sha1path = path + '.sha1'
+ 608         mx.download_file_with_sha1('hsdis', path, ['https://lafo.ssw.uni-linz.ac.at/pub/hsdis/' + flavoredLib], sha1, sha1path, True, True, sources=False)
+ 609     if copyToDir is not None and exists(copyToDir):
+ 610         shutil.copy(path, copyToDir)
+ 611 
+ 612 def hcfdis(args):
+ 613     """disassemble HexCodeFiles embedded in text files
+ 614 
+ 615     Run a tool over the input files to convert all embedded HexCodeFiles
+ 616     to a disassembled format."""
+ 617 
+ 618     parser = ArgumentParser(prog='mx hcfdis')
+ 619     parser.add_argument('-m', '--map', help='address to symbol map applied to disassembler output')
+ 620     parser.add_argument('files', nargs=REMAINDER, metavar='files...')
+ 621 
+ 622     args = parser.parse_args(args)
+ 623 
+ 624     path = mx.library('HCFDIS').get_path(resolve=True)
+ 625     mx.run_java(['-cp', path, 'com.oracle.max.hcfdis.HexCodeFileDis'] + args.files)
+ 626 
+ 627     if args.map is not None:
+ 628         addressRE = re.compile(r'0[xX]([A-Fa-f0-9]+)')
+ 629         with open(args.map) as fp:
+ 630             lines = fp.read().splitlines()
+ 631         symbols = dict()
+ 632         for l in lines:
+ 633             addressAndSymbol = l.split(' ', 1)
+ 634             if len(addressAndSymbol) == 2:
+ 635                 address, symbol = addressAndSymbol
+ 636                 if address.startswith('0x'):
+ 637                     address = long(address, 16)
+ 638                     symbols[address] = symbol
+ 639         for f in args.files:
+ 640             with open(f) as fp:
+ 641                 lines = fp.read().splitlines()
+ 642             updated = False
+ 643             for i in range(0, len(lines)):
+ 644                 l = lines[i]
+ 645                 for m in addressRE.finditer(l):
+ 646                     sval = m.group(0)
+ 647                     val = long(sval, 16)
+ 648                     sym = symbols.get(val)
+ 649                     if sym:
+ 650                         l = l.replace(sval, sym)
+ 651                         updated = True
+ 652                         lines[i] = l
+ 653             if updated:
+ 654                 mx.log('updating ' + f)
+ 655                 with open('new_' + f, "w") as fp:
+ 656                     for l in lines:
+ 657                         print &gt;&gt; fp, l
+ 658 
+ 659 def jol(args):
+ 660     """Java Object Layout"""
+ 661     joljar = mx.library('JOL_INTERNALS').get_path(resolve=True)
+ 662     candidates = mx.findclass(args, logToConsole=False, matcher=lambda s, classname: s == classname or classname.endswith('.' + s) or classname.endswith('$' + s))
+ 663 
+ 664     if len(candidates) &gt; 0:
+ 665         candidates = mx.select_items(sorted(candidates))
+ 666     else:
+ 667         # mx.findclass can be mistaken, don't give up yet
+ 668         candidates = args
+ 669 
+ 670     run_vm(['-javaagent:' + joljar, '-cp', os.pathsep.join([mx.classpath(), joljar]), "org.openjdk.jol.MainObjectInternals"] + candidates)
+ 671 
+ 672 class JVMCIArchiveParticipant:
+ 673     def __init__(self, dist):
+ 674         self.dist = dist
+ 675 
+ 676     def __opened__(self, arc, srcArc, services):
+ 677         self.services = services
+ 678         self.jvmciServices = services
+ 679         self.arc = arc
+ 680 
+ 681     def __add__(self, arcname, contents):
+ 682         return False
+ 683 
+ 684     def __addsrc__(self, arcname, contents):
+ 685         return False
+ 686 
+ 687     def __closing__(self):
+ 688         pass
+ 689 
+ 690 def _get_openjdk_os():
+ 691     # See: common/autoconf/platform.m4
+ 692     os = mx.get_os()
+ 693     if 'darwin' in os:
+ 694         os = 'macosx'
+ 695     elif 'linux' in os:
+ 696         os = 'linux'
+ 697     elif 'solaris' in os:
+ 698         os = 'solaris'
+ 699     elif 'cygwin' in os or 'mingw' in os:
+ 700         os = 'windows'
+ 701     return os
+ 702 
+ 703 def _get_openjdk_cpu():
+ 704     cpu = mx.get_arch()
+ 705     if cpu == 'amd64':
+ 706         cpu = 'x86_64'
+ 707     elif cpu == 'sparcv9':
+ 708         cpu = 'sparcv9'
+ 709     return cpu
+ 710 
+ 711 def _get_openjdk_os_cpu():
+ 712     return _get_openjdk_os() + '-' + _get_openjdk_cpu()
+ 713 
+ 714 def _get_jdk_build_dir(debugLevel=None):
+ 715     """
+ 716     Gets the directory into which the JDK is built. This directory contains
+ 717     the exploded JDK under jdk/ and the JDK image under images/jdk/.
+ 718     """
+ 719     if debugLevel is None:
+ 720         debugLevel = _vm.debugLevel
+ 721     name = '{}-{}-{}-{}'.format(_get_openjdk_os_cpu(), 'normal', _vm.jvmVariant, debugLevel)
+ 722     return join(dirname(_suite.dir), 'build', name)
+ 723 
+ 724 _jvmci_bootclasspath_prepends = []
+ 725 
+ 726 def _get_hotspot_build_dir(jvmVariant=None, debugLevel=None):
+ 727     """
+ 728     Gets the directory in which a particular HotSpot configuration is built
+ 729     (e.g., &lt;JDK_REPO_ROOT&gt;/build/macosx-x86_64-normal-server-release/hotspot/bsd_amd64_compiler2)
+ 730     """
+ 731     if jvmVariant is None:
+ 732         jvmVariant = _vm.jvmVariant
+ 733 
+ 734     os = mx.get_os()
+ 735     if os == 'darwin':
+ 736         os = 'bsd'
+ 737     arch = mx.get_arch()
+ 738     buildname = {'client': 'compiler1', 'server': 'compiler2'}.get(jvmVariant, jvmVariant)
+ 739 
+ 740     name = '{}_{}_{}'.format(os, arch, buildname)
+ 741     return join(_get_jdk_build_dir(debugLevel=debugLevel), 'hotspot', name)
+ 742 
+ 743 def add_bootclasspath_prepend(dep):
+ 744     assert isinstance(dep, mx.ClasspathDependency)
+ 745     _jvmci_bootclasspath_prepends.append(dep)
+ 746 
+ 747 class JVMCI9JDKConfig(mx.JDKConfig):
+ 748     def __init__(self, debugLevel):
+ 749         self.debugLevel = debugLevel
+ 750         jdkBuildDir = _get_jdk_build_dir(debugLevel)
+ 751         jdkDir = join(jdkBuildDir, 'images', 'jdk') if mx.get_opts().use_jdk_image else join(jdkBuildDir, 'jdk')
+ 752         mx.JDKConfig.__init__(self, jdkDir, tag=_JVMCI_JDK_TAG)
+ 753 
+ 754     def parseVmArgs(self, args, addDefaultArgs=True):
+ 755         args = mx.expand_project_in_args(args, insitu=False)
+ 756         jacocoArgs = mx_gate.get_jacoco_agent_args()
+ 757         if jacocoArgs:
+ 758             args = jacocoArgs + args
+ 759 
+ 760         args = ['-Xbootclasspath/p:' + dep.classpath_repr() for dep in _jvmci_bootclasspath_prepends] + args
+ 761 
+<a name="10" id="anc10"></a>
+
+
+
+
+
+
+
+ 762         jvmciModeArgs = _jvmciModes[_vm.jvmciMode]
+ 763         if jvmciModeArgs:
+ 764             bcpDeps = [jdkDist.dist() for jdkDist in jdkDeployedDists]
+ 765             if bcpDeps:
+ 766                 args = ['-Xbootclasspath/p:' + os.pathsep.join([d.classpath_repr() for d in bcpDeps])] + args
+ 767 
+ 768         # Set the default JVMCI compiler
+ 769         for jdkDist in reversed(jdkDeployedDists):
+ 770             assert isinstance(jdkDist, JvmciJDKDeployedDist), jdkDist
+ 771             if jdkDist._compilers:
+ 772                 jvmciCompiler = jdkDist._compilers[-1]
+ 773                 args = ['-Djvmci.compiler=' + jvmciCompiler] + args
+ 774                 break
+ 775 
+ 776         if '-version' in args:
+ 777             ignoredArgs = args[args.index('-version') + 1:]
+ 778             if  len(ignoredArgs) &gt; 0:
+ 779                 mx.log("Warning: The following options will be ignored by the vm because they come after the '-version' argument: " + ' '.join(ignoredArgs))
+ 780         return self.processArgs(args, addDefaultArgs=addDefaultArgs)
+ 781 
+ 782     # Overrides JDKConfig
+ 783     def run_java(self, args, vm=None, nonZeroIsFatal=True, out=None, err=None, cwd=None, timeout=None, env=None, addDefaultArgs=True):
+ 784         if vm is None:
+ 785             vm = 'server'
+ 786 
+ 787         args = self.parseVmArgs(args, addDefaultArgs=addDefaultArgs)
+ 788 
+ 789         jvmciModeArgs = _jvmciModes[_vm.jvmciMode]
+ 790         cmd = [self.java] + ['-' + vm] + jvmciModeArgs + args
+ 791         return mx.run(cmd, nonZeroIsFatal=nonZeroIsFatal, out=out, err=err, cwd=cwd)
+ 792 
+ 793 """
+ 794 The dict of JVMCI JDKs indexed by debug-level names.
+ 795 """
+ 796 _jvmci_jdks = {}
+ 797 
+ 798 def get_jvmci_jdk(debugLevel=None):
+ 799     """
+ 800     Gets the JVMCI JDK corresponding to 'debugLevel'.
+ 801     """
+ 802     if not debugLevel:
+ 803         debugLevel = _vm.debugLevel
+ 804     jdk = _jvmci_jdks.get(debugLevel)
+ 805     if jdk is None:
+ 806         try:
+ 807             jdk = JVMCI9JDKConfig(debugLevel)
+ 808         except mx.JDKConfigException as e:
+ 809             jdkBuildDir = _get_jdk_build_dir(debugLevel)
+ 810             msg = 'Error with the JDK built into {}:\n{}\nTry (re)building it with: mx --jdk-debug-level={} make'
+ 811             if mx.get_opts().use_jdk_image:
+ 812                 msg += ' images'
+ 813             mx.abort(msg.format(jdkBuildDir, e.message, debugLevel))
+ 814         _jvmci_jdks[debugLevel] = jdk
+ 815     return jdk
+ 816 
+<a name="11" id="anc11"></a><span class="changed"> 817 class JVMCIJDKFactory(mx.JDKFactory):</span>
+ 818     def getJDKConfig(self):
+ 819         jdk = get_jvmci_jdk(_vm.debugLevel)
+ 820         return jdk
+ 821 
+ 822     def description(self):
+ 823         return "JVMCI JDK"
+ 824 
+ 825 mx.update_commands(_suite, {
+ 826     'make': [_runmake, '[args...]', _makehelp],
+ 827     'multimake': [_runmultimake, '[options]'],
+ 828     'c1visualizer' : [c1visualizer, ''],
+ 829     'hsdis': [hsdis, '[att]'],
+ 830     'hcfdis': [hcfdis, ''],
+ 831     'igv' : [igv, ''],
+ 832     'jol' : [jol, ''],
+ 833     'vm': [run_vm, '[-options] class [args...]'],
+ 834 })
+ 835 
+ 836 mx.add_argument('-M', '--jvmci-mode', action='store', choices=sorted(_jvmciModes.viewkeys()), help='the JVM variant type to build/run (default: ' + _vm.jvmciMode + ')')
+ 837 mx.add_argument('--jdk-jvm-variant', '--vm', action='store', choices=_jdkJvmVariants + sorted(_legacyVms.viewkeys()), help='the JVM variant type to build/run (default: ' + _vm.jvmVariant + ')')
+ 838 mx.add_argument('--jdk-debug-level', '--vmbuild', action='store', choices=_jdkDebugLevels + sorted(_legacyVmbuilds.viewkeys()), help='the JDK debug level to build/run (default: ' + _vm.debugLevel + ')')
+ 839 mx.add_argument('-I', '--use-jdk-image', action='store_true', help='build/run JDK image instead of exploded JDK')
+ 840 
+<a name="12" id="anc12"></a>
+
+ 841 def mx_post_parse_cmd_line(opts):
+<a name="13" id="anc13"></a><span class="removed"> 842     mx.addJDKFactory(_JVMCI_JDK_TAG, mx.JavaCompliance('9'), JVMCIJDKFactory())</span>
+ 843     mx.set_java_command_default_jdk_tag(_JVMCI_JDK_TAG)
+ 844 
+ 845     jdkTag = mx.get_jdk_option().tag
+ 846 
+ 847     jvmVariant = None
+ 848     debugLevel = None
+ 849     jvmciMode = None
+ 850 
+ 851     if opts.jdk_jvm_variant is not None:
+ 852         jvmVariant = opts.jdk_jvm_variant
+ 853         if jdkTag and jdkTag != _JVMCI_JDK_TAG:
+ 854             mx.warn('Ignoring "--jdk-jvm-variant" option as "--jdk" tag is not "' + _JVMCI_JDK_TAG + '"')
+ 855 
+ 856     if opts.jdk_debug_level is not None:
+ 857         debugLevel = _translateLegacyDebugLevel(opts.jdk_debug_level)
+ 858         if jdkTag and jdkTag != _JVMCI_JDK_TAG:
+ 859             mx.warn('Ignoring "--jdk-debug-level" option as "--jdk" tag is not "' + _JVMCI_JDK_TAG + '"')
+ 860 
+ 861     if opts.jvmci_mode is not None:
+ 862         jvmciMode = opts.jvmci_mode
+ 863         if jdkTag and jdkTag != _JVMCI_JDK_TAG:
+ 864             mx.warn('Ignoring "--jvmci-mode" option as "--jdk" tag is not "' + _JVMCI_JDK_TAG + '"')
+ 865 
+ 866     _vm.update(jvmVariant, debugLevel, jvmciMode)
+ 867 
+ 868     for jdkDist in jdkDeployedDists:
+ 869         jdkDist.post_parse_cmd_line()
+<a name="14" id="anc14"></a>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<a name="15" id="anc15"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="15" type="hidden" /></form></body></html>

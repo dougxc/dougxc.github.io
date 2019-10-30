@@ -1,0 +1,718 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>Old src/hotspot/share/code/nmethod.hpp</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #ifndef SHARE_VM_CODE_NMETHOD_HPP
+  26 #define SHARE_VM_CODE_NMETHOD_HPP
+  27 
+  28 #include "code/compiledMethod.hpp"
+  29 
+  30 class DepChange;
+  31 class DirectiveSet;
+  32 
+  33 // nmethods (native methods) are the compiled code versions of Java methods.
+  34 //
+  35 // An nmethod contains:
+  36 //  - header                 (the nmethod structure)
+  37 //  [Relocation]
+  38 //  - relocation information
+  39 //  - constant part          (doubles, longs and floats used in nmethod)
+  40 //  - oop table
+  41 //  [Code]
+  42 //  - code body
+  43 //  - exception handler
+  44 //  - stub code
+  45 //  [Debugging information]
+  46 //  - oop array
+  47 //  - data array
+  48 //  - pcs
+  49 //  [Exception handler table]
+  50 //  - handler entry point array
+  51 //  [Implicit Null Pointer exception table]
+  52 //  - implicit null table array
+  53 
+  54 class nmethod : public CompiledMethod {
+  55   friend class VMStructs;
+  56   friend class JVMCIVMStructs;
+  57   friend class NMethodSweeper;
+  58   friend class CodeCache;  // scavengable oops
+  59  private:
+  60 
+  61   // Shared fields for all nmethod's
+  62   int       _entry_bci;        // != InvocationEntryBci if this nmethod is an on-stack replacement method
+  63   jmethodID _jmethod_id;       // Cache of method()-&gt;jmethod_id()
+  64 
+  65 #if INCLUDE_JVMCI
+  66   // Needed to keep nmethods alive that are not the default nmethod for the associated Method.
+  67   oop       _jvmci_installed_code;
+  68   oop       _speculation_log;
+  69 #endif
+  70 
+  71   // To support simple linked-list chaining of nmethods:
+  72   nmethod*  _osr_link;         // from InstanceKlass::osr_nmethods_head
+  73 
+  74   static nmethod* volatile _oops_do_mark_nmethods;
+  75   nmethod*        volatile _oops_do_mark_link;
+  76 
+  77   // offsets for entry points
+  78   address _entry_point;                      // entry point with class check
+  79   address _verified_entry_point;             // entry point without class check
+  80   address _osr_entry_point;                  // entry point for on stack replacement
+  81 
+  82   // Offsets for different nmethod parts
+  83   int  _exception_offset;
+  84   // Offset of the unwind handler if it exists
+  85   int _unwind_handler_offset;
+  86 
+  87   int _consts_offset;
+  88   int _stub_offset;
+  89   int _oops_offset;                       // offset to where embedded oop table begins (inside data)
+  90   int _metadata_offset;                   // embedded meta data table
+  91   int _scopes_data_offset;
+  92   int _scopes_pcs_offset;
+  93   int _dependencies_offset;
+  94   int _handler_table_offset;
+  95   int _nul_chk_table_offset;
+  96   int _nmethod_end_offset;
+  97 
+  98   int code_offset() const { return (address) code_begin() - header_begin(); }
+  99 
+ 100   // location in frame (offset for sp) that deopt can store the original
+ 101   // pc during a deopt.
+ 102   int _orig_pc_offset;
+ 103 
+ 104   int _compile_id;                           // which compilation made this nmethod
+ 105   int _comp_level;                           // compilation level
+ 106 
+ 107   // protected by CodeCache_lock
+ 108   bool _has_flushed_dependencies;            // Used for maintenance of dependencies (CodeCache_lock)
+ 109 
+ 110   // used by jvmti to track if an unload event has been posted for this nmethod.
+ 111   bool _unload_reported;
+ 112 
+ 113   // Protected by Patching_lock
+ 114   volatile unsigned char _state;             // {in_use, not_entrant, zombie, unloaded}
+ 115 
+ 116 #ifdef ASSERT
+ 117   bool _oops_are_stale;  // indicates that it's no longer safe to access oops section
+ 118 #endif
+ 119 
+ 120   jbyte _scavenge_root_state;
+ 121 
+ 122 #if INCLUDE_RTM_OPT
+ 123   // RTM state at compile time. Used during deoptimization to decide
+ 124   // whether to restart collecting RTM locking abort statistic again.
+ 125   RTMState _rtm_state;
+ 126 #endif
+ 127 
+ 128   // Nmethod Flushing lock. If non-zero, then the nmethod is not removed
+ 129   // and is not made into a zombie. However, once the nmethod is made into
+ 130   // a zombie, it will be locked one final time if CompiledMethodUnload
+ 131   // event processing needs to be done.
+ 132   volatile jint _lock_count;
+ 133 
+ 134   // not_entrant method removal. Each mark_sweep pass will update
+ 135   // this mark to current sweep invocation count if it is seen on the
+ 136   // stack.  An not_entrant method can be removed when there are no
+ 137   // more activations, i.e., when the _stack_traversal_mark is less than
+ 138   // current sweep traversal index.
+ 139   volatile long _stack_traversal_mark;
+ 140 
+ 141   // The _hotness_counter indicates the hotness of a method. The higher
+ 142   // the value the hotter the method. The hotness counter of a nmethod is
+ 143   // set to [(ReservedCodeCacheSize / (1024 * 1024)) * 2] each time the method
+ 144   // is active while stack scanning (mark_active_nmethods()). The hotness
+ 145   // counter is decreased (by 1) while sweeping.
+ 146   int _hotness_counter;
+ 147 
+ 148   // These are used for compiled synchronized native methods to
+ 149   // locate the owner and stack slot for the BasicLock so that we can
+ 150   // properly revoke the bias of the owner if necessary. They are
+ 151   // needed because there is no debug information for compiled native
+ 152   // wrappers and the oop maps are insufficient to allow
+ 153   // frame::retrieve_receiver() to work. Currently they are expected
+ 154   // to be byte offsets from the Java stack pointer for maximum code
+ 155   // sharing between platforms. Note that currently biased locking
+ 156   // will never cause Class instances to be biased but this code
+ 157   // handles the static synchronized case as well.
+ 158   // JVMTI's GetLocalInstance() also uses these offsets to find the receiver
+ 159   // for non-static native wrapper frames.
+ 160   ByteSize _native_receiver_sp_offset;
+ 161   ByteSize _native_basic_lock_sp_offset;
+ 162 
+ 163   friend class nmethodLocker;
+ 164 
+ 165   // For native wrappers
+ 166   nmethod(Method* method,
+ 167           CompilerType type,
+ 168           int nmethod_size,
+ 169           int compile_id,
+ 170           CodeOffsets* offsets,
+ 171           CodeBuffer *code_buffer,
+ 172           int frame_size,
+ 173           ByteSize basic_lock_owner_sp_offset, /* synchronized natives only */
+ 174           ByteSize basic_lock_sp_offset,       /* synchronized natives only */
+ 175           OopMapSet* oop_maps);
+ 176 
+ 177   // Creation support
+ 178   nmethod(Method* method,
+ 179           CompilerType type,
+ 180           int nmethod_size,
+ 181           int compile_id,
+ 182           int entry_bci,
+ 183           CodeOffsets* offsets,
+ 184           int orig_pc_offset,
+ 185           DebugInformationRecorder *recorder,
+ 186           Dependencies* dependencies,
+ 187           CodeBuffer *code_buffer,
+ 188           int frame_size,
+ 189           OopMapSet* oop_maps,
+ 190           ExceptionHandlerTable* handler_table,
+ 191           ImplicitExceptionTable* nul_chk_table,
+ 192           AbstractCompiler* compiler,
+ 193           int comp_level
+ 194 #if INCLUDE_JVMCI
+ 195           , Handle installed_code,
+ 196           Handle speculation_log
+ 197 #endif
+ 198           );
+ 199 
+ 200   // helper methods
+ 201   void* operator new(size_t size, int nmethod_size, int comp_level) throw();
+ 202 
+ 203   const char* reloc_string_for(u_char* begin, u_char* end);
+ 204   // Returns true if this thread changed the state of the nmethod or
+ 205   // false if another thread performed the transition.
+ 206   bool make_not_entrant_or_zombie(unsigned int state);
+ 207   bool make_entrant() { Unimplemented(); return false; }
+ 208   void inc_decompile_count();
+ 209 
+ 210   // Inform external interfaces that a compiled method has been unloaded
+ 211   void post_compiled_method_unload();
+ 212 
+ 213   // Initailize fields to their default values
+ 214   void init_defaults();
+ 215 
+ 216   // Offsets
+ 217   int content_offset() const                  { return content_begin() - header_begin(); }
+ 218   int data_offset() const                     { return _data_offset; }
+ 219 
+ 220   address header_end() const                  { return (address)    header_begin() + header_size(); }
+ 221 
+ 222  public:
+ 223   // create nmethod with entry_bci
+ 224   static nmethod* new_nmethod(const methodHandle&amp; method,
+ 225                               int compile_id,
+ 226                               int entry_bci,
+ 227                               CodeOffsets* offsets,
+ 228                               int orig_pc_offset,
+ 229                               DebugInformationRecorder* recorder,
+ 230                               Dependencies* dependencies,
+ 231                               CodeBuffer *code_buffer,
+ 232                               int frame_size,
+ 233                               OopMapSet* oop_maps,
+ 234                               ExceptionHandlerTable* handler_table,
+ 235                               ImplicitExceptionTable* nul_chk_table,
+ 236                               AbstractCompiler* compiler,
+ 237                               int comp_level
+ 238 #if INCLUDE_JVMCI
+ 239                               , Handle installed_code = Handle(),
+ 240                               Handle speculation_log = Handle()
+ 241 #endif
+ 242   );
+ 243 
+ 244   static nmethod* new_native_nmethod(const methodHandle&amp; method,
+ 245                                      int compile_id,
+ 246                                      CodeBuffer *code_buffer,
+ 247                                      int vep_offset,
+ 248                                      int frame_complete,
+ 249                                      int frame_size,
+ 250                                      ByteSize receiver_sp_offset,
+ 251                                      ByteSize basic_lock_sp_offset,
+ 252                                      OopMapSet* oop_maps);
+ 253 
+ 254   // type info
+ 255   bool is_nmethod() const                         { return true; }
+ 256   bool is_osr_method() const                      { return _entry_bci != InvocationEntryBci; }
+ 257 
+ 258   // boundaries for different parts
+ 259   address consts_begin          () const          { return           header_begin() + _consts_offset        ; }
+ 260   address consts_end            () const          { return           code_begin()                           ; }
+ 261   address stub_begin            () const          { return           header_begin() + _stub_offset          ; }
+ 262   address stub_end              () const          { return           header_begin() + _oops_offset          ; }
+ 263   address exception_begin       () const          { return           header_begin() + _exception_offset     ; }
+ 264   address unwind_handler_begin  () const          { return _unwind_handler_offset != -1 ? (header_begin() + _unwind_handler_offset) : NULL; }
+ 265   oop*    oops_begin            () const          { return (oop*)   (header_begin() + _oops_offset)         ; }
+ 266   oop*    oops_end              () const          { return (oop*)   (header_begin() + _metadata_offset)     ; }
+ 267 
+ 268   Metadata** metadata_begin   () const            { return (Metadata**)  (header_begin() + _metadata_offset)     ; }
+ 269   Metadata** metadata_end     () const            { return (Metadata**)  _scopes_data_begin; }
+ 270 
+ 271   address scopes_data_end       () const          { return           header_begin() + _scopes_pcs_offset    ; }
+ 272   PcDesc* scopes_pcs_begin      () const          { return (PcDesc*)(header_begin() + _scopes_pcs_offset   ); }
+ 273   PcDesc* scopes_pcs_end        () const          { return (PcDesc*)(header_begin() + _dependencies_offset) ; }
+ 274   address dependencies_begin    () const          { return           header_begin() + _dependencies_offset  ; }
+ 275   address dependencies_end      () const          { return           header_begin() + _handler_table_offset ; }
+ 276   address handler_table_begin   () const          { return           header_begin() + _handler_table_offset ; }
+ 277   address handler_table_end     () const          { return           header_begin() + _nul_chk_table_offset ; }
+ 278   address nul_chk_table_begin   () const          { return           header_begin() + _nul_chk_table_offset ; }
+ 279   address nul_chk_table_end     () const          { return           header_begin() + _nmethod_end_offset   ; }
+ 280 
+ 281   // Sizes
+ 282   int oops_size         () const                  { return (address)  oops_end         () - (address)  oops_begin         (); }
+ 283   int metadata_size     () const                  { return (address)  metadata_end     () - (address)  metadata_begin     (); }
+ 284   int dependencies_size () const                  { return            dependencies_end () -            dependencies_begin (); }
+ 285 
+ 286   int     oops_count() const { assert(oops_size() % oopSize == 0, "");  return (oops_size() / oopSize) + 1; }
+ 287   int metadata_count() const { assert(metadata_size() % wordSize == 0, ""); return (metadata_size() / wordSize) + 1; }
+ 288 
+ 289   int total_size        () const;
+ 290 
+ 291   void dec_hotness_counter()        { _hotness_counter--; }
+ 292   void set_hotness_counter(int val) { _hotness_counter = val; }
+ 293   int  hotness_counter() const      { return _hotness_counter; }
+ 294 
+ 295   // Containment
+ 296   bool oops_contains         (oop*    addr) const { return oops_begin         () &lt;= addr &amp;&amp; addr &lt; oops_end         (); }
+ 297   bool metadata_contains     (Metadata** addr) const   { return metadata_begin     () &lt;= addr &amp;&amp; addr &lt; metadata_end     (); }
+ 298   bool scopes_data_contains  (address addr) const { return scopes_data_begin  () &lt;= addr &amp;&amp; addr &lt; scopes_data_end  (); }
+ 299   bool scopes_pcs_contains   (PcDesc* addr) const { return scopes_pcs_begin   () &lt;= addr &amp;&amp; addr &lt; scopes_pcs_end   (); }
+ 300 
+ 301   // entry points
+ 302   address entry_point() const                     { return _entry_point;             } // normal entry point
+ 303   address verified_entry_point() const            { return _verified_entry_point;    } // if klass is correct
+ 304 
+ 305   // flag accessing and manipulation
+ 306   bool  is_in_use() const                         { return _state == in_use; }
+ 307   bool  is_alive() const                          { unsigned char s = _state; return s &lt; zombie; }
+ 308   bool  is_not_entrant() const                    { return _state == not_entrant; }
+ 309   bool  is_zombie() const                         { return _state == zombie; }
+ 310   bool  is_unloaded() const                       { return _state == unloaded; }
+ 311 
+ 312 #if INCLUDE_RTM_OPT
+ 313   // rtm state accessing and manipulating
+ 314   RTMState  rtm_state() const                     { return _rtm_state; }
+ 315   void set_rtm_state(RTMState state)              { _rtm_state = state; }
+ 316 #endif
+ 317 
+ 318   // Make the nmethod non entrant. The nmethod will continue to be
+ 319   // alive.  It is used when an uncommon trap happens.  Returns true
+ 320   // if this thread changed the state of the nmethod or false if
+ 321   // another thread performed the transition.
+ 322   bool  make_not_entrant() {
+ 323     assert(!method()-&gt;is_method_handle_intrinsic(), "Cannot make MH intrinsic not entrant");
+ 324     return make_not_entrant_or_zombie(not_entrant);
+ 325   }
+ 326   bool  make_not_used()    { return make_not_entrant(); }
+ 327   bool  make_zombie()      { return make_not_entrant_or_zombie(zombie); }
+ 328 
+ 329   // used by jvmti to track if the unload event has been reported
+ 330   bool  unload_reported()                         { return _unload_reported; }
+ 331   void  set_unload_reported()                     { _unload_reported = true; }
+ 332 
+ 333   int get_state() const {
+ 334     return _state;
+ 335   }
+ 336 
+ 337   void  make_unloaded(BoolObjectClosure* is_alive, oop cause);
+ 338 
+ 339   bool has_dependencies()                         { return dependencies_size() != 0; }
+ 340   void flush_dependencies(BoolObjectClosure* is_alive);
+ 341   bool has_flushed_dependencies()                 { return _has_flushed_dependencies; }
+ 342   void set_has_flushed_dependencies()             {
+ 343     assert(!has_flushed_dependencies(), "should only happen once");
+ 344     _has_flushed_dependencies = 1;
+ 345   }
+ 346 
+ 347   int   comp_level() const                        { return _comp_level; }
+ 348 
+ 349   // Support for oops in scopes and relocs:
+ 350   // Note: index 0 is reserved for null.
+ 351   oop   oop_at(int index) const                   { return index == 0 ? (oop) NULL: *oop_addr_at(index); }
+ 352   oop*  oop_addr_at(int index) const {  // for GC
+ 353     // relocation indexes are biased by 1 (because 0 is reserved)
+ 354     assert(index &gt; 0 &amp;&amp; index &lt;= oops_count(), "must be a valid non-zero index");
+ 355     assert(!_oops_are_stale, "oops are stale");
+ 356     return &amp;oops_begin()[index - 1];
+ 357   }
+ 358 
+ 359   // Support for meta data in scopes and relocs:
+ 360   // Note: index 0 is reserved for null.
+ 361   Metadata*     metadata_at(int index) const      { return index == 0 ? NULL: *metadata_addr_at(index); }
+ 362   Metadata**  metadata_addr_at(int index) const {  // for GC
+ 363     // relocation indexes are biased by 1 (because 0 is reserved)
+ 364     assert(index &gt; 0 &amp;&amp; index &lt;= metadata_count(), "must be a valid non-zero index");
+ 365     return &amp;metadata_begin()[index - 1];
+ 366   }
+ 367 
+ 368   void copy_values(GrowableArray&lt;jobject&gt;* oops);
+ 369   void copy_values(GrowableArray&lt;Metadata*&gt;* metadata);
+ 370 
+ 371   // Relocation support
+ 372 private:
+ 373   void fix_oop_relocations(address begin, address end, bool initialize_immediates);
+ 374   inline void initialize_immediate_oop(oop* dest, jobject handle);
+ 375 
+ 376 public:
+ 377   void fix_oop_relocations(address begin, address end) { fix_oop_relocations(begin, end, false); }
+ 378   void fix_oop_relocations()                           { fix_oop_relocations(NULL, NULL, false); }
+ 379 
+ 380   // Scavengable oop support
+ 381   bool  on_scavenge_root_list() const                  { return (_scavenge_root_state &amp; 1) != 0; }
+ 382  protected:
+ 383   enum { sl_on_list = 0x01, sl_marked = 0x10 };
+ 384   void  set_on_scavenge_root_list()                    { _scavenge_root_state = sl_on_list; }
+ 385   void  clear_on_scavenge_root_list()                  { _scavenge_root_state = 0; }
+ 386   // assertion-checking and pruning logic uses the bits of _scavenge_root_state
+ 387 #ifndef PRODUCT
+ 388   void  set_scavenge_root_marked()                     { _scavenge_root_state |= sl_marked; }
+ 389   void  clear_scavenge_root_marked()                   { _scavenge_root_state &amp;= ~sl_marked; }
+ 390   bool  scavenge_root_not_marked()                     { return (_scavenge_root_state &amp;~ sl_on_list) == 0; }
+ 391   // N.B. there is no positive marked query, and we only use the not_marked query for asserts.
+ 392 #endif //PRODUCT
+ 393   nmethod* scavenge_root_link() const                  { return _scavenge_root_link; }
+ 394   void     set_scavenge_root_link(nmethod *n)          { _scavenge_root_link = n; }
+ 395 
+ 396  public:
+ 397 
+ 398   // Sweeper support
+ 399   long  stack_traversal_mark()                    { return _stack_traversal_mark; }
+ 400   void  set_stack_traversal_mark(long l)          { _stack_traversal_mark = l; }
+ 401 
+ 402   // implicit exceptions support
+ 403   address continuation_for_implicit_exception(address pc);
+ 404 
+ 405   // On-stack replacement support
+ 406   int   osr_entry_bci() const                     { assert(is_osr_method(), "wrong kind of nmethod"); return _entry_bci; }
+ 407   address  osr_entry() const                      { assert(is_osr_method(), "wrong kind of nmethod"); return _osr_entry_point; }
+ 408   void  invalidate_osr_method();
+ 409   nmethod* osr_link() const                       { return _osr_link; }
+ 410   void     set_osr_link(nmethod *n)               { _osr_link = n; }
+ 411 
+ 412   // Verify calls to dead methods have been cleaned.
+ 413   void verify_clean_inline_caches();
+ 414 
+ 415   // unlink and deallocate this nmethod
+ 416   // Only NMethodSweeper class is expected to use this. NMethodSweeper is not
+ 417   // expected to use any other private methods/data in this class.
+ 418 
+ 419  protected:
+ 420   void flush();
+ 421 
+ 422  public:
+ 423   // When true is returned, it is unsafe to remove this nmethod even if
+ 424   // it is a zombie, since the VM or the ServiceThread might still be
+ 425   // using it.
+ 426   bool is_locked_by_vm() const                    { return _lock_count &gt;0; }
+ 427 
+ 428   // See comment at definition of _last_seen_on_stack
+ 429   void mark_as_seen_on_stack();
+ 430   bool can_convert_to_zombie();
+ 431 
+ 432   // Evolution support. We make old (discarded) compiled methods point to new Method*s.
+ 433   void set_method(Method* method) { _method = method; }
+ 434 
+ 435 #if INCLUDE_JVMCI
+ 436   oop jvmci_installed_code() { return _jvmci_installed_code ; }
+ 437   char* jvmci_installed_code_name(char* buf, size_t buflen);
+ 438 
+ 439   // Update the state of any InstalledCode instance associated with
+ 440   // this nmethod based on the current value of _state.
+ 441   void maybe_invalidate_installed_code();
+ 442 
+ 443   // Helper function to invalidate InstalledCode instances
+ 444   static void invalidate_installed_code(Handle installed_code, TRAPS);
+ 445 
+ 446   oop speculation_log() { return _speculation_log ; }
+ 447 
+ 448  private:
+ 449   void clear_jvmci_installed_code();
+ 450 
+ 451  public:
+ 452 #endif
+ 453 
+ 454  protected:
+ 455   virtual bool do_unloading_oops(address low_boundary, BoolObjectClosure* is_alive, bool unloading_occurred);
+ 456 #if INCLUDE_JVMCI
+ 457   virtual bool do_unloading_jvmci(BoolObjectClosure* is_alive, bool unloading_occurred);
+ 458 #endif
+ 459 
+ 460  private:
+ 461   bool do_unloading_scopes(BoolObjectClosure* is_alive, bool unloading_occurred);
+ 462   //  Unload a nmethod if the *root object is dead.
+ 463   bool can_unload(BoolObjectClosure* is_alive, oop* root, bool unloading_occurred);
+ 464   bool unload_if_dead_at(RelocIterator *iter_at_oop, BoolObjectClosure* is_alive, bool unloading_occurred);
+ 465 
+ 466  public:
+ 467   void oops_do(OopClosure* f) { oops_do(f, false); }
+ 468   void oops_do(OopClosure* f, bool allow_zombie);
+ 469   bool detect_scavenge_root_oops();
+ 470   void verify_scavenge_root_oops() PRODUCT_RETURN;
+ 471 
+ 472   bool test_set_oops_do_mark();
+ 473   static void oops_do_marking_prologue();
+ 474   static void oops_do_marking_epilogue();
+ 475   static bool oops_do_marking_is_active() { return _oops_do_mark_nmethods != NULL; }
+ 476   bool test_oops_do_mark() { return _oops_do_mark_link != NULL; }
+ 477 
+ 478  private:
+ 479   ScopeDesc* scope_desc_in(address begin, address end);
+ 480 
+ 481   address* orig_pc_addr(const frame* fr) { return (address*) ((address)fr-&gt;unextended_sp() + _orig_pc_offset); }
+ 482 
+ 483  public:
+ 484   // copying of debugging information
+ 485   void copy_scopes_pcs(PcDesc* pcs, int count);
+ 486   void copy_scopes_data(address buffer, int size);
+ 487 
+ 488   // Accessor/mutator for the original pc of a frame before a frame was deopted.
+ 489   address get_original_pc(const frame* fr) { return *orig_pc_addr(fr); }
+ 490   void    set_original_pc(const frame* fr, address pc) { *orig_pc_addr(fr) = pc; }
+ 491 
+ 492   // jvmti support:
+ 493   void post_compiled_method_load_event();
+ 494   jmethodID get_and_cache_jmethod_id();
+ 495 
+ 496   // verify operations
+ 497   void verify();
+ 498   void verify_scopes();
+ 499   void verify_interrupt_point(address interrupt_point);
+ 500 
+ 501   // printing support
+ 502   void print()                          const;
+ 503   void print_relocations()                        PRODUCT_RETURN;
+ 504   void print_pcs()                                PRODUCT_RETURN;
+ 505   void print_scopes()                             PRODUCT_RETURN;
+ 506   void print_dependencies()                       PRODUCT_RETURN;
+ 507   void print_value_on(outputStream* st) const     PRODUCT_RETURN;
+ 508   void print_calls(outputStream* st)              PRODUCT_RETURN;
+ 509   void print_handler_table()                      PRODUCT_RETURN;
+ 510   void print_nul_chk_table()                      PRODUCT_RETURN;
+ 511   void print_recorded_oops()                      PRODUCT_RETURN;
+ 512   void print_recorded_metadata()                  PRODUCT_RETURN;
+ 513 
+ 514   void maybe_print_nmethod(DirectiveSet* directive);
+ 515   void print_nmethod(bool print_code);
+ 516 
+ 517   // need to re-define this from CodeBlob else the overload hides it
+ 518   virtual void print_on(outputStream* st) const { CodeBlob::print_on(st); }
+ 519   void print_on(outputStream* st, const char* msg) const;
+ 520 
+ 521   // Logging
+ 522   void log_identity(xmlStream* log) const;
+ 523   void log_new_nmethod() const;
+ 524   void log_state_change() const;
+ 525 
+ 526   // Prints block-level comments, including nmethod specific block labels:
+ 527   virtual void print_block_comment(outputStream* stream, address block_begin) const {
+ 528     print_nmethod_labels(stream, block_begin);
+ 529     CodeBlob::print_block_comment(stream, block_begin);
+ 530   }
+ 531   void print_nmethod_labels(outputStream* stream, address block_begin) const;
+ 532 
+ 533   // Prints a comment for one native instruction (reloc info, pc desc)
+ 534   void print_code_comment_on(outputStream* st, int column, address begin, address end);
+ 535   static void print_statistics() PRODUCT_RETURN;
+ 536 
+ 537   // Compiler task identification.  Note that all OSR methods
+ 538   // are numbered in an independent sequence if CICountOSR is true,
+ 539   // and native method wrappers are also numbered independently if
+ 540   // CICountNative is true.
+ 541   virtual int compile_id() const { return _compile_id; }
+ 542   const char* compile_kind() const;
+ 543 
+ 544   // tells if any of this method's dependencies have been invalidated
+ 545   // (this is expensive!)
+ 546   static void check_all_dependencies(DepChange&amp; changes);
+ 547 
+ 548   // tells if this compiled method is dependent on the given changes,
+ 549   // and the changes have invalidated it
+ 550   bool check_dependency_on(DepChange&amp; changes);
+ 551 
+ 552   // Evolution support. Tells if this compiled method is dependent on any of
+ 553   // methods m() of class dependee, such that if m() in dependee is replaced,
+ 554   // this compiled method will have to be deoptimized.
+ 555   bool is_evol_dependent_on(Klass* dependee);
+ 556 
+ 557   // Fast breakpoint support. Tells if this compiled method is
+ 558   // dependent on the given method. Returns true if this nmethod
+ 559   // corresponds to the given method as well.
+ 560   virtual bool is_dependent_on_method(Method* dependee);
+ 561 
+ 562   // is it ok to patch at address?
+ 563   bool is_patchable_at(address instr_address);
+ 564 
+ 565   // UseBiasedLocking support
+ 566   ByteSize native_receiver_sp_offset() {
+ 567     return _native_receiver_sp_offset;
+ 568   }
+ 569   ByteSize native_basic_lock_sp_offset() {
+ 570     return _native_basic_lock_sp_offset;
+ 571   }
+ 572 
+ 573   // support for code generation
+ 574   static int verified_entry_point_offset()        { return offset_of(nmethod, _verified_entry_point); }
+ 575   static int osr_entry_point_offset()             { return offset_of(nmethod, _osr_entry_point); }
+ 576   static int state_offset()                       { return offset_of(nmethod, _state); }
+ 577 
+ 578   virtual void metadata_do(void f(Metadata*));
+ 579 
+ 580   NativeCallWrapper* call_wrapper_at(address call) const;
+ 581   NativeCallWrapper* call_wrapper_before(address return_pc) const;
+ 582   address call_instruction_address(address pc) const;
+ 583 
+ 584   virtual CompiledStaticCall* compiledStaticCall_at(Relocation* call_site) const;
+ 585   virtual CompiledStaticCall* compiledStaticCall_at(address addr) const;
+ 586   virtual CompiledStaticCall* compiledStaticCall_before(address addr) const;
+ 587 };
+ 588 
+ 589 // Locks an nmethod so its code will not get removed and it will not
+ 590 // be made into a zombie, even if it is a not_entrant method. After the
+ 591 // nmethod becomes a zombie, if CompiledMethodUnload event processing
+ 592 // needs to be done, then lock_nmethod() is used directly to keep the
+ 593 // generated code from being reused too early.
+ 594 class nmethodLocker : public StackObj {
+ 595   CompiledMethod* _nm;
+ 596 
+ 597  public:
+ 598 
+ 599   // note: nm can be NULL
+ 600   // Only JvmtiDeferredEvent::compiled_method_unload_event()
+ 601   // should pass zombie_ok == true.
+ 602   static void lock_nmethod(CompiledMethod* nm, bool zombie_ok = false);
+ 603   static void unlock_nmethod(CompiledMethod* nm); // (ditto)
+ 604 
+ 605   nmethodLocker(address pc); // derive nm from pc
+ 606   nmethodLocker(nmethod *nm) { _nm = nm; lock_nmethod(_nm); }
+ 607   nmethodLocker(CompiledMethod *nm) {
+ 608     _nm = nm;
+ 609     lock(_nm);
+ 610   }
+ 611 
+ 612   static void lock(CompiledMethod* method) {
+ 613     if (method == NULL) return;
+ 614     lock_nmethod(method);
+ 615   }
+ 616 
+ 617   static void unlock(CompiledMethod* method) {
+ 618     if (method == NULL) return;
+ 619     unlock_nmethod(method);
+ 620   }
+ 621 
+ 622   nmethodLocker() { _nm = NULL; }
+ 623   ~nmethodLocker() {
+ 624     unlock(_nm);
+ 625   }
+ 626 
+ 627   CompiledMethod* code() { return _nm; }
+ 628   void set_code(CompiledMethod* new_nm) {
+ 629     unlock(_nm);   // note:  This works even if _nm==new_nm.
+ 630     _nm = new_nm;
+ 631     lock(_nm);
+ 632   }
+ 633 };
+ 634 
+ 635 #endif // SHARE_VM_CODE_NMETHOD_HPP
+</pre></body></html>

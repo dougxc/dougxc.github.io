@@ -1,0 +1,1005 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>Old graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotBackend.java</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2013, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package com.oracle.graal.hotspot.hsail;
+  24 
+  25 import static com.oracle.graal.api.code.CallingConvention.Type.*;
+  26 import static com.oracle.graal.api.code.CodeUtil.*;
+  27 import static com.oracle.graal.api.code.ValueUtil.*;
+  28 import static com.oracle.graal.api.meta.LocationIdentity.*;
+  29 import static com.oracle.graal.compiler.GraalCompiler.*;
+  30 
+  31 import java.lang.reflect.*;
+  32 import java.util.*;
+  33 
+  34 import com.amd.okra.*;
+  35 import com.oracle.graal.api.code.*;
+  36 import com.oracle.graal.api.code.Assumptions.Assumption;
+  37 import com.oracle.graal.api.code.CallingConvention.Type;
+  38 import com.oracle.graal.api.code.CompilationResult.Call;
+  39 import com.oracle.graal.api.code.CompilationResult.CodeAnnotation;
+  40 import com.oracle.graal.api.code.CompilationResult.DataPatch;
+  41 import com.oracle.graal.api.code.CompilationResult.ExceptionHandler;
+  42 import com.oracle.graal.api.code.CompilationResult.Infopoint;
+  43 import com.oracle.graal.api.code.CompilationResult.Mark;
+  44 import com.oracle.graal.api.meta.*;
+  45 import com.oracle.graal.asm.*;
+  46 import com.oracle.graal.asm.hsail.*;
+  47 import com.oracle.graal.compiler.gen.*;
+  48 import com.oracle.graal.debug.*;
+  49 import com.oracle.graal.debug.Debug.Scope;
+  50 import com.oracle.graal.gpu.*;
+  51 import com.oracle.graal.graph.*;
+  52 import com.oracle.graal.hotspot.*;
+  53 import com.oracle.graal.hotspot.bridge.CompilerToVM.CodeInstallResult;
+  54 import com.oracle.graal.hotspot.meta.*;
+  55 import com.oracle.graal.hotspot.nodes.*;
+  56 import com.oracle.graal.hsail.*;
+  57 import com.oracle.graal.java.*;
+  58 import com.oracle.graal.lir.*;
+  59 import com.oracle.graal.lir.asm.*;
+  60 import com.oracle.graal.lir.hsail.*;
+  61 import com.oracle.graal.lir.hsail.HSAILControlFlow.DeoptimizeOp;
+  62 import com.oracle.graal.nodes.*;
+  63 import com.oracle.graal.nodes.StructuredGraph.GuardsStage;
+  64 import com.oracle.graal.nodes.calc.*;
+  65 import com.oracle.graal.nodes.extended.*;
+  66 import com.oracle.graal.nodes.java.*;
+  67 import com.oracle.graal.nodes.type.*;
+  68 import com.oracle.graal.phases.*;
+  69 import com.oracle.graal.phases.tiers.*;
+  70 
+  71 /**
+  72  * HSAIL specific backend.
+  73  */
+  74 public class HSAILHotSpotBackend extends HotSpotBackend {
+  75 
+  76     private Map&lt;String, String&gt; paramTypeMap = new HashMap&lt;&gt;();
+  77     private final boolean deviceInitialized;
+  78     // TODO: get maximum Concurrency from okra
+  79     private int maxDeoptIndex = 8 * 40 * 64;   // see gpu_hsail.hpp
+  80 
+  81     public HSAILHotSpotBackend(HotSpotGraalRuntime runtime, HotSpotProviders providers) {
+  82         super(runtime, providers);
+  83         paramTypeMap.put("HotSpotResolvedPrimitiveType&lt;int&gt;", "s32");
+  84         paramTypeMap.put("HotSpotResolvedPrimitiveType&lt;float&gt;", "f32");
+  85         paramTypeMap.put("HotSpotResolvedPrimitiveType&lt;double&gt;", "f64");
+  86         paramTypeMap.put("HotSpotResolvedPrimitiveType&lt;long&gt;", "s64");
+  87 
+  88         // The order of the conjunction below is important: the OkraUtil
+  89         // call may provision the native library required by the initialize() call
+  90         deviceInitialized = OkraUtil.okraLibExists() &amp;&amp; initialize();
+  91     }
+  92 
+  93     @Override
+  94     public boolean shouldAllocateRegisters() {
+  95         return true;
+  96     }
+  97 
+  98     /**
+  99      * Initializes the GPU device.
+ 100      *
+ 101      * @return whether or not initialization was successful
+ 102      */
+ 103     private static native boolean initialize();
+ 104 
+ 105     /**
+ 106      * Control how many threads run on simulator (used only from junit tests).
+ 107      */
+ 108     public void setSimulatorSingleThreaded() {
+ 109         String simThrEnv = System.getenv("SIMTHREADS");
+ 110         if (simThrEnv == null || !simThrEnv.equals("1")) {
+ 111             setSimulatorSingleThreaded0();
+ 112         }
+ 113     }
+ 114 
+ 115     private static native void setSimulatorSingleThreaded0();
+ 116 
+ 117     /**
+ 118      * Determines if the GPU device (or simulator) is available and initialized.
+ 119      */
+ 120     public boolean isDeviceInitialized() {
+ 121         return deviceInitialized;
+ 122     }
+ 123 
+ 124     /**
+ 125      * Completes the initialization of the HSAIL backend. This includes initializing the providers
+ 126      * and registering any method substitutions specified by the HSAIL backend.
+ 127      */
+ 128     @Override
+ 129     public void completeInitialization() {
+ 130         final HotSpotProviders providers = getProviders();
+ 131         HotSpotVMConfig config = getRuntime().getConfig();
+ 132         // Initialize the lowering provider.
+ 133         final HotSpotLoweringProvider lowerer = (HotSpotLoweringProvider) providers.getLowerer();
+ 134         lowerer.initialize(providers, config);
+ 135 
+ 136         // Register the replacements used by the HSAIL backend.
+ 137         HSAILHotSpotReplacementsImpl replacements = (HSAILHotSpotReplacementsImpl) providers.getReplacements();
+ 138         replacements.completeInitialization();
+ 139     }
+ 140 
+ 141     /**
+ 142      * Compiles and installs a given method to a GPU binary.
+ 143      */
+ 144     public HotSpotNmethod compileAndInstallKernel(Method method) {
+ 145         ResolvedJavaMethod javaMethod = getProviders().getMetaAccess().lookupJavaMethod(method);
+ 146         return installKernel(javaMethod, compileKernel(javaMethod, true));
+ 147     }
+ 148 
+ 149     /**
+ 150      * Compiles a given method to HSAIL code.
+ 151      *
+ 152      * @param makeBinary specifies whether a GPU binary should also be generated for the HSAIL code.
+ 153      *            If true, the returned value is guaranteed to have a non-zero
+ 154      *            {@linkplain ExternalCompilationResult#getEntryPoint() entry point}.
+ 155      * @return the HSAIL code compiled from {@code method}'s bytecode
+ 156      */
+ 157     public ExternalCompilationResult compileKernel(ResolvedJavaMethod method, boolean makeBinary) {
+ 158         StructuredGraph graph = new StructuredGraph(method);
+ 159         HotSpotProviders providers = getProviders();
+ 160         MetaAccessProvider metaAccess = getProviders().getMetaAccess();
+ 161 
+ 162         // changed this from default to help us generate deopts when needed
+ 163         OptimisticOptimizations optimisticOpts = OptimisticOptimizations.ALL;
+ 164         optimisticOpts.remove(OptimisticOptimizations.Optimization.UseExceptionProbabilityForOperations);
+ 165         new GraphBuilderPhase.Instance(metaAccess, GraphBuilderConfiguration.getSnippetDefault(), optimisticOpts).apply(graph);
+ 166         PhaseSuite&lt;HighTierContext&gt; graphBuilderSuite = providers.getSuites().getDefaultGraphBuilderSuite();
+ 167         CallingConvention cc = getCallingConvention(providers.getCodeCache(), Type.JavaCallee, graph.method(), false);
+ 168 
+ 169         // append special HSAILNonNullParametersPhase
+ 170         int numArgs = cc.getArguments().length;
+ 171         graphBuilderSuite.appendPhase(new HSAILNonNullParametersPhase(numArgs));
+ 172 
+ 173         Suites suites = providers.getSuites().getDefaultSuites();
+ 174         ExternalCompilationResult hsailCode = compileGraph(graph, null, cc, method, providers, this, this.getTarget(), null, graphBuilderSuite, optimisticOpts, getProfilingInfo(graph), null, suites,
+ 175                         new ExternalCompilationResult(), CompilationResultBuilderFactory.Default);
+ 176 
+ 177         // this code added to dump infopoints
+ 178         try (Scope s = Debug.scope("CodeGen")) {
+ 179             if (Debug.isLogEnabled()) {
+ 180                 // show infopoints
+ 181                 List&lt;Infopoint&gt; infoList = hsailCode.getInfopoints();
+ 182                 Debug.log("%d HSAIL infopoints", infoList.size());
+ 183                 for (Infopoint info : infoList) {
+ 184                     Debug.log(info.toString());
+ 185                     Debug.log(info.debugInfo.frame().toString());
+ 186                 }
+ 187             }
+ 188         } catch (Throwable e) {
+ 189             throw Debug.handle(e);
+ 190         }
+ 191 
+ 192         if (makeBinary) {
+ 193             if (!deviceInitialized) {
+ 194                 throw new GraalInternalError("Cannot generate GPU kernel if device is not initialized");
+ 195             }
+ 196             try (Scope ds = Debug.scope("GeneratingKernelBinary")) {
+ 197                 long kernel = generateKernel(hsailCode.getTargetCode(), method.getName());
+ 198                 if (kernel == 0) {
+ 199                     throw new GraalInternalError("Failed to compile HSAIL kernel");
+ 200                 }
+ 201                 hsailCode.setEntryPoint(kernel);
+ 202             } catch (Throwable e) {
+ 203                 throw Debug.handle(e);
+ 204             }
+ 205         }
+ 206         return hsailCode;
+ 207     }
+ 208 
+ 209     private static class HSAILNonNullParametersPhase extends Phase {
+ 210         // we use this to limit the stamping to exclude the final argument in an obj stream method
+ 211         private int numArgs;
+ 212 
+ 213         public HSAILNonNullParametersPhase(int numArgs) {
+ 214             this.numArgs = numArgs;
+ 215         }
+ 216 
+ 217         @Override
+ 218         protected void run(StructuredGraph graph) {
+ 219             int argCount = 0;
+ 220             for (ParameterNode param : graph.getNodes(ParameterNode.class)) {
+ 221                 argCount++;
+ 222                 if (argCount &lt; numArgs &amp;&amp; param.stamp() instanceof ObjectStamp) {
+ 223                     param.setStamp(StampFactory.declaredNonNull(((ObjectStamp) param.stamp()).type()));
+ 224                 }
+ 225             }
+ 226         }
+ 227     }
+ 228 
+ 229     /**
+ 230      * Generates a GPU binary from HSAIL code.
+ 231      */
+ 232     private static native long generateKernel(byte[] hsailCode, String name);
+ 233 
+ 234     /**
+ 235      * Installs the {@linkplain ExternalCompilationResult#getEntryPoint() GPU binary} associated
+ 236      * with some given HSAIL code in the code cache and returns a {@link HotSpotNmethod} handle to
+ 237      * the installed code.
+ 238      *
+ 239      * @param hsailCode HSAIL compilation result for which a GPU binary has been generated
+ 240      * @return a handle to the binary as installed in the HotSpot code cache
+ 241      */
+ 242     public final HotSpotNmethod installKernel(ResolvedJavaMethod method, ExternalCompilationResult hsailCode) {
+ 243         assert hsailCode.getEntryPoint() != 0L;
+ 244         // code below here lifted from HotSpotCodeCacheProviders.addExternalMethod
+ 245         // used to be return getProviders().getCodeCache().addExternalMethod(method, hsailCode);
+ 246         HotSpotResolvedJavaMethod javaMethod = (HotSpotResolvedJavaMethod) method;
+ 247         if (hsailCode.getId() == -1) {
+ 248             hsailCode.setId(javaMethod.allocateCompileId(hsailCode.getEntryBCI()));
+ 249         }
+ 250         CompilationResult compilationResult = hsailCode;
+ 251         StructuredGraph hostGraph = hsailCode.getHostGraph();
+ 252         if (hostGraph != null) {
+ 253             // TODO get rid of the unverified entry point in the host code
+ 254             try (Scope ds = Debug.scope("GeneratingHostGraph")) {
+ 255                 HotSpotBackend hostBackend = getRuntime().getHostBackend();
+ 256                 JavaType[] parameterTypes = new JavaType[hostGraph.getNodes(ParameterNode.class).count()];
+ 257                 Debug.log("Param count: %d", parameterTypes.length);
+ 258                 for (int i = 0; i &lt; parameterTypes.length; i++) {
+ 259                     ParameterNode parameter = hostGraph.getParameter(i);
+ 260                     Debug.log("Param [%d]=%d", i, parameter);
+ 261                     parameterTypes[i] = parameter.stamp().javaType(hostBackend.getProviders().getMetaAccess());
+ 262                     Debug.log(" %s", parameterTypes[i]);
+ 263                 }
+ 264                 CallingConvention cc = hostBackend.getProviders().getCodeCache().getRegisterConfig().getCallingConvention(Type.JavaCallee, method.getSignature().getReturnType(null), parameterTypes,
+ 265                                 hostBackend.getTarget(), false);
+ 266                 CompilationResult hostCode = compileGraph(hostGraph, null, cc, method, hostBackend.getProviders(), hostBackend, this.getTarget(), null,
+ 267                                 hostBackend.getProviders().getSuites().getDefaultGraphBuilderSuite(), OptimisticOptimizations.NONE, null, null,
+ 268                                 hostBackend.getProviders().getSuites().getDefaultSuites(), new CompilationResult(), CompilationResultBuilderFactory.Default);
+ 269                 compilationResult = merge(hostCode, hsailCode);
+ 270             } catch (Throwable e) {
+ 271                 throw Debug.handle(e);
+ 272             }
+ 273         }
+ 274 
+ 275         HotSpotNmethod code = new HotSpotNmethod(javaMethod, hsailCode.getName(), false, true);
+ 276         HotSpotCompiledNmethod compiled = new HotSpotCompiledNmethod(getTarget(), javaMethod, compilationResult);
+ 277         CodeInstallResult result = getRuntime().getCompilerToVM().installCode(compiled, code, null);
+ 278         if (result != CodeInstallResult.OK) {
+ 279             return null;
+ 280         }
+ 281         return code;
+ 282     }
+ 283 
+ 284     private static ExternalCompilationResult merge(CompilationResult hostCode, ExternalCompilationResult hsailCode) {
+ 285         ExternalCompilationResult result = new ExternalCompilationResult();
+ 286 
+ 287         // from hsail code
+ 288         result.setEntryPoint(hsailCode.getEntryPoint());
+ 289         result.setId(hsailCode.getId());
+ 290         result.setEntryBCI(hsailCode.getEntryBCI());
+ 291         assert hsailCode.getMarks().isEmpty();
+ 292         assert hsailCode.getExceptionHandlers().isEmpty();
+ 293         assert hsailCode.getDataReferences().isEmpty();
+ 294 
+ 295         // from host code
+ 296         result.setFrameSize(hostCode.getFrameSize());
+ 297         result.setCustomStackAreaOffset(hostCode.getCustomStackAreaOffset());
+ 298         result.setRegisterRestoreEpilogueOffset(hostCode.getRegisterRestoreEpilogueOffset());
+ 299         result.setTargetCode(hostCode.getTargetCode(), hostCode.getTargetCodeSize());
+ 300         for (CodeAnnotation annotation : hostCode.getAnnotations()) {
+ 301             result.addAnnotation(annotation);
+ 302         }
+ 303         CompilationResult.Mark[] noMarks = {};
+ 304         for (Mark mark : hostCode.getMarks()) {
+ 305             result.recordMark(mark.pcOffset, mark.id, noMarks);
+ 306         }
+ 307         for (ExceptionHandler handler : hostCode.getExceptionHandlers()) {
+ 308             result.recordExceptionHandler(handler.pcOffset, handler.handlerPos);
+ 309         }
+ 310         for (DataPatch patch : hostCode.getDataReferences()) {
+ 311             if (patch.data != null) {
+ 312                 if (patch.inline) {
+ 313                     result.recordInlineData(patch.pcOffset, patch.data);
+ 314                 } else {
+ 315                     result.recordDataReference(patch.pcOffset, patch.data);
+ 316                 }
+ 317             }
+ 318         }
+ 319         for (Infopoint infopoint : hostCode.getInfopoints()) {
+ 320             if (infopoint instanceof Call) {
+ 321                 Call call = (Call) infopoint;
+ 322                 result.recordCall(call.pcOffset, call.size, call.target, call.debugInfo, call.direct);
+ 323             } else {
+ 324                 result.recordInfopoint(infopoint.pcOffset, infopoint.debugInfo, infopoint.reason);
+ 325             }
+ 326         }
+ 327 
+ 328         // merged
+ 329         Assumptions mergedAssumptions = new Assumptions(true);
+ 330         if (hostCode.getAssumptions() != null) {
+ 331             for (Assumption assumption : hostCode.getAssumptions().getAssumptions()) {
+ 332                 if (assumption != null) {
+ 333                     mergedAssumptions.record(assumption);
+ 334                 }
+ 335             }
+ 336         }
+ 337         if (hsailCode.getAssumptions() != null) {
+ 338             for (Assumption assumption : hsailCode.getAssumptions().getAssumptions()) {
+ 339                 if (assumption != null) {
+ 340                     mergedAssumptions.record(assumption);
+ 341                 }
+ 342             }
+ 343         }
+ 344         if (!mergedAssumptions.isEmpty()) {
+ 345             result.setAssumptions(mergedAssumptions);
+ 346         }
+ 347         return result;
+ 348     }
+ 349 
+ 350     public boolean executeKernel(HotSpotInstalledCode kernel, int jobSize, Object[] args) throws InvalidInstalledCodeException {
+ 351         if (!deviceInitialized) {
+ 352             throw new GraalInternalError("Cannot execute GPU kernel if device is not initialized");
+ 353         }
+ 354         Object[] oopsSaveArea = new Object[maxDeoptIndex * 16];
+ 355         return executeKernel0(kernel, jobSize, args, oopsSaveArea);
+ 356     }
+ 357 
+ 358     private static native boolean executeKernel0(HotSpotInstalledCode kernel, int jobSize, Object[] args, Object[] oopsSave) throws InvalidInstalledCodeException;
+ 359 
+ 360     /**
+ 361      * Use the HSAIL register set when the compilation target is HSAIL.
+ 362      */
+ 363     @Override
+ 364     public FrameMap newFrameMap(RegisterConfig registerConfig) {
+ 365         return new HSAILFrameMap(getCodeCache(), registerConfig);
+ 366     }
+ 367 
+ 368     @Override
+ 369     public LIRGenerator newLIRGenerator(CallingConvention cc, LIRGenerationResult lirGenRes) {
+ 370         return new HSAILHotSpotLIRGenerator(getProviders(), getRuntime().getConfig(), cc, lirGenRes);
+ 371     }
+ 372 
+ 373     @Override
+ 374     public LIRGenerationResult newLIRGenerationResult(LIR lir, FrameMap frameMap, Object stub) {
+ 375         return new HSAILHotSpotLIRGenerationResult(lir, frameMap);
+ 376     }
+ 377 
+ 378     @Override
+ 379     public NodeLIRBuilder newNodeLIRGenerator(StructuredGraph graph, LIRGenerator lirGen) {
+ 380         return new HSAILHotSpotNodeLIRBuilder(graph, lirGen);
+ 381     }
+ 382 
+ 383     class HotSpotFrameContext implements FrameContext {
+ 384 
+ 385         public boolean hasFrame() {
+ 386             return true;
+ 387         }
+ 388 
+ 389         @Override
+ 390         public void enter(CompilationResultBuilder crb) {
+ 391             Debug.log("Nothing to do here");
+ 392         }
+ 393 
+ 394         @Override
+ 395         public void leave(CompilationResultBuilder crb) {
+ 396             Debug.log("Nothing to do here");
+ 397         }
+ 398     }
+ 399 
+ 400     /**
+ 401      * a class to allow us to save lirGen.
+ 402      */
+ 403     static class HSAILCompilationResultBuilder extends CompilationResultBuilder {
+ 404         public HSAILHotSpotLIRGenerationResult lirGenRes;
+ 405 
+ 406         public HSAILCompilationResultBuilder(CodeCacheProvider codeCache, ForeignCallsProvider foreignCalls, FrameMap frameMap, Assembler asm, FrameContext frameContext,
+ 407                         CompilationResult compilationResult, HSAILHotSpotLIRGenerationResult lirGenRes) {
+ 408             super(codeCache, foreignCalls, frameMap, asm, frameContext, compilationResult);
+ 409             this.lirGenRes = lirGenRes;
+ 410         }
+ 411     }
+ 412 
+ 413     @Override
+ 414     protected Assembler createAssembler(FrameMap frameMap) {
+ 415         return new HSAILHotSpotAssembler(getTarget());
+ 416     }
+ 417 
+ 418     @Override
+ 419     public CompilationResultBuilder newCompilationResultBuilder(LIRGenerationResult lirGenRes, CompilationResult compilationResult, CompilationResultBuilderFactory factory) {
+ 420         FrameMap frameMap = lirGenRes.getFrameMap();
+ 421         Assembler masm = createAssembler(frameMap);
+ 422         HotSpotFrameContext frameContext = new HotSpotFrameContext();
+ 423         // save lirGen for later use by setHostGraph
+ 424         CompilationResultBuilder crb = new HSAILCompilationResultBuilder(getCodeCache(), getForeignCalls(), frameMap, masm, frameContext, compilationResult,
+ 425                         (HSAILHotSpotLIRGenerationResult) lirGenRes);
+ 426         crb.setFrameSize(frameMap.frameSize());
+ 427         return crb;
+ 428     }
+ 429 
+ 430     @Override
+ 431     public void emitCode(CompilationResultBuilder crb, LIR lir, ResolvedJavaMethod method) {
+ 432         assert method != null : lir + " is not associated with a method";
+ 433 
+ 434         boolean useHSAILDeoptimization = getRuntime().getConfig().useHSAILDeoptimization;
+ 435 
+ 436         // Emit the prologue.
+ 437         HSAILAssembler asm = (HSAILAssembler) crb.asm;
+ 438         asm.emitString0("version 0:95: $full : $large;\n");
+ 439 
+ 440         Signature signature = method.getSignature();
+ 441         int sigParamCount = signature.getParameterCount(false);
+ 442         // We're subtracting 1 because we're not making the final gid as a parameter.
+ 443 
+ 444         int nonConstantParamCount = sigParamCount - 1;
+ 445         boolean isStatic = (Modifier.isStatic(method.getModifiers()));
+ 446         // Determine if this is an object lambda.
+ 447         boolean isObjectLambda = true;
+ 448 
+ 449         if (signature.getParameterType(nonConstantParamCount, null).getKind() == Kind.Int) {
+ 450             isObjectLambda = false;
+ 451         } else {
+ 452             // Add space for gid int reg.
+ 453             nonConstantParamCount++;
+ 454         }
+ 455 
+ 456         // If this is an instance method, include mappings for the "this" parameter
+ 457         // as the first parameter.
+ 458         if (!isStatic) {
+ 459             nonConstantParamCount++;
+ 460         }
+ 461         // Add in any "constant" parameters (currently none).
+ 462         int totalParamCount = nonConstantParamCount;
+ 463         JavaType[] paramtypes = new JavaType[totalParamCount];
+ 464         String[] paramNames = new String[totalParamCount];
+ 465         int pidx = 0;
+ 466         MetaAccessProvider metaAccess = getProviders().getMetaAccess();
+ 467         for (int i = 0; i &lt; totalParamCount; i++) {
+ 468             if (i == 0 &amp;&amp; !isStatic) {
+ 469                 paramtypes[i] = metaAccess.lookupJavaType(Object.class);
+ 470                 paramNames[i] = "%_this";
+ 471             } else if (i &lt; nonConstantParamCount) {
+ 472                 if (isObjectLambda &amp;&amp; (i == (nonConstantParamCount))) {
+ 473                     // Set up the gid register mapping.
+ 474                     paramtypes[i] = metaAccess.lookupJavaType(int.class);
+ 475                     paramNames[i] = "%_gid";
+ 476                 } else {
+ 477                     paramtypes[i] = signature.getParameterType(pidx++, null);
+ 478                     paramNames[i] = "%_arg" + i;
+ 479                 }
+ 480             }
+ 481         }
+ 482 
+ 483         asm.emitString0("// " + (isStatic ? "static" : "instance") + " method " + method + "\n");
+ 484         asm.emitString0("kernel &amp;run ( \n");
+ 485 
+ 486         FrameMap frameMap = crb.frameMap;
+ 487         RegisterConfig regConfig = frameMap.registerConfig;
+ 488         // Build list of param types which does include the gid (for cc register mapping query).
+ 489         JavaType[] ccParamTypes = new JavaType[nonConstantParamCount + 1];
+ 490         // Include the gid.
+ 491         System.arraycopy(paramtypes, 0, ccParamTypes, 0, nonConstantParamCount);
+ 492 
+ 493         // Last entry is always int (its register gets used in the workitemabsid instruction)
+ 494         // this is true even for object stream labmdas
+ 495         if (sigParamCount &gt; 0) {
+ 496             ccParamTypes[ccParamTypes.length - 1] = metaAccess.lookupJavaType(int.class);
+ 497         }
+ 498         CallingConvention cc = regConfig.getCallingConvention(JavaCallee, null, ccParamTypes, getTarget(), false);
+ 499 
+ 500         /**
+ 501          * Compute the hsail size mappings up to but not including the last non-constant parameter
+ 502          * (which is the gid).
+ 503          *
+ 504          */
+ 505         String[] paramHsailSizes = new String[totalParamCount];
+ 506         for (int i = 0; i &lt; totalParamCount; i++) {
+ 507             String paramtypeStr = paramtypes[i].toString();
+ 508             String sizeStr = paramTypeMap.get(paramtypeStr);
+ 509             // Catch all for any unmapped paramtype that is u64 (address of an object).
+ 510             paramHsailSizes[i] = (sizeStr != null ? sizeStr : "u64");
+ 511         }
+ 512         // Emit the kernel function parameters.
+ 513         for (int i = 0; i &lt; totalParamCount; i++) {
+ 514             String str = "align 8 kernarg_" + paramHsailSizes[i] + " " + paramNames[i];
+ 515 
+ 516             if (useHSAILDeoptimization || (i != totalParamCount - 1)) {
+ 517                 str += ",";
+ 518             }
+ 519             asm.emitString(str);
+ 520         }
+ 521 
+ 522         if (useHSAILDeoptimization) {
+ 523             // add in the deoptInfo parameter
+ 524             asm.emitString("kernarg_u64 " + asm.getDeoptInfoName());
+ 525         }
+ 526 
+ 527         asm.emitString(") {");
+ 528 
+ 529         /*
+ 530          * End of parameters start of prolog code. Emit the load instructions for loading of the
+ 531          * kernel non-constant parameters into registers. The constant class parameters will not be
+ 532          * loaded up front but will be loaded as needed.
+ 533          */
+ 534         for (int i = 0; i &lt; nonConstantParamCount; i++) {
+ 535             asm.emitString("ld_kernarg_" + paramHsailSizes[i] + "  " + HSAIL.mapRegister(cc.getArgument(i)) + ", [" + paramNames[i] + "];");
+ 536         }
+ 537 
+ 538         /*
+ 539          * Emit the workitemaid instruction for loading the hidden gid parameter. This is assigned
+ 540          * the register as if it were the last of the nonConstant parameters.
+ 541          */
+ 542         String workItemReg = "$s" + Integer.toString(asRegister(cc.getArgument(nonConstantParamCount)).encoding());
+ 543         asm.emitString("workitemabsid_u32 " + workItemReg + ", 0;");
+ 544 
+ 545         final int offsetToDeopt = getRuntime().getConfig().hsailDeoptOffset;
+ 546         final String deoptInProgressLabel = "@LHandleDeoptInProgress";
+ 547 
+ 548         if (useHSAILDeoptimization) {
+ 549             AllocatableValue scratch64 = HSAIL.d16.asValue(Kind.Object);
+ 550             AllocatableValue scratch32 = HSAIL.s34.asValue(Kind.Int);
+ 551             HSAILAddress deoptInfoAddr = new HSAILAddressValue(Kind.Int, scratch64, offsetToDeopt).toAddress();
+ 552             asm.emitLoadKernelArg(scratch64, asm.getDeoptInfoName(), "u64");
+ 553             asm.emitComment("// Check if a deopt has occurred and abort if true before doing any work");
+ 554             asm.emitLoadAcquire(scratch32, deoptInfoAddr);
+ 555             asm.emitCompare(Kind.Int, scratch32, Constant.forInt(0), "ne", false, false);
+ 556             asm.cbr(deoptInProgressLabel);
+ 557         }
+ 558 
+ 559         /*
+ 560          * Note the logic used for this spillseg size is to leave space and then go back and patch
+ 561          * in the correct size once we have generated all the instructions. This should probably be
+ 562          * done in a more robust way by implementing something like asm.insertString.
+ 563          */
+ 564         int spillsegDeclarationPosition = asm.position() + 1;
+ 565         String spillsegTemplate = "align 4 spill_u8 %spillseg[123456];";
+ 566         asm.emitString(spillsegTemplate);
+ 567         // Emit object array load prologue here.
+ 568         if (isObjectLambda) {
+ 569             boolean useCompressedOops = getRuntime().getConfig().useCompressedOops;
+ 570             final int arrayElementsOffset = HotSpotGraalRuntime.getArrayBaseOffset(Kind.Object);
+ 571             String iterationObjArgReg = HSAIL.mapRegister(cc.getArgument(nonConstantParamCount - 1));
+ 572             // iterationObjArgReg will be the highest $d register in use (it is the last parameter)
+ 573             // so tempReg can be the next higher $d register
+ 574             String tmpReg = "$d" + (asRegister(cc.getArgument(nonConstantParamCount - 1)).encoding() + 1);
+ 575             // Convert gid to long.
+ 576             asm.emitString("cvt_u64_s32 " + tmpReg + ", " + workItemReg + "; // Convert gid to long");
+ 577             // Adjust index for sizeof ref. Where to pull this size from?
+ 578             asm.emitString("mul_u64 " + tmpReg + ", " + tmpReg + ", " + (useCompressedOops ? 4 : 8) + "; // Adjust index for sizeof ref");
+ 579             // Adjust for actual data start.
+ 580             asm.emitString("add_u64 " + tmpReg + ", " + tmpReg + ", " + arrayElementsOffset + "; // Adjust for actual elements data start");
+ 581             // Add to array ref ptr.
+ 582             asm.emitString("add_u64 " + tmpReg + ", " + tmpReg + ", " + iterationObjArgReg + "; // Add to array ref ptr");
+ 583             // Load the object into the parameter reg.
+ 584             if (useCompressedOops) {
+ 585 
+ 586                 // Load u32 into the d 64 reg since it will become an object address
+ 587                 asm.emitString("ld_global_u32 " + tmpReg + ", " + "[" + tmpReg + "]" + "; // Load compressed ptr from array");
+ 588 
+ 589                 long narrowOopBase = getRuntime().getConfig().narrowOopBase;
+ 590                 long narrowOopShift = getRuntime().getConfig().narrowOopShift;
+ 591 
+ 592                 if (narrowOopBase == 0 &amp;&amp; narrowOopShift == 0) {
+ 593                     // No more calculation to do, mov to target register
+ 594                     asm.emitString("mov_b64 " + iterationObjArgReg + ", " + tmpReg + "; // no shift or base addition");
+ 595                 } else {
+ 596                     if (narrowOopBase == 0) {
+ 597                         asm.emitString("shl_u64 " + iterationObjArgReg + ", " + tmpReg + ", " + narrowOopShift + "; // do narrowOopShift");
+ 598                     } else if (narrowOopShift == 0) {
+ 599                         // not sure if we ever get add with 0 shift but just in case
+ 600                         asm.emitString("cmp_eq_b1_u64  $c0, " + tmpReg + ", 0x0; // avoid add if compressed is null");
+ 601                         asm.emitString("add_u64 " + iterationObjArgReg + ", " + tmpReg + ", " + narrowOopBase + "; // add narrowOopBase");
+ 602                         asm.emitString("cmov_b64 " + iterationObjArgReg + ", $c0, 0x0, " + iterationObjArgReg + "; // avoid add if compressed is null");
+ 603                     } else {
+ 604                         asm.emitString("cmp_eq_b1_u64  $c0, " + tmpReg + ", 0x0; // avoid shift-add if compressed is null");
+ 605                         asm.emitString("mad_u64 " + iterationObjArgReg + ", " + tmpReg + ", " + (1 &lt;&lt; narrowOopShift) + ", " + narrowOopBase + "; // shift and add narrowOopBase");
+ 606                         asm.emitString("cmov_b64 " + iterationObjArgReg + ", $c0, 0x0, " + iterationObjArgReg + "; // avoid shift-add if compressed is null");
+ 607                     }
+ 608                 }
+ 609 
+ 610             } else {
+ 611                 asm.emitString("ld_global_u64 " + iterationObjArgReg + ", " + "[" + tmpReg + "]" + "; // Load from array element into parameter reg");
+ 612             }
+ 613         }
+ 614         // Prologue done, Emit code for the LIR.
+ 615         crb.emit(lir);
+ 616         // Now that code is emitted go back and figure out what the upper Bound stack size was.
+ 617         long maxStackSize = ((HSAILAssembler) crb.asm).upperBoundStackSize();
+ 618         String spillsegStringFinal;
+ 619         if (maxStackSize == 0) {
+ 620             // If no spilling, get rid of spillseg declaration.
+ 621             char[] array = new char[spillsegTemplate.length()];
+ 622             Arrays.fill(array, ' ');
+ 623             spillsegStringFinal = new String(array);
+ 624         } else {
+ 625             spillsegStringFinal = spillsegTemplate.replace("123456", String.format("%6d", maxStackSize));
+ 626         }
+ 627         asm.emitString(spillsegStringFinal, spillsegDeclarationPosition);
+ 628         // Emit the epilogue.
+ 629 
+ 630         // TODO: keep track of whether we need it
+ 631         if (useHSAILDeoptimization) {
+ 632             final int offsetToDeoptSaveStates = getRuntime().getConfig().hsailSaveStatesOffset0;
+ 633             final int sizeofKernelDeopt = getRuntime().getConfig().hsailSaveStatesOffset1 - getRuntime().getConfig().hsailSaveStatesOffset0;
+ 634             final int offsetToNeverRanArray = getRuntime().getConfig().hsailNeverRanArrayOffset;
+ 635             final int offsetToDeoptNextIndex = getRuntime().getConfig().hsailDeoptNextIndexOffset;
+ 636             final int offsetToDeoptimizationWorkItem = getRuntime().getConfig().hsailDeoptimizationWorkItem;
+ 637             final int offsetToDeoptimizationReason = getRuntime().getConfig().hsailDeoptimizationReason;
+ 638             final int offsetToDeoptimizationFrame = getRuntime().getConfig().hsailDeoptimizationFrame;
+ 639             final int offsetToFramePc = getRuntime().getConfig().hsailFramePcOffset;
+ 640             final int offsetToNumSaves = getRuntime().getConfig().hsailFrameNumSRegOffset;
+ 641             final int offsetToSaveArea = getRuntime().getConfig().hsailFrameSaveAreaOffset;
+ 642 
+ 643             AllocatableValue scratch64 = HSAIL.d16.asValue(Kind.Object);
+ 644             AllocatableValue cuSaveAreaPtr = HSAIL.d17.asValue(Kind.Object);
+ 645             AllocatableValue waveMathScratch1 = HSAIL.d18.asValue(Kind.Object);
+ 646             AllocatableValue waveMathScratch2 = HSAIL.d19.asValue(Kind.Object);
+ 647 
+ 648             AllocatableValue actionAndReasonReg = HSAIL.s32.asValue(Kind.Int);
+ 649             AllocatableValue codeBufferOffsetReg = HSAIL.s33.asValue(Kind.Int);
+ 650             AllocatableValue scratch32 = HSAIL.s34.asValue(Kind.Int);
+ 651             AllocatableValue workidreg = HSAIL.s35.asValue(Kind.Int);
+ 652             AllocatableValue dregOopMapReg = HSAIL.s39.asValue(Kind.Int);
+ 653 
+ 654             HSAILAddress deoptNextIndexAddr = new HSAILAddressValue(Kind.Int, scratch64, offsetToDeoptNextIndex).toAddress();
+ 655             HSAILAddress neverRanArrayAddr = new HSAILAddressValue(Kind.Int, scratch64, offsetToNeverRanArray).toAddress();
+ 656 
+ 657             // The just-started lanes that see the deopt flag will jump here
+ 658             asm.emitString0(deoptInProgressLabel + ":\n");
+ 659             asm.emitLoad(Kind.Object, waveMathScratch1, neverRanArrayAddr);
+ 660             asm.emitWorkItemAbsId(workidreg);
+ 661             asm.emitConvert(waveMathScratch2, workidreg, Kind.Object, Kind.Int);
+ 662             asm.emit("add", waveMathScratch1, waveMathScratch1, waveMathScratch2);
+ 663             HSAILAddress neverRanStoreAddr = new HSAILAddressValue(Kind.Byte, waveMathScratch1, 0).toAddress();
+ 664             asm.emitStore(Kind.Byte, Constant.forInt(1), neverRanStoreAddr);
+ 665             asm.emitString("ret;");
+ 666 
+ 667             // The deoptimizing lanes will jump here
+ 668             asm.emitString0(asm.getDeoptLabelName() + ":\n");
+ 669             String labelExit = asm.getDeoptLabelName() + "_Exit";
+ 670 
+ 671             HSAILAddress deoptInfoAddr = new HSAILAddressValue(Kind.Int, scratch64, offsetToDeopt).toAddress();
+ 672             asm.emitLoadKernelArg(scratch64, asm.getDeoptInfoName(), "u64");
+ 673 
+ 674             // Set deopt occurred flag
+ 675             asm.emitMov(Kind.Int, scratch32, Constant.forInt(1));
+ 676             asm.emitStoreRelease(scratch32, deoptInfoAddr);
+ 677 
+ 678             asm.emitComment("// Determine next deopt save slot");
+ 679             asm.emitAtomicAdd(scratch32, deoptNextIndexAddr, Constant.forInt(1));
+ 680             // scratch32 now holds next index to use
+ 681             // set error condition if no room in save area
+ 682             asm.emitComment("// assert room to save deopt");
+ 683             asm.emitCompare(Kind.Int, scratch32, Constant.forInt(maxDeoptIndex), "lt", false, false);
+ 684             asm.cbr("@L_StoreDeopt");
+ 685             // if assert fails, store a guaranteed negative workitemid in top level deopt occurred
+ 686             // flag
+ 687             asm.emitWorkItemAbsId(scratch32);
+ 688             asm.emit("mad", scratch32, scratch32, Constant.forInt(-1), Constant.forInt(-1));
+ 689             asm.emitStore(scratch32, deoptInfoAddr);
+ 690             asm.emitString("ret;");
+ 691 
+ 692             asm.emitString0("@L_StoreDeopt" + ":\n");
+ 693 
+ 694             // Store deopt for this workitem into its slot in the HSAILComputeUnitSaveStates array
+ 695 
+ 696             asm.emitComment("// Convert id's for ptr math");
+ 697             asm.emitConvert(cuSaveAreaPtr, scratch32, Kind.Object, Kind.Int);
+ 698             asm.emitComment("// multiply by sizeof KernelDeoptArea");
+ 699             asm.emit("mul", cuSaveAreaPtr, cuSaveAreaPtr, Constant.forInt(sizeofKernelDeopt));
+ 700             asm.emitComment("// Add computed offset to deoptInfoPtr base");
+ 701             asm.emit("add", cuSaveAreaPtr, cuSaveAreaPtr, scratch64);
+ 702             // Add offset to _deopt_save_states[0]
+ 703             asm.emit("add", scratch64, cuSaveAreaPtr, Constant.forInt(offsetToDeoptSaveStates));
+ 704 
+ 705             HSAILAddress workItemAddr = new HSAILAddressValue(Kind.Int, scratch64, offsetToDeoptimizationWorkItem).toAddress();
+ 706             HSAILAddress actionReasonStoreAddr = new HSAILAddressValue(Kind.Int, scratch64, offsetToDeoptimizationReason).toAddress();
+ 707 
+ 708             asm.emitComment("// Get _deopt_info._first_frame");
+ 709             asm.emit("add", waveMathScratch1, scratch64, Constant.forInt(offsetToDeoptimizationFrame));
+ 710             // Now scratch64 is the _deopt_info._first_frame
+ 711             HSAILAddress pcStoreAddr = new HSAILAddressValue(Kind.Int, waveMathScratch1, offsetToFramePc).toAddress();
+ 712             HSAILAddress regCountsAddr = new HSAILAddressValue(Kind.Int, waveMathScratch1, offsetToNumSaves).toAddress();
+ 713             HSAILAddress dregOopMapAddr = new HSAILAddressValue(Kind.Int, waveMathScratch1, offsetToNumSaves + 2).toAddress();
+ 714 
+ 715             asm.emitComment("// store deopting workitem");
+ 716             asm.emitWorkItemAbsId(scratch32);
+ 717             asm.emitStore(Kind.Int, scratch32, workItemAddr);
+ 718             asm.emitComment("// store actionAndReason");
+ 719             asm.emitStore(Kind.Int, actionAndReasonReg, actionReasonStoreAddr);
+ 720             asm.emitComment("// store PC");
+ 721             asm.emitStore(Kind.Int, codeBufferOffsetReg, pcStoreAddr);
+ 722             asm.emitComment("// store regCounts");
+ 723             asm.emitStore(Kind.Short, Constant.forInt(32 + (16 &lt;&lt; 8) + (0 &lt;&lt; 16)), regCountsAddr);
+ 724             asm.emitComment("// store dreg ref map bits");
+ 725             asm.emitStore(Kind.Short, dregOopMapReg, dregOopMapAddr);
+ 726 
+ 727             // get the union of registers needed to be saved at the infopoints
+ 728             // usedRegs array assumes d15 has the highest register number we wish to save
+ 729             // and initially has all registers as false
+ 730             boolean[] infoUsedRegs = new boolean[HSAIL.d15.number + 1];
+ 731             List&lt;Infopoint&gt; infoList = crb.compilationResult.getInfopoints();
+ 732             for (Infopoint info : infoList) {
+ 733                 BytecodeFrame frame = info.debugInfo.frame();
+ 734                 for (int i = 0; i &lt; frame.numLocals + frame.numStack; i++) {
+ 735                     Value val = frame.values[i];
+ 736                     if (isLegal(val) &amp;&amp; isRegister(val)) {
+ 737                         Register reg = asRegister(val);
+ 738                         infoUsedRegs[reg.number] = true;
+ 739                     }
+ 740                 }
+ 741             }
+ 742 
+ 743             // loop storing each of the 32 s registers that are used by infopoints
+ 744             // we always store in a fixed location, even if some registers are not stored
+ 745             asm.emitComment("// store used s regs");
+ 746             int ofst = offsetToSaveArea;
+ 747             for (Register sreg : HSAIL.sRegisters) {
+ 748                 if (infoUsedRegs[sreg.number]) {
+ 749                     Kind kind = Kind.Int;
+ 750                     HSAILAddress addr = new HSAILAddressValue(kind, waveMathScratch1, ofst).toAddress();
+ 751                     AllocatableValue sregValue = sreg.asValue(kind);
+ 752                     asm.emitStore(kind, sregValue, addr);
+ 753                 }
+ 754                 ofst += 4;
+ 755             }
+ 756 
+ 757             // loop storing each of the 16 d registers that are used by infopoints
+ 758             asm.emitComment("// store used d regs");
+ 759             for (Register dreg : HSAIL.dRegisters) {
+ 760                 if (infoUsedRegs[dreg.number]) {
+ 761                     Kind kind = Kind.Long;
+ 762                     HSAILAddress addr = new HSAILAddressValue(kind, waveMathScratch1, ofst).toAddress();
+ 763                     AllocatableValue dregValue = dreg.asValue(kind);
+ 764                     asm.emitStore(kind, dregValue, addr);
+ 765                 }
+ 766                 ofst += 8;
+ 767             }
+ 768 
+ 769             // for now, ignore saving the spill variables but that would come here
+ 770 
+ 771             asm.emitString0(labelExit + ":\n");
+ 772 
+ 773             // and emit the return
+ 774             crb.frameContext.leave(crb);
+ 775             asm.exit();
+ 776         } else {
+ 777             // Deoptimization is explicitly off, so emit simple return
+ 778             asm.emitString0(asm.getDeoptLabelName() + ":\n");
+ 779             asm.emitComment("// No deoptimization");
+ 780             asm.emitString("ret;");
+ 781         }
+ 782 
+ 783         asm.emitString0("}; \n");
+ 784 
+ 785         ExternalCompilationResult compilationResult = (ExternalCompilationResult) crb.compilationResult;
+ 786         HSAILHotSpotLIRGenerationResult lirGenRes = ((HSAILCompilationResultBuilder) crb).lirGenRes;
+ 787         compilationResult.setHostGraph(prepareHostGraph(method, lirGenRes.getDeopts(), getProviders(), getRuntime().getConfig()));
+ 788     }
+ 789 
+ 790     private static StructuredGraph prepareHostGraph(ResolvedJavaMethod method, List&lt;DeoptimizeOp&gt; deopts, HotSpotProviders providers, HotSpotVMConfig config) {
+ 791         if (deopts.isEmpty()) {
+ 792             return null;
+ 793         }
+ 794         StructuredGraph hostGraph = new StructuredGraph(method, -2);
+ 795         ParameterNode deoptId = hostGraph.unique(new ParameterNode(0, StampFactory.intValue()));
+ 796         ParameterNode hsailFrame = hostGraph.unique(new ParameterNode(1, StampFactory.forKind(providers.getCodeCache().getTarget().wordKind)));
+ 797         ParameterNode reasonAndAction = hostGraph.unique(new ParameterNode(2, StampFactory.intValue()));
+ 798         ParameterNode speculation = hostGraph.unique(new ParameterNode(3, StampFactory.object()));
+ 799         AbstractBeginNode[] branches = new AbstractBeginNode[deopts.size() + 1];
+ 800         int[] keys = new int[deopts.size()];
+ 801         int[] keySuccessors = new int[deopts.size() + 1];
+ 802         double[] keyProbabilities = new double[deopts.size() + 1];
+ 803         int i = 0;
+ 804         Collections.sort(deopts, new Comparator&lt;DeoptimizeOp&gt;() {
+ 805             public int compare(DeoptimizeOp o1, DeoptimizeOp o2) {
+ 806                 return o1.getCodeBufferPos() - o2.getCodeBufferPos();
+ 807             }
+ 808         });
+ 809         for (DeoptimizeOp deopt : deopts) {
+ 810             keySuccessors[i] = i;
+ 811             keyProbabilities[i] = 1.0 / deopts.size();
+ 812             keys[i] = deopt.getCodeBufferPos();
+ 813             assert keys[i] &gt;= 0;
+ 814             branches[i] = createHostDeoptBranch(deopt, hsailFrame, reasonAndAction, speculation, providers, config);
+ 815 
+ 816             i++;
+ 817         }
+ 818         keyProbabilities[deopts.size()] = 0; // default
+ 819         keySuccessors[deopts.size()] = deopts.size();
+ 820         branches[deopts.size()] = createHostCrashBranch(hostGraph, deoptId);
+ 821         IntegerSwitchNode switchNode = hostGraph.add(new IntegerSwitchNode(deoptId, branches, keys, keyProbabilities, keySuccessors));
+ 822         StartNode start = hostGraph.start();
+ 823         start.setNext(switchNode);
+ 824         /*
+ 825          * printf.setNext(printf2); printf2.setNext(switchNode);
+ 826          */
+ 827         hostGraph.setGuardsStage(GuardsStage.AFTER_FSA);
+ 828         return hostGraph;
+ 829     }
+ 830 
+ 831     private static AbstractBeginNode createHostCrashBranch(StructuredGraph hostGraph, ValueNode deoptId) {
+ 832         VMErrorNode vmError = hostGraph.add(new VMErrorNode("Error in HSAIL deopt. DeoptId=%d", deoptId));
+ 833         // ConvertNode.convert(hostGraph, Kind.Long, deoptId)));
+ 834         vmError.setNext(hostGraph.add(new ReturnNode(ConstantNode.defaultForKind(hostGraph.method().getSignature().getReturnKind(), hostGraph))));
+ 835         return BeginNode.begin(vmError);
+ 836     }
+ 837 
+ 838     private static AbstractBeginNode createHostDeoptBranch(DeoptimizeOp deopt, ParameterNode hsailFrame, ValueNode reasonAndAction, ValueNode speculation, HotSpotProviders providers,
+ 839                     HotSpotVMConfig config) {
+ 840         BeginNode branch = hsailFrame.graph().add(new BeginNode());
+ 841         DynamicDeoptimizeNode deoptimization = hsailFrame.graph().add(new DynamicDeoptimizeNode(reasonAndAction, speculation));
+ 842         deoptimization.setStateBefore(createFrameState(deopt.getFrameState().topFrame, hsailFrame, providers, config));
+ 843         branch.setNext(deoptimization);
+ 844         return branch;
+ 845     }
+ 846 
+ 847     private static FrameState createFrameState(BytecodeFrame lowLevelFrame, ParameterNode hsailFrame, HotSpotProviders providers, HotSpotVMConfig config) {
+ 848         StructuredGraph hostGraph = hsailFrame.graph();
+ 849         ValueNode[] locals = new ValueNode[lowLevelFrame.numLocals];
+ 850         for (int i = 0; i &lt; lowLevelFrame.numLocals; i++) {
+ 851             locals[i] = getNodeForValueFromFrame(lowLevelFrame.getLocalValue(i), hsailFrame, hostGraph, providers, config);
+ 852         }
+ 853         List&lt;ValueNode&gt; stack = new ArrayList&lt;&gt;(lowLevelFrame.numStack);
+ 854         for (int i = 0; i &lt; lowLevelFrame.numStack; i++) {
+ 855             stack.add(getNodeForValueFromFrame(lowLevelFrame.getStackValue(i), hsailFrame, hostGraph, providers, config));
+ 856         }
+ 857         ValueNode[] locks = new ValueNode[lowLevelFrame.numLocks];
+ 858         MonitorIdNode[] monitorIds = new MonitorIdNode[lowLevelFrame.numLocks];
+ 859         for (int i = 0; i &lt; lowLevelFrame.numLocks; i++) {
+ 860             HotSpotMonitorValue lockValue = (HotSpotMonitorValue) lowLevelFrame.getLockValue(i);
+ 861             locks[i] = getNodeForValueFromFrame(lockValue, hsailFrame, hostGraph, providers, config);
+ 862             monitorIds[i] = getMonitorIdForHotSpotMonitorValueFromFrame(lockValue, hsailFrame, hostGraph);
+ 863         }
+ 864         FrameState frameState = hostGraph.add(new FrameState(lowLevelFrame.getMethod(), lowLevelFrame.getBCI(), locals, stack, locks, monitorIds, lowLevelFrame.rethrowException, false));
+ 865         if (lowLevelFrame.caller() != null) {
+ 866             frameState.setOuterFrameState(createFrameState(lowLevelFrame.caller(), hsailFrame, providers, config));
+ 867         }
+ 868         return frameState;
+ 869     }
+ 870 
+ 871     @SuppressWarnings({"unused"})
+ 872     private static MonitorIdNode getMonitorIdForHotSpotMonitorValueFromFrame(HotSpotMonitorValue lockValue, ParameterNode hsailFrame, StructuredGraph hsailGraph) {
+ 873         if (lockValue.isEliminated()) {
+ 874             return null;
+ 875         }
+ 876         throw GraalInternalError.unimplemented();
+ 877     }
+ 878 
+ 879     private static ValueNode getNodeForValueFromFrame(Value localValue, ParameterNode hsailFrame, StructuredGraph hostGraph, HotSpotProviders providers, HotSpotVMConfig config) {
+ 880         ValueNode valueNode;
+ 881         if (localValue instanceof Constant) {
+ 882             valueNode = ConstantNode.forConstant((Constant) localValue, providers.getMetaAccess(), hostGraph);
+ 883         } else if (localValue instanceof VirtualObject) {
+ 884             throw GraalInternalError.unimplemented();
+ 885         } else if (localValue instanceof StackSlot) {
+ 886             throw GraalInternalError.unimplemented();
+ 887         } else if (localValue instanceof HotSpotMonitorValue) {
+ 888             HotSpotMonitorValue hotSpotMonitorValue = (HotSpotMonitorValue) localValue;
+ 889             return getNodeForValueFromFrame(hotSpotMonitorValue.getOwner(), hsailFrame, hostGraph, providers, config);
+ 890         } else if (localValue instanceof RegisterValue) {
+ 891             RegisterValue registerValue = (RegisterValue) localValue;
+ 892             int regNumber = registerValue.getRegister().number;
+ 893             valueNode = getNodeForRegisterFromFrame(regNumber, localValue.getKind(), hsailFrame, hostGraph, providers, config);
+ 894         } else if (Value.ILLEGAL.equals(localValue)) {
+ 895             valueNode = null;
+ 896         } else {
+ 897             throw GraalInternalError.shouldNotReachHere();
+ 898         }
+ 899         return valueNode;
+ 900     }
+ 901 
+ 902     private static ValueNode getNodeForRegisterFromFrame(int regNumber, Kind valueKind, ParameterNode hsailFrame, StructuredGraph hostGraph, HotSpotProviders providers, HotSpotVMConfig config) {
+ 903         ValueNode valueNode;
+ 904         LocationNode location;
+ 905         if (regNumber &gt;= HSAIL.s0.number &amp;&amp; regNumber &lt;= HSAIL.s31.number) {
+ 906             int intSize = providers.getCodeCache().getTarget().arch.getSizeInBytes(Kind.Int);
+ 907             long offset = config.hsailFrameSaveAreaOffset + intSize * (regNumber - HSAIL.s0.number);
+ 908             location = ConstantLocationNode.create(FINAL_LOCATION, valueKind, offset, hostGraph);
+ 909         } else if (regNumber &gt;= HSAIL.d0.number &amp;&amp; regNumber &lt;= HSAIL.d15.number) {
+ 910             int longSize = providers.getCodeCache().getTarget().arch.getSizeInBytes(Kind.Long);
+ 911             long offset = config.hsailFrameSaveAreaOffset + longSize * (regNumber - HSAIL.d0.number);
+ 912             LocationNode numSRegsLocation = ConstantLocationNode.create(FINAL_LOCATION, Kind.Byte, config.hsailFrameNumSRegOffset, hostGraph);
+ 913             ValueNode numSRegs = hostGraph.unique(new FloatingReadNode(hsailFrame, numSRegsLocation, null, StampFactory.forInteger(8, false)));
+ 914             numSRegs = SignExtendNode.convert(numSRegs, StampFactory.forKind(Kind.Byte));
+ 915             location = IndexedLocationNode.create(FINAL_LOCATION, valueKind, offset, numSRegs, hostGraph, 4);
+ 916         } else {
+ 917             throw GraalInternalError.shouldNotReachHere("unknown hsail register: " + regNumber);
+ 918         }
+ 919         valueNode = hostGraph.unique(new FloatingReadNode(hsailFrame, location, null, StampFactory.forKind(valueKind)));
+ 920         return valueNode;
+ 921     }
+ 922 
+ 923 }
+</pre></body></html>

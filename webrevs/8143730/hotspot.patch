@@ -1,0 +1,303 @@
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/CompilationResult.java	2015-11-23 23:44:58.000000000 +0100
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/CompilationResult.java	2015-11-23 23:44:58.000000000 +0100
+@@ -875,26 +875,6 @@
+      * @param infopoint the infopoint to record, usually a derived class from {@link Infopoint}
+      */
+     public void addInfopoint(Infopoint infopoint) {
+-        // The infopoints list must always be sorted
+-        if (!infopoints.isEmpty()) {
+-            Infopoint previousInfopoint = infopoints.get(infopoints.size() - 1);
+-            if (previousInfopoint.pcOffset > infopoint.pcOffset) {
+-                // This re-sorting should be very rare
+-                Collections.sort(infopoints);
+-                previousInfopoint = infopoints.get(infopoints.size() - 1);
+-            }
+-            if (previousInfopoint.pcOffset == infopoint.pcOffset) {
+-                if (infopoint.reason.canBeOmitted()) {
+-                    return;
+-                }
+-                if (previousInfopoint.reason.canBeOmitted()) {
+-                    Infopoint removed = infopoints.remove(infopoints.size() - 1);
+-                    assert removed == previousInfopoint;
+-                } else {
+-                    throw new RuntimeException("Infopoints that can not be omited should have distinct PCs");
+-                }
+-            }
+-        }
+         infopoints.add(infopoint);
+     }
+ 
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/InfopointReason.java	2015-11-23 23:44:59.000000000 +0100
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/InfopointReason.java	2015-11-23 23:44:59.000000000 +0100
+@@ -26,22 +26,12 @@
+  * A reason for infopoint insertion.
+  */
+ public enum InfopointReason {
+-    UNKNOWN(false),
+-    SAFEPOINT(false),
+-    CALL(false),
+-    IMPLICIT_EXCEPTION(false),
+-    METHOD_START(true),
+-    METHOD_END(true),
+-    LINE_NUMBER(true),
+-    METASPACE_ACCESS(true);
+ 
+-    private InfopointReason(boolean canBeOmitted) {
+-        this.canBeOmitted = canBeOmitted;
+-    }
+-
+-    private final boolean canBeOmitted;
+-
+-    public boolean canBeOmitted() {
+-        return canBeOmitted;
+-    }
++    SAFEPOINT,
++    CALL,
++    IMPLICIT_EXCEPTION,
++    METASPACE_ACCESS,
++    METHOD_START,
++    METHOD_END,
++    BYTECODE_POSITION;
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotCompiledCode.java	2015-11-23 23:45:00.000000000 +0100
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotCompiledCode.java	2015-11-23 23:45:00.000000000 +0100
+@@ -24,9 +24,12 @@
+ 
+ import java.nio.ByteBuffer;
+ import java.nio.ByteOrder;
++import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Comparator;
++import java.util.EnumMap;
+ import java.util.List;
++import java.util.Map;
+ import java.util.stream.Stream;
+ import java.util.stream.Stream.Builder;
+ 
+@@ -41,6 +44,7 @@
+ import jdk.vm.ci.code.CompilationResult.Mark;
+ import jdk.vm.ci.code.CompilationResult.Site;
+ import jdk.vm.ci.code.DataSection;
++import jdk.vm.ci.code.InfopointReason;
+ import jdk.vm.ci.meta.Assumptions.Assumption;
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+ 
+@@ -155,14 +159,65 @@
+ 
+     static class SiteComparator implements Comparator<Site> {
+ 
++        /**
++         * Defines an order for sorting {@link Infopoint}s based on their
++         * {@linkplain Infopoint#reason reasons}. This is used to choose which infopoint to preserve
++         * when multiple infopoints collide on the same PC offset.
++         */
++        static final Map<InfopointReason, Integer> HOTSPOT_INFOPOINT_SORT_ORDER = new EnumMap<>(InfopointReason.class);
++        static {
++            int order = 0;
++            HOTSPOT_INFOPOINT_SORT_ORDER.put(InfopointReason.SAFEPOINT, ++order);
++            HOTSPOT_INFOPOINT_SORT_ORDER.put(InfopointReason.CALL, ++order);
++            HOTSPOT_INFOPOINT_SORT_ORDER.put(InfopointReason.IMPLICIT_EXCEPTION, ++order);
++            HOTSPOT_INFOPOINT_SORT_ORDER.put(InfopointReason.METASPACE_ACCESS, ++order);
++            HOTSPOT_INFOPOINT_SORT_ORDER.put(InfopointReason.METHOD_START, ++order);
++            HOTSPOT_INFOPOINT_SORT_ORDER.put(InfopointReason.METHOD_END, ++order);
++            HOTSPOT_INFOPOINT_SORT_ORDER.put(InfopointReason.BYTECODE_POSITION, ++order);
++            HOTSPOT_INFOPOINT_SORT_ORDER.put(InfopointReason.SAFEPOINT, ++order);
++        }
++
++        /**
++         * Records whether any two {@link Infopoint}s had the same {@link Infopoint#pcOffset}.
++         */
++        boolean sawCollidingInfopoints;
++
+         public int compare(Site s1, Site s2) {
+-            if (s1.pcOffset == s2.pcOffset && (s1 instanceof Mark ^ s2 instanceof Mark)) {
+-                return s1 instanceof Mark ? -1 : 1;
++            if (s1.pcOffset == s2.pcOffset) {
++                // Marks must come first since patching a call site
++                // may need to know the mark denoting the call type
++                // (see uses of CodeInstaller::_next_call_type).
++                boolean s1IsMark = s1 instanceof Mark;
++                boolean s2IsMark = s2 instanceof Mark;
++                if (s1IsMark != s2IsMark) {
++                    return s1IsMark ? -1 : 1;
++                }
++
++                // Infopoints must group together so put them after
++                // other Site types.
++                boolean s1IsInfopoint = s1 instanceof Infopoint;
++                boolean s2IsInfopoint = s2 instanceof Infopoint;
++                if (s1IsInfopoint != s2IsInfopoint) {
++                    return s1IsInfopoint ? 1 : -1;
++                }
++
++                if (s1IsInfopoint) {
++                    assert s2IsInfopoint;
++                    Infopoint s1Info = (Infopoint) s1;
++                    Infopoint s2Info = (Infopoint) s2;
++                    sawCollidingInfopoints = true;
++                    return HOTSPOT_INFOPOINT_SORT_ORDER.get(s1Info.reason) - HOTSPOT_INFOPOINT_SORT_ORDER.get(s2Info.reason);
++                }
+             }
+             return s1.pcOffset - s2.pcOffset;
+         }
+     }
+ 
++    /**
++     * HotSpot expects sites to be presented in ascending order of PC (see
++     * {@code DebugInformationRecorder::add_new_pc_offset}). In addition, it expects
++     * {@link Infopoint} PCs to be unique.
++     */
+     private static Site[] getSortedSites(CompilationResult target) {
+         List<?>[] lists = new List<?>[]{target.getInfopoints(), target.getDataPatches(), target.getMarks()};
+         int count = 0;
+@@ -176,7 +231,27 @@
+                 result[pos++] = (Site) elem;
+             }
+         }
+-        Arrays.sort(result, new SiteComparator());
++        SiteComparator c = new SiteComparator();
++        Arrays.sort(result, c);
++        if (c.sawCollidingInfopoints) {
++            Infopoint lastInfopoint = null;
++            List<Site> copy = new ArrayList<>(count);
++            for (int i = 0; i < count; i++) {
++                if (result[i] instanceof Infopoint) {
++                    Infopoint info = (Infopoint) result[i];
++                    if (lastInfopoint == null || lastInfopoint.pcOffset != info.pcOffset) {
++                        lastInfopoint = info;
++                        copy.add(info);
++                    } else {
++                        // Omit this colliding infopoint
++                        assert lastInfopoint.reason.compareTo(info.reason) < 0;
++                    }
++                } else {
++                    copy.add(result[i]);
++                }
++            }
++            result = copy.toArray(new Site[copy.size()]);
++        }
+         return result;
+     }
+ 
+--- old/src/share/vm/jvmci/jvmciCodeInstaller.cpp	2015-11-23 23:45:01.000000000 +0100
++++ new/src/share/vm/jvmci/jvmciCodeInstaller.cpp	2015-11-23 23:45:01.000000000 +0100
+@@ -727,10 +727,9 @@
+       if (InfopointReason::SAFEPOINT() == reason || InfopointReason::CALL() == reason || InfopointReason::IMPLICIT_EXCEPTION() == reason) {
+         TRACE_jvmci_4("safepoint at %i", pc_offset);
+         site_Safepoint(buffer, pc_offset, site, CHECK_OK);
+-      } else if (InfopointReason::METHOD_START() == reason || InfopointReason::METHOD_END() == reason || InfopointReason::LINE_NUMBER() == reason) {
+-        site_Infopoint(buffer, pc_offset, site, CHECK_OK);
+       } else {
+-        JVMCI_ERROR_OK("unknown infopoint reason at %i", pc_offset);
++        TRACE_jvmci_4("infopoint at %i", pc_offset);
++        site_Infopoint(buffer, pc_offset, site, CHECK_OK);
+       }
+     } else if (site->is_a(CompilationResult_DataPatch::klass())) {
+       TRACE_jvmci_4("datapatch at %i", pc_offset);
+@@ -868,25 +867,33 @@
+   return objects;
+ }
+ 
+-void CodeInstaller::record_scope(jint pc_offset, Handle debug_info, TRAPS) {
++void CodeInstaller::record_scope(jint pc_offset, Handle debug_info, ScopeMode scope_mode, TRAPS) {
+   Handle position = DebugInfo::bytecodePosition(debug_info);
+   if (position.is_null()) {
+     // Stubs do not record scope info, just oop maps
+     return;
+   }
+ 
+-  GrowableArray<ScopeValue*>* objectMapping = record_virtual_objects(debug_info, CHECK);
+-  record_scope(pc_offset, position, objectMapping, CHECK);
++  GrowableArray<ScopeValue*>* objectMapping;
++  if (scope_mode == CodeInstaller::FullFrame) {
++    objectMapping = record_virtual_objects(debug_info, CHECK);
++  } else {
++    objectMapping = NULL;
++  }
++  record_scope(pc_offset, position, scope_mode, objectMapping, CHECK);
+ }
+ 
+-void CodeInstaller::record_scope(jint pc_offset, Handle position, GrowableArray<ScopeValue*>* objects, TRAPS) {
++void CodeInstaller::record_scope(jint pc_offset, Handle position, ScopeMode scope_mode, GrowableArray<ScopeValue*>* objects, TRAPS) {
+   Handle frame;
+-  if (position->is_a(BytecodeFrame::klass())) {
++  if (scope_mode == CodeInstaller::FullFrame) {
++    if (!position->is_a(BytecodeFrame::klass())) {
++      JVMCI_ERROR("Full frame expected for debug info at %i", pc_offset);
++    }
+     frame = position;
+   }
+   Handle caller_frame = BytecodePosition::caller(position);
+   if (caller_frame.not_null()) {
+-    record_scope(pc_offset, caller_frame, objects, CHECK);
++    record_scope(pc_offset, caller_frame, scope_mode, objects, CHECK);
+   }
+ 
+   Handle hotspot_method = BytecodePosition::method(position);
+@@ -990,7 +997,7 @@
+   // jint next_pc_offset = Assembler::locate_next_instruction(instruction) - _instructions->start();
+   OopMap *map = create_oop_map(debug_info, CHECK);
+   _debug_recorder->add_safepoint(pc_offset, map);
+-  record_scope(pc_offset, debug_info, CHECK);
++  record_scope(pc_offset, debug_info, CodeInstaller::FullFrame, CHECK);
+   _debug_recorder->end_safepoint(pc_offset);
+ }
+ 
+@@ -1001,7 +1008,7 @@
+   }
+ 
+   _debug_recorder->add_non_safepoint(pc_offset);
+-  record_scope(pc_offset, debug_info, CHECK);
++  record_scope(pc_offset, debug_info, CodeInstaller::BytecodePosition, CHECK);
+   _debug_recorder->end_non_safepoint(pc_offset);
+ }
+ 
+@@ -1028,7 +1035,7 @@
+   if (debug_info.not_null()) {
+     OopMap *map = create_oop_map(debug_info, CHECK);
+     _debug_recorder->add_safepoint(next_pc_offset, map);
+-    record_scope(next_pc_offset, debug_info, CHECK);
++    record_scope(next_pc_offset, debug_info, CodeInstaller::FullFrame, CHECK);
+   }
+ 
+   if (foreign_call.not_null()) {
+--- old/src/share/vm/jvmci/jvmciCodeInstaller.hpp	2015-11-23 23:45:02.000000000 +0100
++++ new/src/share/vm/jvmci/jvmciCodeInstaller.hpp	2015-11-23 23:45:02.000000000 +0100
+@@ -219,8 +219,18 @@
+ 
+   OopMap* create_oop_map(Handle debug_info, TRAPS);
+ 
+-  void record_scope(jint pc_offset, Handle debug_info, TRAPS);
+-  void record_scope(jint pc_offset, Handle code_pos, GrowableArray<ScopeValue*>* objects, TRAPS);
++  /**
++   * Specifies the level of detail to record for a scope.
++   */
++  enum ScopeMode {
++    // Only record a method and BCI
++    BytecodePosition,
++    // Record a method, bci and JVM frame state
++    FullFrame
++  };
++
++  void record_scope(jint pc_offset, Handle debug_info, ScopeMode scope_mode, TRAPS);
++  void record_scope(jint pc_offset, Handle position, ScopeMode scope_mode, GrowableArray<ScopeValue*>* objects, TRAPS);
+   void record_object_value(ObjectValue* sv, Handle value, GrowableArray<ScopeValue*>* objects, TRAPS);
+ 
+   GrowableArray<ScopeValue*>* record_virtual_objects(Handle debug_info, TRAPS);
+--- old/src/share/vm/jvmci/jvmciJavaClasses.hpp	2015-11-23 23:45:03.000000000 +0100
++++ new/src/share/vm/jvmci/jvmciJavaClasses.hpp	2015-11-23 23:45:03.000000000 +0100
+@@ -148,14 +148,9 @@
+     int_field(CompilationResult_DataSectionReference, offset)                                                                                                  \
+   end_class                                                                                                                                                    \
+   start_class(InfopointReason)                                                                                                                                 \
+-    static_oop_field(InfopointReason, UNKNOWN, "Ljdk/vm/ci/code/InfopointReason;")                                                                             \
+     static_oop_field(InfopointReason, SAFEPOINT, "Ljdk/vm/ci/code/InfopointReason;")                                                                           \
+     static_oop_field(InfopointReason, CALL, "Ljdk/vm/ci/code/InfopointReason;")                                                                                \
+     static_oop_field(InfopointReason, IMPLICIT_EXCEPTION, "Ljdk/vm/ci/code/InfopointReason;")                                                                  \
+-    static_oop_field(InfopointReason, METHOD_START, "Ljdk/vm/ci/code/InfopointReason;")                                                                        \
+-    static_oop_field(InfopointReason, METHOD_END, "Ljdk/vm/ci/code/InfopointReason;")                                                                          \
+-    static_oop_field(InfopointReason, LINE_NUMBER, "Ljdk/vm/ci/code/InfopointReason;")                                                                         \
+-    static_oop_field(InfopointReason, METASPACE_ACCESS, "Ljdk/vm/ci/code/InfopointReason;")                                                                    \
+   end_class                                                                                                                                                    \
+   start_class(CompilationResult_Infopoint)                                                                                                                     \
+     oop_field(CompilationResult_Infopoint, debugInfo, "Ljdk/vm/ci/code/DebugInfo;")                                                                            \

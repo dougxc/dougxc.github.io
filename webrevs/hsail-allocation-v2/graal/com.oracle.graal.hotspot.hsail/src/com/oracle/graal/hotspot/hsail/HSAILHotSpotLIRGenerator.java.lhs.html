@@ -1,0 +1,478 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2013, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 
+  24 package com.oracle.graal.hotspot.hsail;
+  25 
+  26 import static com.oracle.graal.api.code.ValueUtil.*;
+  27 
+  28 import com.oracle.graal.api.code.*;
+  29 import com.oracle.graal.api.meta.*;
+  30 import com.oracle.graal.compiler.gen.*;
+  31 import com.oracle.graal.compiler.hsail.*;
+  32 import com.oracle.graal.graph.*;
+  33 import com.oracle.graal.hotspot.*;
+  34 import com.oracle.graal.hotspot.HotSpotVMConfig.CompressEncoding;
+  35 import com.oracle.graal.hotspot.meta.*;
+  36 import com.oracle.graal.hotspot.nodes.type.*;
+  37 import com.oracle.graal.lir.*;
+  38 import com.oracle.graal.lir.hsail.*;
+  39 import com.oracle.graal.lir.hsail.HSAILControlFlow.CondMoveOp;
+  40 import com.oracle.graal.lir.hsail.HSAILControlFlow.DeoptimizeOp;
+  41 import com.oracle.graal.lir.hsail.HSAILControlFlow.ForeignCall1ArgOp;
+  42 import com.oracle.graal.lir.hsail.HSAILControlFlow.ForeignCall2ArgOp;
+  43 import com.oracle.graal.lir.hsail.HSAILControlFlow.ForeignCallNoArgOp;
+  44 import com.oracle.graal.lir.hsail.HSAILMove.CompareAndSwapOp;
+  45 import com.oracle.graal.lir.hsail.HSAILMove.LoadCompressedPointer;
+  46 import com.oracle.graal.lir.hsail.HSAILMove.LoadOp;
+  47 import com.oracle.graal.lir.hsail.HSAILMove.MoveFromRegOp;
+  48 import com.oracle.graal.lir.hsail.HSAILMove.MoveToRegOp;
+  49 import com.oracle.graal.lir.hsail.HSAILMove.StoreCompressedPointer;
+  50 import com.oracle.graal.lir.hsail.HSAILMove.StoreConstantOp;
+  51 import com.oracle.graal.lir.hsail.HSAILMove.StoreOp;
+  52 import com.oracle.graal.nodes.*;
+  53 import com.oracle.graal.nodes.calc.*;
+  54 import com.oracle.graal.nodes.extended.*;
+  55 import com.oracle.graal.phases.util.*;
+  56 
+  57 /**
+  58  * The HotSpot specific portion of the HSAIL LIR generator.
+  59  */
+  60 public class HSAILHotSpotLIRGenerator extends HSAILLIRGenerator implements HotSpotLIRGenerator {
+  61 
+  62     final HotSpotVMConfig config;
+  63 
+  64     public HSAILHotSpotLIRGenerator(Providers providers, HotSpotVMConfig config, CallingConvention cc, LIRGenerationResult lirGenRes) {
+  65         super(providers, cc, lirGenRes);
+  66         this.config = config;
+  67     }
+  68 
+  69     @Override
+  70     public HotSpotProviders getProviders() {
+  71         return (HotSpotProviders) super.getProviders();
+  72     }
+  73 
+  74     int getLogMinObjectAlignment() {
+  75         return config.logMinObjAlignment();
+  76     }
+  77 
+  78     int getNarrowOopShift() {
+  79         return config.narrowOopShift;
+  80     }
+  81 
+  82     long getNarrowOopBase() {
+  83         return config.narrowOopBase;
+  84     }
+  85 
+  86     int getLogKlassAlignment() {
+  87         return config.logKlassAlignment;
+  88     }
+  89 
+  90     int getNarrowKlassShift() {
+  91         return config.narrowKlassShift;
+  92     }
+  93 
+  94     long getNarrowKlassBase() {
+  95         return config.narrowKlassBase;
+  96     }
+  97 
+  98     private static boolean isCompressCandidate(Access access) {
+  99         return access != null &amp;&amp; access.isCompressible();
+ 100     }
+ 101 
+ 102     @Override
+ 103     public boolean canStoreConstant(Constant c, boolean isCompressed) {
+ 104         return true;
+ 105     }
+ 106 
+ 107     /**
+ 108      * Returns whether or not the input access should be (de)compressed.
+ 109      */
+ 110     private boolean isCompressedOperation(PlatformKind kind, Access access) {
+ 111         return access != null &amp;&amp; access.isCompressible() &amp;&amp; ((kind == Kind.Long &amp;&amp; config.useCompressedClassPointers) || (kind == Kind.Object &amp;&amp; config.useCompressedOops));
+ 112     }
+ 113 
+ 114     private static Kind getMemoryKind(PlatformKind kind) {
+ 115         if (kind == NarrowOopStamp.NarrowOop) {
+ 116             return Kind.Int;
+ 117         } else {
+ 118             return (Kind) kind;
+ 119         }
+ 120     }
+ 121 
+ 122     @Override
+ 123     public Variable emitLoad(PlatformKind kind, Value address, Access access) {
+ 124         HSAILAddressValue loadAddress = asAddressValue(address);
+ 125         Variable result = newVariable(kind);
+ 126         LIRFrameState state = null;
+ 127         if (access instanceof DeoptimizingNode) {
+ 128             state = state((DeoptimizingNode) access);
+ 129         }
+ 130         if (isCompressCandidate(access) &amp;&amp; config.useCompressedOops &amp;&amp; kind == Kind.Object) {
+ 131             Variable scratch = newVariable(Kind.Long);
+ 132             append(new LoadCompressedPointer(Kind.Object, result, scratch, loadAddress, state, getNarrowOopBase(), getNarrowOopShift(), getLogMinObjectAlignment()));
+ 133         } else if (isCompressCandidate(access) &amp;&amp; config.useCompressedClassPointers &amp;&amp; kind == Kind.Long) {
+ 134             Variable scratch = newVariable(Kind.Long);
+ 135             append(new LoadCompressedPointer(Kind.Object, result, scratch, loadAddress, state, getNarrowKlassBase(), getNarrowKlassShift(), getLogKlassAlignment()));
+ 136         } else if (kind == NarrowOopStamp.NarrowOop) {
+ 137             append(new LoadOp(Kind.Int, result, loadAddress, state));
+ 138         } else {
+ 139             append(new LoadOp(getMemoryKind(kind), result, loadAddress, state));
+ 140         }
+ 141         return result;
+ 142     }
+ 143 
+ 144     @Override
+ 145     public void emitStore(PlatformKind kind, Value address, Value inputVal, Access access) {
+ 146         HSAILAddressValue storeAddress = asAddressValue(address);
+ 147         LIRFrameState state = null;
+ 148         if (access instanceof DeoptimizingNode) {
+ 149             state = state((DeoptimizingNode) access);
+ 150         }
+ 151         boolean isCompressed = isCompressedOperation(kind, access);
+ 152         if (isConstant(inputVal)) {
+ 153             Constant c = asConstant(inputVal);
+ 154             if (canStoreConstant(c, isCompressed)) {
+ 155                 if (isCompressed) {
+ 156                     if ((c.getKind() == Kind.Object) &amp;&amp; c.isNull()) {
+<a name="1" id="anc1"></a>
+ 157                         append(new StoreConstantOp(Kind.Int, storeAddress, Constant.forInt(0), state));
+ 158                     } else if (c.getKind() == Kind.Long) {
+<a name="2" id="anc2"></a>
+
+ 159                         Constant value = compress(c, config.getKlassEncoding());
+ 160                         append(new StoreConstantOp(Kind.Int, storeAddress, value, state));
+ 161                     } else {
+ 162                         throw GraalInternalError.shouldNotReachHere("can't handle: " + access);
+ 163                     }
+ 164                     return;
+ 165                 } else {
+ 166                     append(new StoreConstantOp(getMemoryKind(kind), storeAddress, c, state));
+ 167                     return;
+ 168                 }
+ 169             }
+ 170         }
+ 171         Variable input = load(inputVal);
+ 172         if (isCompressCandidate(access) &amp;&amp; config.useCompressedOops &amp;&amp; kind == Kind.Object) {
+ 173             Variable scratch = newVariable(Kind.Long);
+ 174             append(new StoreCompressedPointer(Kind.Object, storeAddress, input, scratch, state, getNarrowOopBase(), getNarrowOopShift(), getLogMinObjectAlignment()));
+ 175         } else if (isCompressCandidate(access) &amp;&amp; config.useCompressedClassPointers &amp;&amp; kind == Kind.Long) {
+ 176             Variable scratch = newVariable(Kind.Long);
+ 177             append(new StoreCompressedPointer(Kind.Object, storeAddress, input, scratch, state, getNarrowKlassBase(), getNarrowKlassShift(), getLogKlassAlignment()));
+ 178         } else if (kind == NarrowOopStamp.NarrowOop) {
+ 179             append(new StoreOp(Kind.Int, storeAddress, input, state));
+ 180         } else {
+ 181             append(new StoreOp(getMemoryKind(kind), storeAddress, input, state));
+ 182         }
+ 183     }
+ 184 
+ 185     public Value emitCompareAndSwap(Value address, Value expectedValue, Value newValue, Value trueValue, Value falseValue) {
+ 186         PlatformKind kind = newValue.getPlatformKind();
+ 187         assert kind == expectedValue.getPlatformKind();
+ 188         Kind memKind = getMemoryKind(kind);
+ 189 
+ 190         HSAILAddressValue addressValue = asAddressValue(address);
+ 191         Variable expected = emitMove(expectedValue);
+ 192         Variable casResult = newVariable(kind);
+ 193         append(new CompareAndSwapOp(memKind, casResult, addressValue, expected, asAllocatable(newValue)));
+ 194 
+ 195         assert trueValue.getPlatformKind() == falseValue.getPlatformKind();
+ 196         Variable nodeResult = newVariable(trueValue.getPlatformKind());
+ 197         append(new CondMoveOp(HSAILLIRGenerator.mapKindToCompareOp(memKind), casResult, expected, nodeResult, Condition.EQ, trueValue, falseValue));
+ 198         return nodeResult;
+ 199     }
+ 200 
+ 201     @Override
+ 202     public void emitDeoptimize(Value actionAndReason, Value failedSpeculation, DeoptimizingNode deopting) {
+ 203         emitDeoptimizeInner(actionAndReason, state(deopting), "emitDeoptimize");
+ 204     }
+ 205 
+ 206     /***
+ 207      * We need 64-bit and 32-bit scratch registers for the codegen $s0 can be live at this block.
+ 208      */
+ 209     private void emitDeoptimizeInner(Value actionAndReason, LIRFrameState lirFrameState, String emitName) {
+ 210         DeoptimizeOp deopt = new DeoptimizeOp(actionAndReason, lirFrameState, emitName, getMetaAccess());
+ 211         ((HSAILHotSpotLIRGenerationResult) getResult()).addDeopt(deopt);
+ 212         append(deopt);
+ 213     }
+ 214 
+ 215     /***
+ 216      * This is a very temporary solution to emitForeignCall. We don't really support foreign calls
+ 217      * yet, but we do want to generate dummy code for them. The ForeignCallXXXOps just end up
+ 218      * emitting a comment as to what Foreign call they would have made.
+ 219      */
+ 220     @Override
+ 221     public Variable emitForeignCall(ForeignCallLinkage linkage, DeoptimizingNode info, Value... args) {
+ 222         Variable result = newVariable(Kind.Object);  // linkage.getDescriptor().getResultType());
+ 223 
+ 224         // to make the LIRVerifier happy, we move any constants into registers
+ 225         Value[] argLocations = new Value[args.length];
+ 226         for (int i = 0; i &lt; args.length; i++) {
+ 227             Value arg = args[i];
+ 228             AllocatableValue loc = newVariable(arg.getKind());
+ 229             emitMove(loc, arg);
+ 230             argLocations[i] = loc;
+ 231         }
+ 232 
+ 233         // here we could check the callName if we wanted to only handle certain callnames
+ 234         String callName = linkage.getDescriptor().getName();
+ 235         switch (argLocations.length) {
+ 236             case 0:
+ 237                 append(new ForeignCallNoArgOp(callName, result));
+ 238                 break;
+ 239             case 1:
+ 240                 append(new ForeignCall1ArgOp(callName, result, argLocations[0]));
+ 241                 break;
+ 242             case 2:
+ 243                 append(new ForeignCall2ArgOp(callName, result, argLocations[0], argLocations[1]));
+ 244                 break;
+ 245             default:
+ 246                 throw new InternalError("NYI emitForeignCall " + callName + ", " + argLocations.length + ", " + linkage);
+ 247         }
+ 248         return result;
+ 249     }
+ 250 
+ 251     @Override
+ 252     protected HSAILLIRInstruction createMove(AllocatableValue dst, Value src) {
+ 253         if (dst.getPlatformKind() == NarrowOopStamp.NarrowOop) {
+ 254             if (isRegister(src) || isStackSlot(dst)) {
+ 255                 return new MoveFromRegOp(Kind.Int, dst, src);
+ 256             } else {
+ 257                 return new MoveToRegOp(Kind.Int, dst, src);
+ 258             }
+ 259         } else {
+ 260             return super.createMove(dst, src);
+ 261         }
+ 262     }
+ 263 
+ 264     @Override
+ 265     protected void emitForeignCall(ForeignCallLinkage linkage, Value result, Value[] arguments, Value[] temps, LIRFrameState info) {
+ 266         // this version of emitForeignCall not used for now
+ 267     }
+ 268 
+ 269     /**
+ 270      * @return a compressed version of the incoming constant lifted from AMD64HotSpotLIRGenerator
+ 271      */
+ 272     protected static Constant compress(Constant c, CompressEncoding encoding) {
+ 273         if (c.getKind() == Kind.Long) {
+ 274             int compressedValue = (int) (((c.asLong() - encoding.base) &gt;&gt; encoding.shift) &amp; 0xffffffffL);
+ 275             if (c instanceof HotSpotMetaspaceConstant) {
+ 276                 return HotSpotMetaspaceConstant.forMetaspaceObject(Kind.Int, compressedValue, HotSpotMetaspaceConstant.getMetaspaceObject(c));
+ 277             } else {
+ 278                 return Constant.forIntegerKind(Kind.Int, compressedValue);
+ 279             }
+ 280         } else {
+ 281             throw GraalInternalError.shouldNotReachHere();
+ 282         }
+ 283     }
+ 284 
+ 285     public void emitTailcall(Value[] args, Value address) {
+ 286         throw GraalInternalError.shouldNotReachHere("NYI");
+ 287     }
+ 288 
+ 289     public void emitDeoptimizeCaller(DeoptimizationAction action, DeoptimizationReason reason) {
+ 290         throw GraalInternalError.shouldNotReachHere("NYI");
+ 291     }
+ 292 
+ 293     public StackSlot getLockSlot(int lockDepth) {
+ 294         throw GraalInternalError.shouldNotReachHere("NYI");
+ 295     }
+ 296 
+ 297     @Override
+ 298     public Value emitCompress(Value pointer, CompressEncoding encoding, boolean nonNull) {
+ 299         Variable result = newVariable(NarrowOopStamp.NarrowOop);
+ 300         append(new HSAILMove.CompressPointer(result, newVariable(pointer.getPlatformKind()), asAllocatable(pointer), encoding.base, encoding.shift, encoding.alignment, nonNull));
+ 301         return result;
+ 302     }
+ 303 
+ 304     @Override
+ 305     public Value emitUncompress(Value pointer, CompressEncoding encoding, boolean nonNull) {
+ 306         Variable result = newVariable(Kind.Object);
+ 307         append(new HSAILMove.UncompressPointer(result, asAllocatable(pointer), encoding.base, encoding.shift, encoding.alignment, nonNull));
+ 308         return result;
+ 309     }
+ 310 }
+<a name="3" id="anc3"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="3" type="hidden" /></form></body></html>

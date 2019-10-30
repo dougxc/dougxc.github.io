@@ -1,0 +1,454 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>Old src/share/vm/compiler/compileBroker.hpp</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 1999, 2015, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #ifndef SHARE_VM_COMPILER_COMPILEBROKER_HPP
+  26 #define SHARE_VM_COMPILER_COMPILEBROKER_HPP
+  27 
+  28 #include "ci/compilerInterface.hpp"
+  29 #include "compiler/abstractCompiler.hpp"
+  30 #include "compiler/compileTask.hpp"
+  31 #include "compiler/compilerDirectives.hpp"
+  32 #include "runtime/perfData.hpp"
+  33 #include "trace/tracing.hpp"
+  34 #include "utilities/stack.hpp"
+  35 
+  36 class nmethod;
+  37 class nmethodLocker;
+  38 
+  39 // CompilerCounters
+  40 //
+  41 // Per Compiler Performance Counters.
+  42 //
+  43 class CompilerCounters : public CHeapObj&lt;mtCompiler&gt; {
+  44 
+  45   public:
+  46     enum {
+  47       cmname_buffer_length = 160
+  48     };
+  49 
+  50   private:
+  51 
+  52     char _current_method[cmname_buffer_length];
+  53     int  _compile_type;
+  54 
+  55   public:
+  56     CompilerCounters();
+  57 
+  58     // these methods should be called in a thread safe context
+  59 
+  60     void set_current_method(const char* method) {
+  61       strncpy(_current_method, method, (size_t)cmname_buffer_length-1);
+  62       _current_method[cmname_buffer_length-1] = '\0';
+  63     }
+  64 
+  65     char* current_method()                  { return _current_method; }
+  66 
+  67     void set_compile_type(int compile_type) {
+  68       _compile_type = compile_type;
+  69     }
+  70 
+  71     int compile_type()                       { return _compile_type; }
+  72 
+  73 };
+  74 
+  75 // CompileQueue
+  76 //
+  77 // A list of CompileTasks.
+  78 class CompileQueue : public CHeapObj&lt;mtCompiler&gt; {
+  79  private:
+  80   const char* _name;
+  81 
+  82   CompileTask* _first;
+  83   CompileTask* _last;
+  84 
+  85   CompileTask* _first_stale;
+  86 
+  87   int _size;
+  88 
+  89   void purge_stale_tasks();
+  90  public:
+  91   CompileQueue(const char* name) {
+  92     _name = name;
+  93     _first = NULL;
+  94     _last = NULL;
+  95     _size = 0;
+  96     _first_stale = NULL;
+  97   }
+  98 
+  99   const char*  name() const                      { return _name; }
+ 100 
+ 101   void         add(CompileTask* task);
+ 102   void         remove(CompileTask* task);
+ 103   void         remove_and_mark_stale(CompileTask* task);
+ 104   CompileTask* first()                           { return _first; }
+ 105   CompileTask* last()                            { return _last;  }
+ 106 
+ 107   CompileTask* get();
+ 108 
+ 109   bool         is_empty() const                  { return _first == NULL; }
+ 110   int          size()     const                  { return _size;          }
+ 111 
+ 112 
+ 113   // Redefine Classes support
+ 114   void mark_on_stack();
+ 115   void free_all();
+ 116   void print_tty();
+ 117   void print(outputStream* st = tty);
+ 118 
+ 119   ~CompileQueue() {
+ 120     assert (is_empty(), " Compile Queue must be empty");
+ 121   }
+ 122 };
+ 123 
+ 124 // CompileTaskWrapper
+ 125 //
+ 126 // Assign this task to the current thread.  Deallocate the task
+ 127 // when the compilation is complete.
+ 128 class CompileTaskWrapper : StackObj {
+ 129 public:
+ 130   CompileTaskWrapper(CompileTask* task);
+ 131   ~CompileTaskWrapper();
+ 132 };
+ 133 
+ 134 // Compilation
+ 135 //
+ 136 // The broker for all compilation requests.
+ 137 class CompileBroker: AllStatic {
+ 138  friend class Threads;
+ 139  friend class CompileTaskWrapper;
+ 140 
+ 141  public:
+ 142   enum {
+ 143     name_buffer_length = 100
+ 144   };
+ 145 
+ 146   // Compile type Information for print_last_compile() and CompilerCounters
+ 147   enum { no_compile, normal_compile, osr_compile, native_compile };
+ 148   static int assign_compile_id (const methodHandle&amp; method, int osr_bci);
+ 149 
+ 150 
+ 151  private:
+ 152   static bool _initialized;
+ 153   static volatile bool _should_block;
+ 154 
+ 155   // This flag can be used to stop compilation or turn it back on
+ 156   static volatile jint _should_compile_new_jobs;
+ 157 
+ 158   // The installed compiler(s)
+ 159   static AbstractCompiler* _compilers[2];
+ 160 
+ 161   // These counters are used for assigning id's to each compilation
+ 162   static volatile jint _compilation_id;
+ 163   static volatile jint _osr_compilation_id;
+ 164 
+ 165   static int  _last_compile_type;
+ 166   static int  _last_compile_level;
+ 167   static char _last_method_compiled[name_buffer_length];
+ 168 
+ 169   static CompileQueue* _c2_compile_queue;
+ 170   static CompileQueue* _c1_compile_queue;
+ 171 
+ 172   // performance counters
+ 173   static PerfCounter* _perf_total_compilation;
+ 174   static PerfCounter* _perf_native_compilation;
+ 175   static PerfCounter* _perf_osr_compilation;
+ 176   static PerfCounter* _perf_standard_compilation;
+ 177 
+ 178   static PerfCounter* _perf_total_bailout_count;
+ 179   static PerfCounter* _perf_total_invalidated_count;
+ 180   static PerfCounter* _perf_total_compile_count;
+ 181   static PerfCounter* _perf_total_native_compile_count;
+ 182   static PerfCounter* _perf_total_osr_compile_count;
+ 183   static PerfCounter* _perf_total_standard_compile_count;
+ 184 
+ 185   static PerfCounter* _perf_sum_osr_bytes_compiled;
+ 186   static PerfCounter* _perf_sum_standard_bytes_compiled;
+ 187   static PerfCounter* _perf_sum_nmethod_size;
+ 188   static PerfCounter* _perf_sum_nmethod_code_size;
+ 189 
+ 190   static PerfStringVariable* _perf_last_method;
+ 191   static PerfStringVariable* _perf_last_failed_method;
+ 192   static PerfStringVariable* _perf_last_invalidated_method;
+ 193   static PerfVariable*       _perf_last_compile_type;
+ 194   static PerfVariable*       _perf_last_compile_size;
+ 195   static PerfVariable*       _perf_last_failed_type;
+ 196   static PerfVariable*       _perf_last_invalidated_type;
+ 197 
+ 198   // Timers and counters for generating statistics
+ 199   static elapsedTimer _t_total_compilation;
+ 200   static elapsedTimer _t_osr_compilation;
+ 201   static elapsedTimer _t_standard_compilation;
+ 202   static elapsedTimer _t_invalidated_compilation;
+ 203   static elapsedTimer _t_bailedout_compilation;
+ 204 
+ 205   static int _total_compile_count;
+ 206   static int _total_bailout_count;
+ 207   static int _total_invalidated_count;
+ 208   static int _total_native_compile_count;
+ 209   static int _total_osr_compile_count;
+ 210   static int _total_standard_compile_count;
+ 211   static int _sum_osr_bytes_compiled;
+ 212   static int _sum_standard_bytes_compiled;
+ 213   static int _sum_nmethod_size;
+ 214   static int _sum_nmethod_code_size;
+ 215   static long _peak_compilation_time;
+ 216 
+ 217   static volatile jint _print_compilation_warning;
+ 218 
+ 219   static JavaThread* make_thread(const char* name, CompileQueue* queue, CompilerCounters* counters, AbstractCompiler* comp, bool compiler_thread, TRAPS);
+ 220   static void init_compiler_sweeper_threads(int c1_compiler_count, int c2_compiler_count);
+ 221   static bool compilation_is_complete  (const methodHandle&amp; method, int osr_bci, int comp_level);
+ 222   static bool compilation_is_prohibited(const methodHandle&amp; method, int osr_bci, int comp_level);
+ 223   static bool is_compile_blocking();
+ 224   static void preload_classes          (const methodHandle&amp; method, TRAPS);
+ 225 
+ 226   static CompileTask* create_compile_task(CompileQueue*       queue,
+ 227                                           int                 compile_id,
+ 228                                           const methodHandle&amp; method,
+ 229                                           int                 osr_bci,
+ 230                                           int                 comp_level,
+ 231                                           const methodHandle&amp; hot_method,
+ 232                                           int                 hot_count,
+ 233                                           const char*         comment,
+ 234                                           bool                blocking);
+ 235   static void wait_for_completion(CompileTask* task);
+ 236 
+ 237   static void invoke_compiler_on_method(CompileTask* task);
+ 238   static void post_compile(CompilerThread* thread, CompileTask* task, EventCompilation&amp; event, bool success, ciEnv* ci_env);
+ 239   static void set_last_compile(CompilerThread *thread, const methodHandle&amp; method, bool is_osr, int comp_level);
+ 240   static void push_jni_handle_block();
+ 241   static void pop_jni_handle_block();
+ 242   static void collect_statistics(CompilerThread* thread, elapsedTimer time, CompileTask* task);
+ 243 
+ 244   static void compile_method_base(const methodHandle&amp; method,
+ 245                                   int osr_bci,
+ 246                                   int comp_level,
+ 247                                   const methodHandle&amp; hot_method,
+ 248                                   int hot_count,
+ 249                                   const char* comment,
+ 250                                   Thread* thread);
+ 251 
+ 252   static CompileQueue* compile_queue(int comp_level);
+ 253   static bool init_compiler_runtime();
+ 254   static void shutdown_compiler_runtime(AbstractCompiler* comp, CompilerThread* thread);
+ 255 
+ 256 public:
+ 257 
+ 258   static DirectivesStack* dirstack();
+ 259   static void set_dirstack(DirectivesStack* stack);
+ 260 
+ 261   enum {
+ 262     // The entry bci used for non-OSR compilations.
+ 263     standard_entry_bci = InvocationEntryBci
+ 264   };
+ 265 
+ 266   static AbstractCompiler* compiler(int comp_level) {
+ 267     if (is_c2_compile(comp_level)) return _compilers[1]; // C2
+ 268     if (is_c1_compile(comp_level)) return _compilers[0]; // C1
+ 269     return NULL;
+ 270   }
+ 271 
+ 272   static bool compilation_is_in_queue(const methodHandle&amp; method);
+ 273   static void print_compile_queues(outputStream* st);
+ 274   static void print_directives(outputStream* st);
+ 275   static int queue_size(int comp_level) {
+ 276     CompileQueue *q = compile_queue(comp_level);
+ 277     return q != NULL ? q-&gt;size() : 0;
+ 278   }
+ 279   static void compilation_init(TRAPS);
+ 280   static void init_compiler_thread_log();
+ 281   static nmethod* compile_method(const methodHandle&amp; method,
+ 282                                  int osr_bci,
+ 283                                  int comp_level,
+ 284                                  const methodHandle&amp; hot_method,
+ 285                                  int hot_count,
+ 286                                  const char* comment, Thread* thread);
+ 287 
+ 288   // Acquire any needed locks and assign a compile id
+ 289   static uint assign_compile_id_unlocked(Thread* thread, const methodHandle&amp; method, int osr_bci);
+ 290 
+ 291   static void compiler_thread_loop();
+ 292   static uint get_compilation_id() { return _compilation_id; }
+ 293 
+ 294   // Set _should_block.
+ 295   // Call this from the VM, with Threads_lock held and a safepoint requested.
+ 296   static void set_should_block();
+ 297 
+ 298   // Call this from the compiler at convenient points, to poll for _should_block.
+ 299   static void maybe_block();
+ 300 
+ 301   enum {
+ 302     // Flags for toggling compiler activity
+ 303     stop_compilation    = 0,
+ 304     run_compilation     = 1,
+ 305     shutdown_compilaton = 2
+ 306   };
+ 307 
+ 308   static jint get_compilation_activity_mode() { return _should_compile_new_jobs; }
+ 309   static bool should_compile_new_jobs() { return UseCompiler &amp;&amp; (_should_compile_new_jobs == run_compilation); }
+ 310   static bool set_should_compile_new_jobs(jint new_state) {
+ 311     // Return success if the current caller set it
+ 312     jint old = Atomic::cmpxchg(new_state, &amp;_should_compile_new_jobs, 1-new_state);
+ 313     return (old == (1-new_state));
+ 314   }
+ 315 
+ 316   static void disable_compilation_forever() {
+ 317     UseCompiler               = false;
+ 318     AlwaysCompileLoopMethods  = false;
+ 319     Atomic::xchg(shutdown_compilaton, &amp;_should_compile_new_jobs);
+ 320   }
+ 321 
+ 322   static bool is_compilation_disabled_forever() {
+ 323     return _should_compile_new_jobs == shutdown_compilaton;
+ 324   }
+ 325   static void handle_full_code_cache(int code_blob_type);
+ 326   // Ensures that warning is only printed once.
+ 327   static bool should_print_compiler_warning() {
+ 328     jint old = Atomic::cmpxchg(1, &amp;_print_compilation_warning, 0);
+ 329     return old == 0;
+ 330   }
+ 331   // Return total compilation ticks
+ 332   static jlong total_compilation_ticks() {
+ 333     return _perf_total_compilation != NULL ? _perf_total_compilation-&gt;get_value() : 0;
+ 334   }
+ 335 
+ 336   // Redefine Classes support
+ 337   static void mark_on_stack();
+ 338 
+ 339 #if INCLUDE_JVMCI
+ 340   // Print curent compilation time stats for a given compiler
+ 341   static void print_times(AbstractCompiler* comp);
+ 342 #endif
+ 343 
+ 344   // Print a detailed accounting of compilation time
+ 345   static void print_times(bool per_compiler = true, bool aggregate = true);
+ 346 
+ 347   // Debugging output for failure
+ 348   static void print_last_compile();
+ 349 
+ 350   static void print_compiler_threads_on(outputStream* st);
+ 351 
+ 352   // compiler name for debugging
+ 353   static const char* compiler_name(int comp_level);
+ 354 
+ 355   static int get_total_compile_count() {          return _total_compile_count; }
+ 356   static int get_total_bailout_count() {          return _total_bailout_count; }
+ 357   static int get_total_invalidated_count() {      return _total_invalidated_count; }
+ 358   static int get_total_native_compile_count() {   return _total_native_compile_count; }
+ 359   static int get_total_osr_compile_count() {      return _total_osr_compile_count; }
+ 360   static int get_total_standard_compile_count() { return _total_standard_compile_count; }
+ 361   static int get_sum_osr_bytes_compiled() {       return _sum_osr_bytes_compiled; }
+ 362   static int get_sum_standard_bytes_compiled() {  return _sum_standard_bytes_compiled; }
+ 363   static int get_sum_nmethod_size() {             return _sum_nmethod_size;}
+ 364   static int get_sum_nmethod_code_size() {        return _sum_nmethod_code_size; }
+ 365   static long get_peak_compilation_time() {       return _peak_compilation_time; }
+ 366   static long get_total_compilation_time() {      return _t_total_compilation.milliseconds(); }
+ 367 
+ 368   // Log that compilation profiling is skipped because metaspace is full.
+ 369   static void log_metaspace_failure();
+ 370 };
+ 371 
+ 372 #endif // SHARE_VM_COMPILER_COMPILEBROKER_HPP
+</pre></body></html>

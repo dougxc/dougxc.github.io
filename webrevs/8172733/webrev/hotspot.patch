@@ -1,0 +1,460 @@
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2017-01-22 21:22:59.000000000 +0100
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2017-01-22 21:22:59.000000000 +0100
+@@ -100,15 +100,19 @@
+     native long getExceptionTableStart(HotSpotResolvedJavaMethodImpl method);
+ 
+     /**
+-     * Determines if {@code method} can be inlined. A method may not be inlinable for a number of
+-     * reasons such as:
+-     * <ul>
+-     * <li>a CompileOracle directive may prevent inlining or compilation of methods</li>
+-     * <li>the method may have a bytecode breakpoint set</li>
+-     * <li>the method may have other bytecode features that require special handling by the VM</li>
+-     * </ul>
++     * Determines whether {@code method} is currently compilable by the JVMCI compiler being used by
++     * the VM. This can return false if JVMCI compilation failed earlier for {@code method}, a
++     * breakpoint is currently set in {@code method} or {@code method} contains other bytecode
++     * features that require special handling by the VM.
++     */
++    native boolean isCompilable(HotSpotResolvedJavaMethodImpl method);
++
++    /**
++     * Determines if {@code method} is targeted by a VM directive (e.g.,
++     * {@code -XX:CompileCommand=dontinline,<pattern>}) or annotation (e.g.,
++     * {@code jdk.internal.vm.annotation.DontInline}) that specifies it should not be inlined.
+      */
+-    native boolean canInlineMethod(HotSpotResolvedJavaMethodImpl method);
++    native boolean hasNeverInlineDirective(HotSpotResolvedJavaMethodImpl method);
+ 
+     /**
+      * Determines if {@code method} should be inlined at any cost. This could be because:
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethod.java	2017-01-22 21:23:00.000000000 +0100
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethod.java	2017-01-22 21:23:00.000000000 +0100
+@@ -50,13 +50,6 @@
+     boolean isForceInline();
+ 
+     /**
+-     * Returns true if this method has a {@code DontInline} annotation.
+-     *
+-     * @return true if DontInline annotation present, false otherwise
+-     */
+-    boolean isDontInline();
+-
+-    /**
+      * Returns true if this method has a {@code ReservedStackAccess} annotation.
+      *
+      * @return true if ReservedStackAccess annotation present, false otherwise
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java	2017-01-22 21:23:01.000000000 +0100
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java	2017-01-22 21:23:01.000000000 +0100
+@@ -299,15 +299,6 @@
+     }
+ 
+     /**
+-     * Returns true if this method has a {@code DontInline} annotation.
+-     *
+-     * @return true if DontInline annotation present, false otherwise
+-     */
+-    public boolean isDontInline() {
+-        return (getFlags() & config().methodFlagsDontInline) != 0;
+-    }
+-
+-    /**
+      * Returns true if this method has a {@code ReservedStackAccess} annotation.
+      *
+      * @return true if ReservedStackAccess annotation present, false otherwise
+@@ -582,10 +573,15 @@
+ 
+     @Override
+     public boolean canBeInlined() {
+-        if (isDontInline()) {
++        if (hasNeverInlineDirective()) {
+             return false;
+         }
+-        return compilerToVM().canInlineMethod(this);
++        return compilerToVM().isCompilable(this);
++    }
++
++    @Override
++    public boolean hasNeverInlineDirective() {
++        return compilerToVM().hasNeverInlineDirective(this);
+     }
+ 
+     @Override
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaMethod.java	2017-01-22 21:23:02.000000000 +0100
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaMethod.java	2017-01-22 21:23:01.000000000 +0100
+@@ -347,6 +347,13 @@
+     boolean canBeInlined();
+ 
+     /**
++     * Determines if this method is targeted by a VM directive (e.g.,
++     * {@code -XX:CompileCommand=dontinline,<pattern>}) or VM recognized annotation (e.g.,
++     * {@code jdk.internal.vm.annotation.DontInline}) that specifies it should not be inlined.
++     */
++    boolean hasNeverInlineDirective();
++
++    /**
+      * Returns {@code true} if the inlining of this method should be forced.
+      */
+     boolean shouldBeInlined();
+--- old/src/share/vm/jvmci/jvmciCompilerToVM.cpp	2017-01-22 21:23:02.000000000 +0100
++++ new/src/share/vm/jvmci/jvmciCompilerToVM.cpp	2017-01-22 21:23:02.000000000 +0100
+@@ -591,12 +591,16 @@
+   return method->is_ignored_by_security_stack_walk();
+ C2V_END
+ 
+-C2V_VMENTRY(jboolean, canInlineMethod,(JNIEnv *, jobject, jobject jvmci_method))
++C2V_VMENTRY(jboolean, isCompilable,(JNIEnv *, jobject, jobject jvmci_method))
+   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+-  // In hosted mode ignore the not_compilable flags since they are never set by
++  // Ignore the not_compilable flags in hosted mode since they are never set by
+   // the JVMCI compiler.
+-  bool is_compilable = UseJVMCICompiler ? !method->is_not_compilable(CompLevel_full_optimization) : true;
+-  return is_compilable && !CompilerOracle::should_not_inline(method) && !method->dont_inline();
++  return UseJVMCICompiler || !method->is_not_compilable(CompLevel_full_optimization);
++C2V_END
++
++C2V_VMENTRY(jboolean, hasNeverInlineDirective,(JNIEnv *, jobject, jobject jvmci_method))
++  methodHandle method = CompilerToVM::asMethod(jvmci_method);
++  return CompilerOracle::should_not_inline(method) || CompilerOracle::should_exclude(method) || method->dont_inline();
+ C2V_END
+ 
+ C2V_VMENTRY(jboolean, shouldInlineMethod,(JNIEnv *, jobject, jobject jvmci_method))
+@@ -1591,7 +1595,8 @@
+   {CC "getStackTraceElement",                         CC "(" HS_RESOLVED_METHOD "I)" STACK_TRACE_ELEMENT,                                   FN_PTR(getStackTraceElement)},
+   {CC "methodIsIgnoredBySecurityStackWalk",           CC "(" HS_RESOLVED_METHOD ")Z",                                                       FN_PTR(methodIsIgnoredBySecurityStackWalk)},
+   {CC "doNotInlineOrCompile",                         CC "(" HS_RESOLVED_METHOD ")V",                                                       FN_PTR(doNotInlineOrCompile)},
+-  {CC "canInlineMethod",                              CC "(" HS_RESOLVED_METHOD ")Z",                                                       FN_PTR(canInlineMethod)},
++  {CC "isCompilable",                                 CC "(" HS_RESOLVED_METHOD ")Z",                                                       FN_PTR(isCompilable)},
++  {CC "hasNeverInlineDirective",                      CC "(" HS_RESOLVED_METHOD ")Z",                                                       FN_PTR(hasNeverInlineDirective)},
+   {CC "shouldInlineMethod",                           CC "(" HS_RESOLVED_METHOD ")Z",                                                       FN_PTR(shouldInlineMethod)},
+   {CC "lookupType",                                   CC "(" STRING CLASS "Z)" HS_RESOLVED_KLASS,                                           FN_PTR(lookupType)},
+   {CC "lookupNameInPool",                             CC "(" HS_CONSTANT_POOL "I)" STRING,                                                  FN_PTR(lookupNameInPool)},
+--- old/test/compiler/jvmci/common/patches/jdk.vm.ci/jdk/vm/ci/hotspot/CompilerToVMHelper.java	2017-01-22 21:23:03.000000000 +0100
++++ new/test/compiler/jvmci/common/patches/jdk.vm.ci/jdk/vm/ci/hotspot/CompilerToVMHelper.java	2017-01-22 21:23:03.000000000 +0100
+@@ -48,8 +48,12 @@
+         return CTVM.getExceptionTableStart((HotSpotResolvedJavaMethodImpl)method);
+     }
+ 
+-    public static boolean canInlineMethod(HotSpotResolvedJavaMethod method) {
+-        return CTVM.canInlineMethod((HotSpotResolvedJavaMethodImpl)method);
++    public static boolean isCompilable(HotSpotResolvedJavaMethod method) {
++        return CTVM.isCompilable((HotSpotResolvedJavaMethodImpl)method);
++    }
++
++    public static boolean hasNeverInlineDirective(HotSpotResolvedJavaMethod method) {
++        return CTVM.hasNeverInlineDirective((HotSpotResolvedJavaMethodImpl)method);
+     }
+ 
+     public static boolean shouldInlineMethod(HotSpotResolvedJavaMethod method) {
+--- old/test/compiler/jvmci/compilerToVM/DoNotInlineOrCompileTest.java	2017-01-22 21:23:04.000000000 +0100
++++ new/test/compiler/jvmci/compilerToVM/DoNotInlineOrCompileTest.java	2017-01-22 21:23:04.000000000 +0100
+@@ -67,13 +67,13 @@
+     private static void runSanityTest(Executable aMethod) {
+         HotSpotResolvedJavaMethod method = CTVMUtilities
+                 .getResolvedMethod(aMethod);
+-        boolean canInline = CompilerToVMHelper.canInlineMethod(method);
+-        Asserts.assertTrue(canInline, "Unexpected initial " +
+-                "value of property 'can inline'");
++        boolean hasNeverInlineDirective = CompilerToVMHelper.hasNeverInlineDirective(method);
++        Asserts.assertFalse(hasNeverInlineDirective, "Unexpected initial " +
++                "value of property 'hasNeverInlineDirective'");
+         CompilerToVMHelper.doNotInlineOrCompile(method);
+-        canInline = CompilerToVMHelper.canInlineMethod(method);
+-        Asserts.assertFalse(canInline, aMethod
+-                + " : can be inlined even after doNotInlineOrCompile'");
++        hasNeverInlineDirective = CompilerToVMHelper.hasNeverInlineDirective(method);
++        Asserts.assertTrue(hasNeverInlineDirective, aMethod
++                + " : hasNeverInlineDirective is false even after doNotInlineOrCompile'");
+     }
+ 
+     private static List<Executable> createTestCases() {
+--- old/test/compiler/jvmci/compilerToVM/CanInlineMethodTest.java	2017-01-22 21:23:05.000000000 +0100
++++ /dev/null	2017-01-22 21:23:05.000000000 +0100
+@@ -1,93 +0,0 @@
+-/*
+- * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-
+-/**
+- * @test
+- * @bug 8136421
+- * @requires vm.jvmci
+- * @library /test/lib /
+- * @library ../common/patches
+- * @modules java.base/jdk.internal.misc
+- * @modules java.base/jdk.internal.org.objectweb.asm
+- *          java.base/jdk.internal.org.objectweb.asm.tree
+- *          jdk.vm.ci/jdk.vm.ci.hotspot
+- *          jdk.vm.ci/jdk.vm.ci.code
+- *
+- * @build jdk.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper sun.hotspot.WhiteBox
+- * @run driver ClassFileInstaller sun.hotspot.WhiteBox
+- *                                sun.hotspot.WhiteBox$WhiteBoxPermission
+- * @run main/othervm -Xbootclasspath/a:.
+- *                   -XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI
+- *                   -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
+- *                   compiler.jvmci.compilerToVM.CanInlineMethodTest
+- */
+-
+-package compiler.jvmci.compilerToVM;
+-
+-import compiler.jvmci.common.CTVMUtilities;
+-import jdk.test.lib.Asserts;
+-import jdk.vm.ci.hotspot.CompilerToVMHelper;
+-import jdk.vm.ci.hotspot.HotSpotResolvedJavaMethod;
+-import sun.hotspot.WhiteBox;
+-
+-import java.lang.reflect.Executable;
+-import java.util.ArrayList;
+-import java.util.Arrays;
+-import java.util.List;
+-
+-public class CanInlineMethodTest {
+-
+-    private static final WhiteBox WB = WhiteBox.getWhiteBox();
+-
+-    public static void main(String[] args) {
+-        List<Executable> testCases = createTestCases();
+-        testCases.forEach(CanInlineMethodTest::runSanityTest);
+-    }
+-
+-    private static void runSanityTest(Executable aMethod) {
+-        HotSpotResolvedJavaMethod method = CTVMUtilities
+-                .getResolvedMethod(aMethod);
+-        boolean canInline = CompilerToVMHelper.canInlineMethod(method);
+-        boolean expectedCanInline = !WB.testSetDontInlineMethod(aMethod,
+-                true);
+-        Asserts.assertEQ(canInline, expectedCanInline, "Unexpected initial " +
+-                "value of property 'can inline'");
+-
+-        canInline = CompilerToVMHelper.canInlineMethod(method);
+-        Asserts.assertFalse(canInline, aMethod + "Unexpected value of " +
+-                "property 'can inline' after setting 'do not inline' to true");
+-        WB.testSetDontInlineMethod(aMethod, false);
+-        canInline = CompilerToVMHelper.canInlineMethod(method);
+-        Asserts.assertTrue(canInline, "Unexpected value of " +
+-                "property 'can inline' after setting 'do not inline' to false");
+-    }
+-
+-    private static List<Executable> createTestCases() {
+-        List<Executable> testCases = new ArrayList<>();
+-
+-        Class<?> aClass = DummyClass.class;
+-        testCases.addAll(Arrays.asList(aClass.getDeclaredMethods()));
+-        testCases.addAll(Arrays.asList(aClass.getDeclaredConstructors()));
+-        return testCases;
+-    }
+-}
+--- /dev/null	2017-01-22 21:23:05.000000000 +0100
++++ new/test/compiler/jvmci/compilerToVM/HasNeverInlineDirectiveTest.java	2017-01-22 21:23:04.000000000 +0100
+@@ -0,0 +1,92 @@
++/*
++ * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++/**
++ * @test
++ * @bug 8136421
++ * @requires vm.jvmci
++ * @library /test/lib /
++ * @library ../common/patches
++ * @modules java.base/jdk.internal.misc
++ * @modules java.base/jdk.internal.org.objectweb.asm
++ *          java.base/jdk.internal.org.objectweb.asm.tree
++ *          jdk.vm.ci/jdk.vm.ci.hotspot
++ *          jdk.vm.ci/jdk.vm.ci.code
++ *
++ * @build jdk.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper sun.hotspot.WhiteBox
++ * @run driver ClassFileInstaller sun.hotspot.WhiteBox
++ *                                sun.hotspot.WhiteBox$WhiteBoxPermission
++ * @run main/othervm -Xbootclasspath/a:.
++ *                   -XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI
++ *                   -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
++ *                   compiler.jvmci.compilerToVM.HasNeverInlineDirectiveTest
++ */
++
++package compiler.jvmci.compilerToVM;
++
++import compiler.jvmci.common.CTVMUtilities;
++import jdk.test.lib.Asserts;
++import jdk.vm.ci.hotspot.CompilerToVMHelper;
++import jdk.vm.ci.hotspot.HotSpotResolvedJavaMethod;
++import sun.hotspot.WhiteBox;
++
++import java.lang.reflect.Executable;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++
++public class HasNeverInlineDirectiveTest {
++
++    private static final WhiteBox WB = WhiteBox.getWhiteBox();
++
++    public static void main(String[] args) {
++        List<Executable> testCases = createTestCases();
++        testCases.forEach(HasNeverInlineDirectiveTest::runSanityTest);
++    }
++
++    private static void runSanityTest(Executable aMethod) {
++        HotSpotResolvedJavaMethod method = CTVMUtilities
++                .getResolvedMethod(aMethod);
++        boolean hasNeverInlineDirective = CompilerToVMHelper.hasNeverInlineDirective(method);
++        boolean expected = WB.testSetDontInlineMethod(aMethod, true);
++        Asserts.assertEQ(hasNeverInlineDirective, expected, "Unexpected initial " +
++                "value of property 'hasNeverInlineDirective'");
++
++        hasNeverInlineDirective = CompilerToVMHelper.hasNeverInlineDirective(method);
++        Asserts.assertTrue(hasNeverInlineDirective, aMethod + "Unexpected value of " +
++                "property 'hasNeverInlineDirective' after setting 'do not inline' to true");
++        WB.testSetDontInlineMethod(aMethod, false);
++        hasNeverInlineDirective = CompilerToVMHelper.hasNeverInlineDirective(method);
++        Asserts.assertFalse(hasNeverInlineDirective, "Unexpected value of " +
++                "property 'hasNeverInlineDirective' after setting 'do not inline' to false");
++    }
++
++    private static List<Executable> createTestCases() {
++        List<Executable> testCases = new ArrayList<>();
++
++        Class<?> aClass = DummyClass.class;
++        testCases.addAll(Arrays.asList(aClass.getDeclaredMethods()));
++        testCases.addAll(Arrays.asList(aClass.getDeclaredConstructors()));
++        return testCases;
++    }
++}
+--- /dev/null	2017-01-22 21:23:05.000000000 +0100
++++ new/test/compiler/jvmci/compilerToVM/IsCompilableTest.java	2017-01-22 21:23:05.000000000 +0100
+@@ -0,0 +1,96 @@
++/*
++ * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++/**
++ * @test
++ * @bug 8136421
++ * @requires vm.jvmci
++ * @library /test/lib /
++ * @library ../common/patches
++ * @modules java.base/jdk.internal.misc
++ * @modules java.base/jdk.internal.org.objectweb.asm
++ *          java.base/jdk.internal.org.objectweb.asm.tree
++ *          jdk.vm.ci/jdk.vm.ci.hotspot
++ *          jdk.vm.ci/jdk.vm.ci.code
++ *
++ * @build jdk.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper sun.hotspot.WhiteBox
++ * @run driver ClassFileInstaller sun.hotspot.WhiteBox
++ *                                sun.hotspot.WhiteBox$WhiteBoxPermission
++ * @run main/othervm -Xbootclasspath/a:.
++ *                   -XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI
++ *                   -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI -XX:+UseJVMCICompiler
++ *                   compiler.jvmci.compilerToVM.IsCompilableTest
++ * @run main/othervm -Xbootclasspath/a:.
++ *                   -XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI
++ *                   -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
++ *                   compiler.jvmci.compilerToVM.IsCompilableTest
++ */
++
++package compiler.jvmci.compilerToVM;
++
++import compiler.jvmci.common.CTVMUtilities;
++import jdk.test.lib.Asserts;
++import jdk.vm.ci.hotspot.CompilerToVMHelper;
++import jdk.vm.ci.hotspot.HotSpotResolvedJavaMethod;
++import sun.hotspot.WhiteBox;
++
++import java.lang.reflect.Executable;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++
++public class IsCompilableTest {
++
++    private static final WhiteBox WB = WhiteBox.getWhiteBox();
++
++    public static void main(String[] args) {
++        List<Executable> testCases = createTestCases();
++        testCases.forEach(IsCompilableTest::runSanityTest);
++    }
++
++    private static void runSanityTest(Executable aMethod) {
++        boolean UseJVMCICompiler = (Boolean) WB.getVMFlag("UseJVMCICompiler");
++        HotSpotResolvedJavaMethod method = CTVMUtilities
++                .getResolvedMethod(aMethod);
++        boolean isCompilable = CompilerToVMHelper.isCompilable(method);
++        boolean expected = UseJVMCICompiler || WB.isMethodCompilable(aMethod);
++        Asserts.assertEQ(isCompilable, expected, "Unexpected initial " +
++                "value of property 'compilable'");
++
++        if (!UseJVMCICompiler) {
++            WB.makeMethodNotCompilable(aMethod);
++            isCompilable = CompilerToVMHelper.isCompilable(method);
++            Asserts.assertFalse(isCompilable, aMethod + "Unexpected value of " +
++                "property 'isCompilable' after setting 'compilable' to false");
++        }
++    }
++
++    private static List<Executable> createTestCases() {
++        List<Executable> testCases = new ArrayList<>();
++
++        Class<?> aClass = DummyClass.class;
++        testCases.addAll(Arrays.asList(aClass.getDeclaredMethods()));
++        testCases.addAll(Arrays.asList(aClass.getDeclaredConstructors()));
++        return testCases;
++    }
++}

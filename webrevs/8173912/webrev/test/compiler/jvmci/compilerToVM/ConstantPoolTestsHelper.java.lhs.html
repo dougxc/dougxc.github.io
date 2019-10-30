@@ -1,0 +1,701 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre>rev <a href="https://bugs.openjdk.java.net/browse/JDK-12604">12604</a> : <a href="https://bugs.openjdk.java.net/browse/JDK-8173912">8173912</a>: [JVMCI] fix memory overhead of JVMCI</pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 
+  24 package compiler.jvmci.compilerToVM;
+  25 
+  26 import compiler.jvmci.common.testcases.MultipleAbstractImplementer;
+  27 import compiler.jvmci.common.testcases.MultipleImplementer2;
+  28 import compiler.jvmci.common.testcases.MultipleImplementersInterface;
+  29 import compiler.jvmci.compilerToVM.ConstantPoolTestCase.ConstantTypes;
+  30 import compiler.jvmci.compilerToVM.ConstantPoolTestCase.TestedCPEntry;
+  31 import jdk.internal.misc.SharedSecrets;
+  32 import jdk.internal.org.objectweb.asm.Opcodes;
+  33 import jdk.internal.reflect.ConstantPool;
+  34 import jdk.internal.reflect.ConstantPool.Tag;
+  35 import jdk.vm.ci.meta.MetaAccessProvider;
+  36 import jdk.vm.ci.meta.ResolvedJavaMethod;
+  37 import jdk.vm.ci.meta.ResolvedJavaType;
+  38 import jdk.vm.ci.runtime.JVMCI;
+  39 import sun.hotspot.WhiteBox;
+  40 
+  41 import java.util.HashMap;
+  42 import java.util.Map;
+  43 
+  44 import static compiler.jvmci.compilerToVM.ConstantPoolTestCase.ConstantTypes.CONSTANT_CLASS;
+  45 import static compiler.jvmci.compilerToVM.ConstantPoolTestCase.ConstantTypes.CONSTANT_FIELDREF;
+  46 import static compiler.jvmci.compilerToVM.ConstantPoolTestCase.ConstantTypes.CONSTANT_INTERFACEMETHODREF;
+  47 import static compiler.jvmci.compilerToVM.ConstantPoolTestCase.ConstantTypes.CONSTANT_INVOKEDYNAMIC;
+  48 import static compiler.jvmci.compilerToVM.ConstantPoolTestCase.ConstantTypes.CONSTANT_METHODHANDLE;
+  49 import static compiler.jvmci.compilerToVM.ConstantPoolTestCase.ConstantTypes.CONSTANT_METHODREF;
+  50 import static compiler.jvmci.compilerToVM.ConstantPoolTestCase.ConstantTypes.CONSTANT_METHODTYPE;
+  51 import static compiler.jvmci.compilerToVM.ConstantPoolTestCase.ConstantTypes.CONSTANT_STRING;
+  52 
+  53 /**
+  54  * Class contains hard-coded constant pool tables for dummy classes used for
+  55  * jdk.vm.ci.hotspot.CompilerToVM constant pool methods
+  56  */
+  57 public class ConstantPoolTestsHelper {
+  58 
+  59     public static final int NO_CP_CACHE_PRESENT = Integer.MAX_VALUE;
+  60     private static final MetaAccessProvider metaAccess = JVMCI.getRuntime().getHostJVMCIBackend().getMetaAccess();
+  61 
+  62     public enum DummyClasses {
+  63         DUMMY_CLASS(MultipleImplementer2.class, CP_MAP_FOR_CLASS),
+  64         DUMMY_ABS_CLASS(MultipleAbstractImplementer.class, CP_MAP_FOR_ABS_CLASS),
+  65         DUMMY_INTERFACE(MultipleImplementersInterface.class, CP_MAP_FOR_INTERFACE);
+  66 
+  67         private static final WhiteBox WB = WhiteBox.getWhiteBox();
+  68         public final Class&lt;?&gt; klass;
+  69         public final ConstantPool constantPoolSS;
+  70         public final Map&lt;ConstantTypes, TestedCPEntry[]&gt; testedCP;
+  71 
+  72         DummyClasses(Class&lt;?&gt; klass, Map&lt;ConstantTypes, TestedCPEntry[]&gt; testedCP) {
+  73             this.klass = klass;
+  74             this.constantPoolSS = SharedSecrets.getJavaLangAccess().getConstantPool(klass);
+  75             this.testedCP = testedCP;
+  76         }
+  77 
+  78         public int getCPCacheIndex(int cpi) {
+  79             int cacheLength = WB.getConstantPoolCacheLength(this.klass);
+  80             int indexTag = WB.getConstantPoolCacheIndexTag();
+  81             for (int cpci = indexTag; cpci &lt; cacheLength + indexTag; cpci++) {
+  82                 if (WB.remapInstructionOperandFromCPCache(this.klass, cpci) == cpi) {
+  83                     if (constantPoolSS.getTagAt(cpi).equals(Tag.INVOKEDYNAMIC)) {
+  84                         return WB.encodeConstantPoolIndyIndex(cpci) + indexTag;
+  85                     }
+  86                     return cpci;
+  87                 }
+  88             }
+  89             return NO_CP_CACHE_PRESENT;
+  90         }
+  91     }
+  92 
+  93     /**
+  94      * Obtain a resolved Java method declared by a given type.
+  95      *
+  96      * @param type the declaring type
+  97      * @param the method's name
+  98      *
+  99      * Currently, the lookup is based only on the method's name
+ 100      * but not on the method's signature (i.e., the first method
+ 101      * with a matching name declared on {@code type} is returned).
+ 102      */
+ 103     private static ResolvedJavaMethod getMethod(ResolvedJavaType type, String methodName) {
+ 104         if (methodName.equals("&lt;clinit&gt;")) {
+ 105             return type.getClassInitializer();
+ 106         }
+ 107 
+ 108         if (methodName.equals("&lt;init&gt;")) {
+ 109             ResolvedJavaMethod[] initializers = type.getDeclaredConstructors();
+ 110             if (initializers.length &gt;= 0) {
+ 111                 return initializers[0];
+ 112             } else {
+ 113                 throw new IllegalArgumentException();
+ 114             }
+ 115         }
+ 116 
+ 117         for (ResolvedJavaMethod method : type.getDeclaredMethods()) {
+ 118             if (method.getName().equals(methodName)) {
+ 119                 return method;
+ 120             }
+ 121         }
+ 122 
+ 123         throw new IllegalArgumentException();
+ 124     }
+ 125 
+ 126     private static ResolvedJavaType getType(Class&lt;?&gt; clazz) {
+ 127         ResolvedJavaType type = metaAccess.lookupJavaType(clazz);
+ 128         type.initialize();
+ 129         return type;
+ 130     }
+ 131 
+ 132     private static final Map&lt;ConstantTypes, TestedCPEntry[]&gt; CP_MAP_FOR_CLASS = new HashMap&lt;&gt;();
+ 133     static {
+ 134         CP_MAP_FOR_CLASS.put(CONSTANT_CLASS,
+ 135                 new TestedCPEntry[] {
+ 136                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementersInterface", null, null),
+ 137                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2", null, null),
+ 138                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2$1", null, null),
+ 139                     new TestedCPEntry("java/lang/invoke/MethodHandles$Lookup", null, null),
+ 140                 }
+ 141         );
+ 142         CP_MAP_FOR_CLASS.put(CONSTANT_FIELDREF,
+ 143                 new TestedCPEntry[] {
+ 144                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 145                                       "intStaticField",
+ 146                                       "I",
+ 147                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 148                                       Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC),
+ 149                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 150                                       "longStaticField",
+ 151                                       "J",
+ 152                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 153                                       Opcodes.ACC_FINAL | Opcodes.ACC_STATIC),
+ 154                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 155                                       "floatStaticField",
+ 156                                       "F",
+ 157                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 158                                       Opcodes.ACC_VOLATILE | Opcodes.ACC_STATIC),
+ 159                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 160                                       "doubleStaticField",
+ 161                                       "D",
+ 162                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 163                                       Opcodes.ACC_STATIC),
+ 164                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 165                                       "stringStaticField",
+ 166                                       "Ljava/lang/String;",
+ 167                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 168                                       Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC),
+ 169                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 170                                       "objectStaticField",
+ 171                                       "Ljava/lang/Object;",
+ 172                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 173                                       Opcodes.ACC_PROTECTED | Opcodes.ACC_STATIC),
+ 174                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 175                                       "intField",
+ 176                                       "I",
+ 177                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+ 178                                       Opcodes.ACC_PUBLIC),
+ 179                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 180                                       "longField",
+ 181                                       "J",
+ 182                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+ 183                                       Opcodes.ACC_PRIVATE),
+ 184                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 185                                       "floatField",
+ 186                                       "F",
+ 187                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+ 188                                       Opcodes.ACC_PROTECTED),
+ 189                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 190                                       "doubleField",
+ 191                                       "D",
+ 192                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+ 193                                       Opcodes.ACC_TRANSIENT),
+ 194                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 195                                       "objectField",
+ 196                                       "Ljava/lang/Object;",
+ 197                                       new ResolvedJavaMethod[] { getMethod(getType(MultipleImplementer2.class), "&lt;init&gt;"), null },
+ 198                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+ 199                                       Opcodes.ACC_FINAL),
+ 200                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 201                                       "stringField",
+ 202                                       "Ljava/lang/String;",
+ 203                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+ 204                                       Opcodes.ACC_VOLATILE),
+ 205                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 206                                       "stringFieldEmpty",
+ 207                                       "Ljava/lang/String;",
+ 208                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+<a name="1" id="anc1"></a><span class="changed"> 209                                       0L),</span>
+ 210                 }
+ 211         );
+ 212         CP_MAP_FOR_CLASS.put(CONSTANT_METHODREF,
+ 213                 new TestedCPEntry[] {
+ 214                     new TestedCPEntry("java/lang/System",
+ 215                                       "getProperties",
+ 216                                       "()Ljava/util/Properties;",
+ 217                                       new byte[] {(byte) Opcodes.INVOKESTATIC}),
+ 218                     new TestedCPEntry("java/util/HashMap",
+ 219                                       "&lt;init&gt;",
+ 220                                       "()V",
+ 221                                       new byte[] {(byte) Opcodes.INVOKESPECIAL}),
+ 222                     new TestedCPEntry("java/lang/Object",
+ 223                                       "toString",
+ 224                                       "()Ljava/lang/String;",
+ 225                                       new byte[] {(byte) Opcodes.INVOKESPECIAL,
+ 226                                       (byte) Opcodes.INVOKEVIRTUAL}),
+ 227                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2$1",
+ 228                                       "&lt;init&gt;",
+ 229                                       "(Lcompiler/jvmci/common/testcases/MultipleImplementer2;)V",
+ 230                                       new byte[0]),
+ 231                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer$1",
+ 232                                       "run",
+ 233                                       "()V",
+ 234                                       new byte[0]),
+ 235                 }
+ 236         );
+ 237         CP_MAP_FOR_CLASS.put(CONSTANT_INTERFACEMETHODREF,
+ 238                 new TestedCPEntry[] {
+ 239                     new TestedCPEntry("java/util/Map",
+ 240                                       "put",
+ 241                                       "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+ 242                                       new byte[] {(byte) Opcodes.INVOKEINTERFACE}),
+ 243                     new TestedCPEntry("java/util/Map",
+ 244                                       "remove",
+ 245                                       "(Ljava/lang/Object;)Ljava/lang/Object;",
+ 246                                       new byte[] {(byte) Opcodes.INVOKEINTERFACE}),
+ 247                 }
+ 248         );
+ 249         CP_MAP_FOR_CLASS.put(CONSTANT_STRING,
+ 250                 new TestedCPEntry[] {
+ 251                     new TestedCPEntry(null, "Message", null),
+ 252                     new TestedCPEntry(null, "", null),
+ 253                 }
+ 254         );
+ 255         CP_MAP_FOR_CLASS.put(CONSTANT_METHODHANDLE,
+ 256                 new TestedCPEntry[] {
+ 257                     new TestedCPEntry("java/lang/invoke/LambdaMetafactory",
+ 258                                       "metafactory",
+ 259                                       "(Ljava/lang/invoke/MethodHandles$Lookup;"
+ 260                                               + "Ljava/lang/String;"
+ 261                                               + "Ljava/lang/invoke/MethodType;"
+ 262                                               + "Ljava/lang/invoke/MethodType;"
+ 263                                               + "Ljava/lang/invoke/MethodHandle;"
+ 264                                               + "Ljava/lang/invoke/MethodType;)"
+ 265                                               + "Ljava/lang/invoke/CallSite;",
+ 266                                       null),
+ 267                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementer2",
+ 268                                       "testMethod",
+ 269                                       "()V"),
+ 270                 }
+ 271         );
+ 272         CP_MAP_FOR_CLASS.put(CONSTANT_METHODTYPE,
+ 273                 new TestedCPEntry[] {
+ 274                     new TestedCPEntry(null, null, "()V"),
+ 275                 }
+ 276         );
+ 277         CP_MAP_FOR_CLASS.put(CONSTANT_INVOKEDYNAMIC,
+ 278                 new TestedCPEntry[] {
+ 279                     new TestedCPEntry(null,
+ 280                                      "run",
+ 281                                      "(Lcompiler/jvmci/common/testcases/MultipleImplementer2;)"
+ 282                                              + "Ljava/lang/Runnable;"),
+ 283                 }
+ 284         );
+ 285     }
+ 286 
+ 287     private static final Map&lt;ConstantTypes, TestedCPEntry[]&gt; CP_MAP_FOR_ABS_CLASS
+ 288             = new HashMap&lt;&gt;();
+ 289     static {
+ 290         CP_MAP_FOR_ABS_CLASS.put(CONSTANT_CLASS,
+ 291                 new TestedCPEntry[] {
+ 292                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementersInterface", null, null),
+ 293                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer", null, null),
+ 294                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer$1", null, null),
+ 295                     new TestedCPEntry("java/lang/invoke/MethodHandles$Lookup", null, null),
+ 296                 }
+ 297         );
+ 298         CP_MAP_FOR_ABS_CLASS.put(CONSTANT_FIELDREF,
+ 299                 new TestedCPEntry[] {
+ 300                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 301                                       "intStaticField",
+ 302                                       "I",
+ 303                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 304                                       Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC),
+ 305                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 306                                       "longStaticField",
+ 307                                       "J",
+ 308                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 309                                       Opcodes.ACC_FINAL | Opcodes.ACC_STATIC),
+ 310                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 311                                       "floatStaticField",
+ 312                                       "F",
+ 313                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 314                                       Opcodes.ACC_VOLATILE | Opcodes.ACC_STATIC),
+ 315                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 316                                       "doubleStaticField",
+ 317                                       "D",
+ 318                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 319                                       Opcodes.ACC_STATIC),
+ 320                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 321                                       "stringStaticField",
+ 322                                       "Ljava/lang/String;",
+ 323                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 324                                       Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC),
+ 325                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 326                                       "objectStaticField",
+ 327                                       "Ljava/lang/Object;",
+ 328                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 329                                       Opcodes.ACC_PROTECTED | Opcodes.ACC_STATIC),
+ 330                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 331                                       "intField",
+ 332                                       "I",
+ 333                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+ 334                                       Opcodes.ACC_PUBLIC),
+ 335                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 336                                       "longField",
+ 337                                       "J",
+ 338                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+ 339                                       Opcodes.ACC_PRIVATE),
+ 340                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 341                                       "floatField",
+ 342                                       "F",
+ 343                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+ 344                                       Opcodes.ACC_PROTECTED),
+ 345                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 346                                       "doubleField",
+ 347                                       "D",
+ 348                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+ 349                                       Opcodes.ACC_TRANSIENT),
+ 350                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 351                                       "objectField",
+ 352                                       "Ljava/lang/Object;",
+ 353                                       new ResolvedJavaMethod[] { getMethod(getType(MultipleAbstractImplementer.class), "&lt;init&gt;"), null },
+ 354                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+ 355                                       Opcodes.ACC_FINAL),
+ 356                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 357                                       "stringField",
+ 358                                       "Ljava/lang/String;",
+ 359                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+ 360                                       Opcodes.ACC_VOLATILE),
+ 361                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 362                                       "stringFieldEmpty",
+ 363                                       "Ljava/lang/String;",
+ 364                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+<a name="2" id="anc2"></a><span class="changed"> 365                                       0L),</span>
+ 366                 }
+ 367         );
+ 368         CP_MAP_FOR_ABS_CLASS.put(CONSTANT_METHODREF,
+ 369                 new TestedCPEntry[] {
+ 370                     new TestedCPEntry("java/lang/System",
+ 371                                       "getProperties",
+ 372                                       "()Ljava/util/Properties;",
+ 373                                       new byte[] {(byte) Opcodes.INVOKESTATIC}),
+ 374                     new TestedCPEntry("java/util/HashMap",
+ 375                                       "&lt;init&gt;",
+ 376                                       "()V",
+ 377                                       new byte[] {(byte) Opcodes.INVOKESPECIAL}),
+ 378                     new TestedCPEntry("java/lang/Object",
+ 379                                       "toString",
+ 380                                       "()Ljava/lang/String;",
+ 381                                       new byte[] {(byte) Opcodes.INVOKESPECIAL,
+ 382                                       (byte) Opcodes.INVOKEVIRTUAL}),
+ 383                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer$1",
+ 384                                       "&lt;init&gt;",
+ 385                                       "(Lcompiler/jvmci/common/testcases/MultipleAbstractImplementer;)V",
+ 386                                       new byte[0]),
+ 387                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer$1",
+ 388                                       "run",
+ 389                                       "()V",
+ 390                                       new byte[0]),
+ 391                 }
+ 392         );
+ 393         CP_MAP_FOR_ABS_CLASS.put(CONSTANT_INTERFACEMETHODREF,
+ 394                 new TestedCPEntry[] {
+ 395                     new TestedCPEntry("java/util/Map",
+ 396                                       "put",
+ 397                                       "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+ 398                                       new byte[] {(byte) Opcodes.INVOKEINTERFACE}),
+ 399                     new TestedCPEntry("java/util/Map",
+ 400                                       "remove",
+ 401                                       "(Ljava/lang/Object;)Ljava/lang/Object;",
+ 402                                       new byte[] {(byte) Opcodes.INVOKEINTERFACE}),
+ 403                 }
+ 404         );
+ 405         CP_MAP_FOR_ABS_CLASS.put(CONSTANT_STRING,
+ 406                 new TestedCPEntry[] {
+ 407                     new TestedCPEntry(null, "Message", null),
+ 408                     new TestedCPEntry(null, "", null),
+ 409                 }
+ 410         );
+ 411         CP_MAP_FOR_ABS_CLASS.put(CONSTANT_METHODHANDLE,
+ 412                 new TestedCPEntry[] {
+ 413                     new TestedCPEntry("java/lang/invoke/LambdaMetafactory",
+ 414                                       "metafactory",
+ 415                                       "(Ljava/lang/invoke/MethodHandles$Lookup;"
+ 416                                               + "Ljava/lang/String;"
+ 417                                               + "Ljava/lang/invoke/MethodType;"
+ 418                                               + "Ljava/lang/invoke/MethodType;"
+ 419                                               + "Ljava/lang/invoke/MethodHandle;"
+ 420                                               + "Ljava/lang/invoke/MethodType;)"
+ 421                                               + "Ljava/lang/invoke/CallSite;",
+ 422                                       null),
+ 423                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer",
+ 424                                       "testMethod",
+ 425                                       "()V"),
+ 426                 }
+ 427         );
+ 428         CP_MAP_FOR_ABS_CLASS.put(CONSTANT_METHODTYPE,
+ 429                 new TestedCPEntry[] {
+ 430                     new TestedCPEntry(null, null, "()V"),
+ 431                 }
+ 432         );
+ 433         CP_MAP_FOR_ABS_CLASS.put(CONSTANT_INVOKEDYNAMIC,
+ 434                 new TestedCPEntry[] {
+ 435                     new TestedCPEntry(null,
+ 436                                       "run",
+ 437                                       "(Lcompiler/jvmci/common/testcases/MultipleAbstractImplementer;)"
+ 438                                               + "Ljava/lang/Runnable;"),
+ 439                 }
+ 440         );
+ 441     }
+ 442 
+ 443     private static final Map&lt;ConstantTypes, TestedCPEntry[]&gt; CP_MAP_FOR_INTERFACE
+ 444             = new HashMap&lt;&gt;();
+ 445     static {
+ 446         CP_MAP_FOR_INTERFACE.put(CONSTANT_CLASS,
+ 447                 new TestedCPEntry[] {
+ 448                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementersInterface", null, null),
+ 449                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementersInterface$1", null, null),
+ 450                     new TestedCPEntry("java/lang/Object", null, null),
+ 451                     new TestedCPEntry("java/lang/invoke/MethodHandles$Lookup", null, null),
+ 452                 }
+ 453         );
+ 454         CP_MAP_FOR_INTERFACE.put(CONSTANT_FIELDREF,
+ 455                 new TestedCPEntry[] {
+ 456                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementersInterface",
+ 457                                       "OBJECT_CONSTANT",
+ 458                                       "Ljava/lang/Object;",
+ 459                                       new ResolvedJavaMethod[] { getMethod(getType(MultipleImplementersInterface.class), "&lt;clinit&gt;"), null },
+ 460                                       new byte[] {(byte) Opcodes.PUTSTATIC, (byte) Opcodes.GETSTATIC},
+ 461                                       Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_PUBLIC),
+ 462                 }
+ 463         );
+ 464         CP_MAP_FOR_INTERFACE.put(CONSTANT_METHODREF,
+ 465                 new TestedCPEntry[] {
+ 466                     new TestedCPEntry("java/lang/System",
+ 467                                       "getProperties",
+ 468                                       "()Ljava/util/Properties;",
+ 469                                       new byte[] {(byte) Opcodes.INVOKESTATIC}),
+ 470                     new TestedCPEntry("java/util/HashMap",
+ 471                                       "&lt;init&gt;",
+ 472                                       "()V",
+ 473                                       new byte[] {(byte) Opcodes.INVOKESPECIAL}),
+ 474                     new TestedCPEntry("java/lang/Object",
+ 475                                       "toString",
+ 476                                       "()Ljava/lang/String;",
+ 477                                       new byte[] {(byte) Opcodes.INVOKEVIRTUAL}),
+ 478                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer$1",
+ 479                                       "&lt;init&gt;",
+ 480                                       "(Lcompiler/jvmci/common/testcases/MultipleAbstractImplementer;)V",
+ 481                                       new byte[0]),
+ 482                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleAbstractImplementer$1",
+ 483                                       "run",
+ 484                                       "()V",
+ 485                                       new byte[0]),
+ 486                 }
+ 487         );
+ 488         CP_MAP_FOR_INTERFACE.put(CONSTANT_INTERFACEMETHODREF,
+ 489                 new TestedCPEntry[] {
+ 490                     new TestedCPEntry("java/util/Map",
+ 491                                       "put",
+ 492                                       "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+ 493                                       new byte[] {(byte) Opcodes.INVOKEINTERFACE}),
+ 494                     new TestedCPEntry("java/util/Map",
+ 495                                       "remove",
+ 496                                       "(Ljava/lang/Object;)Ljava/lang/Object;",
+ 497                                       new byte[] {(byte) Opcodes.INVOKEINTERFACE}),
+ 498                 }
+ 499         );
+ 500         CP_MAP_FOR_INTERFACE.put(CONSTANT_STRING,
+ 501                 new TestedCPEntry[] {
+ 502                     new TestedCPEntry(null, "Hello", null),
+ 503                     new TestedCPEntry(null, "", null),
+ 504                 }
+ 505         );
+ 506         CP_MAP_FOR_INTERFACE.put(CONSTANT_METHODHANDLE,
+ 507                 new TestedCPEntry[] {
+ 508                     new TestedCPEntry("java/lang/invoke/LambdaMetafactory",
+ 509                                       "metafactory",
+ 510                                       "(Ljava/lang/invoke/MethodHandles$Lookup;"
+ 511                                               + "Ljava/lang/String;Ljava/lang/invoke/MethodType;"
+ 512                                               + "Ljava/lang/invoke/MethodType;"
+ 513                                               + "Ljava/lang/invoke/MethodHandle;"
+ 514                                               + "Ljava/lang/invoke/MethodType;)"
+ 515                                               + "Ljava/lang/invoke/CallSite;"),
+ 516                     new TestedCPEntry("compiler/jvmci/common/testcases/MultipleImplementersInterface",
+ 517                                       "defaultMethod",
+ 518                                       "()V"),
+ 519                 }
+ 520         );
+ 521         CP_MAP_FOR_INTERFACE.put(CONSTANT_METHODTYPE,
+ 522                 new TestedCPEntry[] {
+ 523                     new TestedCPEntry(null, null, "()V"),
+ 524                 }
+ 525         );
+ 526         CP_MAP_FOR_INTERFACE.put(CONSTANT_INVOKEDYNAMIC,
+ 527                 new TestedCPEntry[] {
+ 528                     new TestedCPEntry(null,
+ 529                                       "run",
+ 530                                       "(Lcompiler/jvmci/common/testcases/MultipleImplementersInterface;)"
+ 531                                               + "Ljava/lang/Runnable;"),
+ 532                 }
+ 533         );
+ 534     }
+ 535 }
+<a name="3" id="anc3"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="3" type="hidden" /></form></body></html>

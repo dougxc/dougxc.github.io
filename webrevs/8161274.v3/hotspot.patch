@@ -1,0 +1,95 @@
+--- old/src/share/vm/compiler/compileBroker.cpp	2016-07-15 00:39:31.000000000 +0200
++++ new/src/share/vm/compiler/compileBroker.cpp	2016-07-15 00:39:31.000000000 +0200
+@@ -1068,6 +1068,12 @@
+     return NULL;
+   }
+ 
++#if INCLUDE_JVMCI
++  if (comp->is_jvmci() && !JVMCIRuntime::can_initialize_JVMCI()) {
++    return NULL;
++  }
++#endif
++
+   if (osr_bci == InvocationEntryBci) {
+     // standard compilation
+     CompiledMethod* method_code = method->code();
+--- old/src/share/vm/jvmci/jvmciRuntime.cpp	2016-07-15 00:39:32.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciRuntime.cpp	2016-07-15 00:39:32.000000000 +0200
+@@ -697,8 +697,21 @@
+   assert(_HotSpotJVMCIRuntime_initialized == true, "what?");
+ }
+ 
++bool JVMCIRuntime::can_initialize_JVMCI() {
++  // Initializing JVMCI requires the module system to be initialized past phase 3.
++  // The JVMCI API itself isn't available until phase 2 and ServiceLoader (which
++  // JVMCI initialization requires) isn't usable until after phase 3. Testing
++  // whether the system loader is initialized satisfies all these invariants.
++  if (SystemDictionary::java_system_loader() == NULL) {
++    return false;
++  }
++  assert(Universe::is_module_initialized(), "must be");
++  return true;
++}
++
+ void JVMCIRuntime::initialize_well_known_classes(TRAPS) {
+   if (JVMCIRuntime::_well_known_classes_initialized == false) {
++    guarantee(can_initialize_JVMCI(), "VM is not yet sufficiently booted to initialize JVMCI");
+     SystemDictionary::WKID scan = SystemDictionary::FIRST_JVMCI_WKID;
+     SystemDictionary::initialize_wk_klasses_through(SystemDictionary::LAST_JVMCI_WKID, scan, CHECK);
+     JVMCIJavaClasses::compute_offsets(CHECK);
+--- old/src/share/vm/jvmci/jvmciRuntime.hpp	2016-07-15 00:39:33.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciRuntime.hpp	2016-07-15 00:39:32.000000000 +0200
+@@ -87,6 +87,11 @@
+   static Handle callStatic(const char* className, const char* methodName, const char* returnType, JavaCallArguments* args, TRAPS);
+ 
+   /**
++   * Determines if the VM is sufficiently booted to initialize JVMCI.
++   */
++  static bool can_initialize_JVMCI();
++
++  /**
+    * Trigger initialization of HotSpotJVMCIRuntime through JVMCI.getRuntime()
+    */
+   static void initialize_JVMCI(TRAPS);
+--- old/src/share/vm/runtime/simpleThresholdPolicy.cpp	2016-07-15 00:39:33.000000000 +0200
++++ new/src/share/vm/runtime/simpleThresholdPolicy.cpp	2016-07-15 00:39:33.000000000 +0200
+@@ -237,18 +237,6 @@
+     return;
+   }
+ 
+-#if INCLUDE_JVMCI
+-  // We can't compile with a JVMCI compiler until the module system is initialized past
+-  // phase 3.  The JVMCI API itself isn't available until phase 2 and ServiceLoader isn't
+-  // usable until after phase 3.
+-  if (level == CompLevel_full_optimization && EnableJVMCI && UseJVMCICompiler) {
+-    if (SystemDictionary::java_system_loader() == NULL) {
+-      return;
+-     }
+-     assert(Universe::is_module_initialized(), "must be");
+-  }
+-#endif
+-
+   // Check if the method can be compiled. If it cannot be compiled with C1, continue profiling
+   // in the interpreter and then compile with C2 (the transition function will request that,
+   // see common() ). If the method cannot be compiled with C2 but still can with C1, compile it with
+--- old/src/share/vm/runtime/thread.cpp	2016-07-15 00:39:34.000000000 +0200
++++ new/src/share/vm/runtime/thread.cpp	2016-07-15 00:39:34.000000000 +0200
+@@ -3770,6 +3770,9 @@
+   // Final system initialization including security manager and system class loader
+   call_initPhase3(CHECK_JNI_ERR);
+ 
++  // cache the system class loader
++  SystemDictionary::compute_java_system_loader(CHECK_(JNI_ERR));
++
+ #if INCLUDE_JVMCI
+   if (EnableJVMCI && UseJVMCICompiler && (!UseInterpreter || !BackgroundCompilation)) {
+     // 8145270: Force initialization of JVMCI runtime otherwise requests for blocking
+@@ -3777,8 +3780,6 @@
+     JVMCIRuntime::force_initialization(CHECK_JNI_ERR);
+   }
+ #endif
+-  // cache the system class loader
+-  SystemDictionary::compute_java_system_loader(CHECK_(JNI_ERR));
+ 
+   // Always call even when there are not JVMTI environments yet, since environments
+   // may be attached late and JVMTI must track phases of VM execution

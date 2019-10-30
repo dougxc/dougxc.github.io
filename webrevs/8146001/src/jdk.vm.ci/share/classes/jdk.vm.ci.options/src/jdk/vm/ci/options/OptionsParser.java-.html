@@ -1,0 +1,464 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>Old src/jdk.vm.ci/share/classes/jdk.vm.ci.options/src/jdk/vm/ci/options/OptionsParser.java</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package jdk.vm.ci.options;
+  24 
+  25 import static jdk.vm.ci.inittimer.InitTimer.timer;
+  26 
+  27 import java.io.BufferedReader;
+  28 import java.io.File;
+  29 import java.io.FileReader;
+  30 import java.io.IOException;
+  31 import java.io.PrintStream;
+  32 import java.util.ArrayList;
+  33 import java.util.Collections;
+  34 import java.util.Formatter;
+  35 import java.util.HashSet;
+  36 import java.util.List;
+  37 import java.util.Map;
+  38 import java.util.ServiceLoader;
+  39 import java.util.Set;
+  40 import java.util.SortedMap;
+  41 
+  42 import jdk.vm.ci.inittimer.InitTimer;
+  43 
+  44 /**
+  45  * This class contains methods for parsing JVMCI options and matching them against a set of
+  46  * {@link OptionDescriptors}. The {@link OptionDescriptors} are loaded via a {@link ServiceLoader}.
+  47  */
+  48 public class OptionsParser {
+  49 
+  50     private static final OptionValue&lt;Boolean&gt; PrintFlags = new OptionValue&lt;&gt;(false);
+  51     private static final OptionValue&lt;Boolean&gt; ShowFlags = new OptionValue&lt;&gt;(false);
+  52 
+  53     /**
+  54      * A service for looking up {@link OptionDescriptor}s.
+  55      */
+  56     public interface OptionDescriptorsProvider {
+  57         /**
+  58          * Gets the {@link OptionDescriptor} matching a given option {@linkplain Option#name() name}
+  59          * or null if no option of that name is provided by this object.
+  60          */
+  61         OptionDescriptor get(String name);
+  62     }
+  63 
+  64     public interface OptionConsumer {
+  65         void set(OptionDescriptor desc, Object value);
+  66     }
+  67 
+  68     /**
+  69      * Parses the options in {@code &lt;jdk&gt;/lib/jvmci.options} if {@code parseOptionsFile == true} and
+  70      * the file exists followed by the JVMCI options in {@code options} if {@code options != null}.
+  71      *
+  72      * Called from VM. This method has an object return type to allow it to be called with a VM
+  73      * utility function used to call other static initialization methods.
+  74      *
+  75      * @param options JVMCI options as serialized (name, value) pairs
+  76      * @param parseOptionsFile specifies whether to look for and parse
+  77      *            {@code &lt;jdk&gt;/lib/jvmci.options}
+  78      */
+  79     @SuppressWarnings("try")
+  80     public static Boolean parseOptionsFromVM(String[] options, boolean parseOptionsFile) {
+  81 
+  82         try (InitTimer t = timer("ParseOptions")) {
+  83 
+  84             if (parseOptionsFile) {
+  85                 File javaHome = new File(System.getProperty("java.home"));
+  86                 File lib = new File(javaHome, "lib");
+  87                 File jvmciOptions = new File(lib, "jvmci.options");
+  88                 if (jvmciOptions.exists()) {
+  89                     try (BufferedReader br = new BufferedReader(new FileReader(jvmciOptions))) {
+  90                         String optionSetting = null;
+  91                         int lineNo = 1;
+  92                         List&lt;String&gt; optionSettings = new ArrayList&lt;&gt;();
+  93                         while ((optionSetting = br.readLine()) != null) {
+  94                             if (!optionSetting.isEmpty() &amp;&amp; optionSetting.charAt(0) != '#') {
+  95                                 try {
+  96                                     parseOptionSettingTo(optionSetting, optionSettings);
+  97                                 } catch (Throwable e) {
+  98                                     throw new InternalError("Error parsing " + jvmciOptions + ", line " + lineNo, e);
+  99                                 }
+ 100                             }
+ 101                             lineNo++;
+ 102                         }
+ 103                         try {
+ 104                             parseOptions(optionSettings.toArray(new String[optionSettings.size()]), null, null, null);
+ 105                         } catch (Throwable e) {
+ 106                             throw new InternalError("Error parsing an option from " + jvmciOptions, e);
+ 107                         }
+ 108                     } catch (IOException e) {
+ 109                         throw new InternalError("Error reading " + jvmciOptions, e);
+ 110                     }
+ 111                 }
+ 112             }
+ 113 
+ 114             parseOptions(options, null, null, null);
+ 115         }
+ 116         return Boolean.TRUE;
+ 117     }
+ 118 
+ 119     /**
+ 120      * Parses an ordered list of (name, value) pairs assigning values to JVMCI options.
+ 121      *
+ 122      * @param optionSettings JVMCI options as serialized (name, value) pairs
+ 123      * @param setter the object to notify of the parsed option and value
+ 124      * @param odp if non-null, the service to use for looking up {@link OptionDescriptor}s
+ 125      * @param options the options database to use if {@code odp == null}. If
+ 126      *            {@code options == null &amp;&amp; odp == null}, {@link OptionsLoader#options} is used.
+ 127      * @throws IllegalArgumentException if there's a problem parsing {@code option}
+ 128      */
+ 129     public static void parseOptions(String[] optionSettings, OptionConsumer setter, OptionDescriptorsProvider odp, SortedMap&lt;String, OptionDescriptor&gt; options) {
+ 130         if (optionSettings != null &amp;&amp; optionSettings.length != 0) {
+ 131             assert optionSettings.length % 2 == 0;
+ 132 
+ 133             moveHelpFlagsToTail(optionSettings);
+ 134 
+ 135             for (int i = 0; i &lt; optionSettings.length / 2; i++) {
+ 136                 String name = optionSettings[i * 2];
+ 137                 String value = optionSettings[i * 2 + 1];
+ 138                 parseOption(name, value, setter, odp, options);
+ 139             }
+ 140             if (PrintFlags.getValue() || ShowFlags.getValue()) {
+ 141                 Set&lt;String&gt; explicitlyAssigned = new HashSet&lt;&gt;(optionSettings.length / 2);
+ 142                 for (int i = 0; i &lt; optionSettings.length / 2; i++) {
+ 143                     String name = optionSettings[i * 2];
+ 144                     explicitlyAssigned.add(name);
+ 145                 }
+ 146                 printFlags(resolveOptions(options), "JVMCI", System.out, explicitlyAssigned);
+ 147                 if (PrintFlags.getValue()) {
+ 148                     System.exit(0);
+ 149                 }
+ 150             }
+ 151         }
+ 152     }
+ 153 
+ 154     /**
+ 155      * Moves all {@code PrintFlags} and {@code ShowFlags} option settings to the back of
+ 156      * {@code optionSettings}. This allows the help message to show which options had their value
+ 157      * explicitly set (even if to their default value).
+ 158      */
+ 159     private static void moveHelpFlagsToTail(String[] optionSettings) {
+ 160         List&lt;String&gt; tail = null;
+ 161         int insert = 0;
+ 162         for (int i = 0; i &lt; optionSettings.length / 2; i++) {
+ 163             String name = optionSettings[i * 2];
+ 164             String value = optionSettings[i * 2 + 1];
+ 165             if (name.equals("ShowFlags") || name.equals("PrintFlags")) {
+ 166                 if (tail == null) {
+ 167                     tail = new ArrayList&lt;&gt;(4);
+ 168                     insert = i * 2;
+ 169                 }
+ 170                 tail.add(name);
+ 171                 tail.add(value);
+ 172             } else if (tail != null) {
+ 173                 optionSettings[insert++] = name;
+ 174                 optionSettings[insert++] = value;
+ 175             }
+ 176         }
+ 177         if (tail != null) {
+ 178             assert tail.size() + insert == optionSettings.length;
+ 179             String[] tailArr = tail.toArray(new String[tail.size()]);
+ 180             System.arraycopy(tailArr, 0, optionSettings, insert, tailArr.length);
+ 181         }
+ 182     }
+ 183 
+ 184     /**
+ 185      * Parses a given option setting string to a list of (name, value) pairs.
+ 186      *
+ 187      * @param optionSetting a string matching the pattern {@code &lt;name&gt;=&lt;value&gt;}
+ 188      */
+ 189     public static void parseOptionSettingTo(String optionSetting, List&lt;String&gt; dst) {
+ 190         int eqIndex = optionSetting.indexOf('=');
+ 191         if (eqIndex == -1) {
+ 192             throw new InternalError("Option setting has does not match the pattern &lt;name&gt;=&lt;value&gt;: " + optionSetting);
+ 193         }
+ 194         dst.add(optionSetting.substring(0, eqIndex));
+ 195         dst.add(optionSetting.substring(eqIndex + 1));
+ 196     }
+ 197 
+ 198     /**
+ 199      * Resolves {@code options} to a non-null value. This ensures {@link OptionsLoader#options} is
+ 200      * only loaded if necessary.
+ 201      */
+ 202     private static SortedMap&lt;String, OptionDescriptor&gt; resolveOptions(SortedMap&lt;String, OptionDescriptor&gt; options) {
+ 203         return options != null ? options : OptionsLoader.options;
+ 204     }
+ 205 
+ 206     /**
+ 207      * Parses a given option name and value.
+ 208      *
+ 209      * @param name the option name
+ 210      * @param valueString the option value as a string
+ 211      * @param setter the object to notify of the parsed option and value
+ 212      * @param odp if non-null, the service to use for looking up {@link OptionDescriptor}s
+ 213      * @param options the options database to use if {@code odp == null}. If
+ 214      *            {@code options == null &amp;&amp; odp == null}, {@link OptionsLoader#options} is used.
+ 215      * @throws IllegalArgumentException if there's a problem parsing {@code option}
+ 216      */
+ 217     private static void parseOption(String name, String valueString, OptionConsumer setter, OptionDescriptorsProvider odp, SortedMap&lt;String, OptionDescriptor&gt; options) {
+ 218 
+ 219         OptionDescriptor desc = odp != null ? odp.get(name) : resolveOptions(options).get(name);
+ 220         if (desc == null) {
+ 221             if (name.equals("PrintFlags")) {
+ 222                 desc = OptionDescriptor.create("PrintFlags", Boolean.class, "Prints all JVMCI flags and exits", OptionsParser.class, "PrintFlags", PrintFlags);
+ 223             } else if (name.equals("ShowFlags")) {
+ 224                 desc = OptionDescriptor.create("ShowFlags", Boolean.class, "Prints all JVMCI flags and continues", OptionsParser.class, "ShowFlags", ShowFlags);
+ 225             }
+ 226         }
+ 227         if (desc == null) {
+ 228             List&lt;OptionDescriptor&gt; matches = fuzzyMatch(resolveOptions(options), name);
+ 229             Formatter msg = new Formatter();
+ 230             msg.format("Could not find option %s", name);
+ 231             if (!matches.isEmpty()) {
+ 232                 msg.format("%nDid you mean one of the following?");
+ 233                 for (OptionDescriptor match : matches) {
+ 234                     msg.format("%n    %s=&lt;value&gt;", match.getName());
+ 235                 }
+ 236             }
+ 237             throw new IllegalArgumentException(msg.toString());
+ 238         }
+ 239 
+ 240         Class&lt;?&gt; optionType = desc.getType();
+ 241         Object value;
+ 242         if (optionType == Boolean.class) {
+ 243             if ("true".equals(valueString)) {
+ 244                 value = Boolean.TRUE;
+ 245             } else if ("false".equals(valueString)) {
+ 246                 value = Boolean.FALSE;
+ 247             } else {
+ 248                 throw new IllegalArgumentException("Boolean option '" + name + "' must have value \"true\" or \"false\", not \"" + valueString + "\"");
+ 249             }
+ 250         } else if (optionType == Float.class) {
+ 251             value = Float.parseFloat(valueString);
+ 252         } else if (optionType == Double.class) {
+ 253             value = Double.parseDouble(valueString);
+ 254         } else if (optionType == Integer.class) {
+ 255             value = Integer.valueOf((int) parseLong(valueString));
+ 256         } else if (optionType == Long.class) {
+ 257             value = Long.valueOf(parseLong(valueString));
+ 258         } else if (optionType == String.class) {
+ 259             value = valueString;
+ 260         } else {
+ 261             throw new IllegalArgumentException("Wrong value for option '" + name + "'");
+ 262         }
+ 263         if (setter == null) {
+ 264             desc.getOptionValue().setValue(value);
+ 265         } else {
+ 266             setter.set(desc, value);
+ 267         }
+ 268     }
+ 269 
+ 270     private static long parseLong(String v) {
+ 271         String valueString = v.toLowerCase();
+ 272         long scale = 1;
+ 273         if (valueString.endsWith("k")) {
+ 274             scale = 1024L;
+ 275         } else if (valueString.endsWith("m")) {
+ 276             scale = 1024L * 1024L;
+ 277         } else if (valueString.endsWith("g")) {
+ 278             scale = 1024L * 1024L * 1024L;
+ 279         } else if (valueString.endsWith("t")) {
+ 280             scale = 1024L * 1024L * 1024L * 1024L;
+ 281         }
+ 282 
+ 283         if (scale != 1) {
+ 284             /* Remove trailing scale character. */
+ 285             valueString = valueString.substring(0, valueString.length() - 1);
+ 286         }
+ 287 
+ 288         return Long.parseLong(valueString) * scale;
+ 289     }
+ 290 
+ 291     /**
+ 292      * Wraps some given text to one or more lines of a given maximum width.
+ 293      *
+ 294      * @param text text to wrap
+ 295      * @param width maximum width of an output line, exception for words in {@code text} longer than
+ 296      *            this value
+ 297      * @return {@code text} broken into lines
+ 298      */
+ 299     private static List&lt;String&gt; wrap(String text, int width) {
+ 300         List&lt;String&gt; lines = Collections.singletonList(text);
+ 301         if (text.length() &gt; width) {
+ 302             String[] chunks = text.split("\\s+");
+ 303             lines = new ArrayList&lt;&gt;();
+ 304             StringBuilder line = new StringBuilder();
+ 305             for (String chunk : chunks) {
+ 306                 if (line.length() + chunk.length() &gt; width) {
+ 307                     lines.add(line.toString());
+ 308                     line.setLength(0);
+ 309                 }
+ 310                 if (line.length() != 0) {
+ 311                     line.append(' ');
+ 312                 }
+ 313                 String[] embeddedLines = chunk.split("%n", -2);
+ 314                 if (embeddedLines.length == 1) {
+ 315                     line.append(chunk);
+ 316                 } else {
+ 317                     for (int i = 0; i &lt; embeddedLines.length; i++) {
+ 318                         line.append(embeddedLines[i]);
+ 319                         if (i &lt; embeddedLines.length - 1) {
+ 320                             lines.add(line.toString());
+ 321                             line.setLength(0);
+ 322                         }
+ 323                     }
+ 324                 }
+ 325             }
+ 326             if (line.length() != 0) {
+ 327                 lines.add(line.toString());
+ 328             }
+ 329         }
+ 330         return lines;
+ 331     }
+ 332 
+ 333     private static void printFlags(SortedMap&lt;String, OptionDescriptor&gt; sortedOptions, String prefix, PrintStream out, Set&lt;String&gt; explicitlyAssigned) {
+ 334         out.println("[List of " + prefix + " options]");
+ 335         for (Map.Entry&lt;String, OptionDescriptor&gt; e : sortedOptions.entrySet()) {
+ 336             e.getKey();
+ 337             OptionDescriptor desc = e.getValue();
+ 338             Object value = desc.getOptionValue().getValue();
+ 339             List&lt;String&gt; helpLines = wrap(desc.getHelp(), 70);
+ 340             String name = e.getKey();
+ 341             String assign = explicitlyAssigned.contains(name) ? ":=" : " =";
+ 342             out.printf("%9s %-40s %s %-14s %s%n", desc.getType().getSimpleName(), name, assign, value, helpLines.get(0));
+ 343             for (int i = 1; i &lt; helpLines.size(); i++) {
+ 344                 out.printf("%67s %s%n", " ", helpLines.get(i));
+ 345             }
+ 346         }
+ 347     }
+ 348 
+ 349     /**
+ 350      * Compute string similarity based on Dice's coefficient.
+ 351      *
+ 352      * Ported from str_similar() in globals.cpp.
+ 353      */
+ 354     static float stringSimiliarity(String str1, String str2) {
+ 355         int hit = 0;
+ 356         for (int i = 0; i &lt; str1.length() - 1; ++i) {
+ 357             for (int j = 0; j &lt; str2.length() - 1; ++j) {
+ 358                 if ((str1.charAt(i) == str2.charAt(j)) &amp;&amp; (str1.charAt(i + 1) == str2.charAt(j + 1))) {
+ 359                     ++hit;
+ 360                     break;
+ 361                 }
+ 362             }
+ 363         }
+ 364         return 2.0f * hit / (str1.length() + str2.length());
+ 365     }
+ 366 
+ 367     private static final float FUZZY_MATCH_THRESHOLD = 0.7F;
+ 368 
+ 369     /**
+ 370      * Returns the set of options that fuzzy match a given option name.
+ 371      */
+ 372     private static List&lt;OptionDescriptor&gt; fuzzyMatch(SortedMap&lt;String, OptionDescriptor&gt; options, String optionName) {
+ 373         List&lt;OptionDescriptor&gt; matches = new ArrayList&lt;&gt;();
+ 374         for (Map.Entry&lt;String, OptionDescriptor&gt; e : options.entrySet()) {
+ 375             float score = stringSimiliarity(e.getKey(), optionName);
+ 376             if (score &gt;= FUZZY_MATCH_THRESHOLD) {
+ 377                 matches.add(e.getValue());
+ 378             }
+ 379         }
+ 380         return matches;
+ 381     }
+ 382 }
+</pre></body></html>

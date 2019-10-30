@@ -1,0 +1,431 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2001, 2017, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #include "precompiled.hpp"
+  26 #include "gc/g1/g1CollectedHeap.inline.hpp"
+  27 #include "gc/g1/g1SATBCardTableModRefBS.inline.hpp"
+  28 #include "gc/g1/heapRegion.hpp"
+  29 #include "gc/g1/satbMarkQueue.hpp"
+  30 #include "gc/shared/memset_with_concurrent_readers.hpp"
+  31 #include "logging/log.hpp"
+  32 #include "oops/oop.inline.hpp"
+  33 #include "runtime/atomic.hpp"
+  34 #include "runtime/mutexLocker.hpp"
+  35 #include "runtime/orderAccess.inline.hpp"
+  36 #include "runtime/thread.inline.hpp"
+  37 
+  38 G1SATBCardTableModRefBS::G1SATBCardTableModRefBS(
+  39   MemRegion whole_heap,
+  40   const BarrierSet::FakeRtti&amp; fake_rtti) :
+  41   CardTableModRefBS(whole_heap, fake_rtti.add_tag(BarrierSet::G1SATBCT))
+  42 { }
+  43 
+  44 void G1SATBCardTableModRefBS::enqueue(oop pre_val) {
+  45   // Nulls should have been already filtered.
+  46   assert(oopDesc::is_oop(pre_val, true), "Error");
+  47 
+  48   if (!JavaThread::satb_mark_queue_set().is_active()) return;
+  49   Thread* thr = Thread::current();
+  50   if (thr-&gt;is_Java_thread()) {
+  51     JavaThread* jt = (JavaThread*)thr;
+  52     jt-&gt;satb_mark_queue().enqueue(pre_val);
+  53   } else {
+  54     MutexLockerEx x(Shared_SATB_Q_lock, Mutex::_no_safepoint_check_flag);
+  55     JavaThread::satb_mark_queue_set().shared_satb_queue()-&gt;enqueue(pre_val);
+  56   }
+  57 }
+  58 
+  59 template &lt;class T&gt; void
+  60 G1SATBCardTableModRefBS::write_ref_array_pre_work(T* dst, int count) {
+  61   if (!JavaThread::satb_mark_queue_set().is_active()) return;
+  62   T* elem_ptr = dst;
+  63   for (int i = 0; i &lt; count; i++, elem_ptr++) {
+  64     T heap_oop = oopDesc::load_heap_oop(elem_ptr);
+  65     if (!oopDesc::is_null(heap_oop)) {
+  66       enqueue(oopDesc::decode_heap_oop_not_null(heap_oop));
+  67     }
+  68   }
+  69 }
+  70 
+  71 void G1SATBCardTableModRefBS::write_ref_array_pre(oop* dst, int count, bool dest_uninitialized) {
+  72   if (!dest_uninitialized) {
+  73     write_ref_array_pre_work(dst, count);
+  74   }
+  75 }
+  76 void G1SATBCardTableModRefBS::write_ref_array_pre(narrowOop* dst, int count, bool dest_uninitialized) {
+  77   if (!dest_uninitialized) {
+  78     write_ref_array_pre_work(dst, count);
+  79   }
+  80 }
+  81 
+  82 bool G1SATBCardTableModRefBS::mark_card_deferred(size_t card_index) {
+  83   jbyte val = _byte_map[card_index];
+  84   // It's already processed
+  85   if ((val &amp; (clean_card_mask_val() | deferred_card_val())) == deferred_card_val()) {
+  86     return false;
+  87   }
+  88 
+  89   // Cached bit can be installed either on a clean card or on a claimed card.
+  90   jbyte new_val = val;
+  91   if (val == clean_card_val()) {
+  92     new_val = (jbyte)deferred_card_val();
+  93   } else {
+  94     if (val &amp; claimed_card_val()) {
+  95       new_val = val | (jbyte)deferred_card_val();
+  96     }
+  97   }
+  98   if (new_val != val) {
+  99     Atomic::cmpxchg(new_val, &amp;_byte_map[card_index], val);
+ 100   }
+ 101   return true;
+ 102 }
+ 103 
+ 104 void G1SATBCardTableModRefBS::g1_mark_as_young(const MemRegion&amp; mr) {
+ 105   jbyte *const first = byte_for(mr.start());
+ 106   jbyte *const last = byte_after(mr.last());
+ 107 
+ 108   memset_with_concurrent_readers(first, g1_young_gen, last - first);
+ 109 }
+ 110 
+ 111 #ifndef PRODUCT
+ 112 void G1SATBCardTableModRefBS::verify_g1_young_region(MemRegion mr) {
+ 113   verify_region(mr, g1_young_gen,  true);
+ 114 }
+ 115 #endif
+ 116 
+ 117 void G1SATBCardTableLoggingModRefBSChangedListener::on_commit(uint start_idx, size_t num_regions, bool zero_filled) {
+ 118   // Default value for a clean card on the card table is -1. So we cannot take advantage of the zero_filled parameter.
+ 119   MemRegion mr(G1CollectedHeap::heap()-&gt;bottom_addr_for_region(start_idx), num_regions * HeapRegion::GrainWords);
+ 120   _card_table-&gt;clear(mr);
+ 121 }
+ 122 
+ 123 G1SATBCardTableLoggingModRefBS::
+ 124 G1SATBCardTableLoggingModRefBS(MemRegion whole_heap) :
+ 125   G1SATBCardTableModRefBS(whole_heap, BarrierSet::FakeRtti(G1SATBCTLogging)),
+ 126   _dcqs(JavaThread::dirty_card_queue_set()),
+ 127   _listener()
+ 128 {
+ 129   _listener.set_card_table(this);
+ 130 }
+ 131 
+ 132 void G1SATBCardTableLoggingModRefBS::initialize(G1RegionToSpaceMapper* mapper) {
+ 133   mapper-&gt;set_mapping_changed_listener(&amp;_listener);
+ 134 
+ 135   _byte_map_size = mapper-&gt;reserved().byte_size();
+ 136 
+ 137   _guard_index = cards_required(_whole_heap.word_size()) - 1;
+ 138   _last_valid_index = _guard_index - 1;
+ 139 
+ 140   HeapWord* low_bound  = _whole_heap.start();
+ 141   HeapWord* high_bound = _whole_heap.end();
+ 142 
+ 143   _cur_covered_regions = 1;
+ 144   _covered[0] = _whole_heap;
+ 145 
+ 146   _byte_map = (jbyte*) mapper-&gt;reserved().start();
+ 147   byte_map_base = _byte_map - (uintptr_t(low_bound) &gt;&gt; card_shift);
+ 148   assert(byte_for(low_bound) == &amp;_byte_map[0], "Checking start of map");
+ 149   assert(byte_for(high_bound-1) &lt;= &amp;_byte_map[_last_valid_index], "Checking end of map");
+ 150 
+ 151   log_trace(gc, barrier)("G1SATBCardTableModRefBS::G1SATBCardTableModRefBS: ");
+ 152   log_trace(gc, barrier)("    &amp;_byte_map[0]: " INTPTR_FORMAT "  &amp;_byte_map[_last_valid_index]: " INTPTR_FORMAT,
+ 153                          p2i(&amp;_byte_map[0]), p2i(&amp;_byte_map[_last_valid_index]));
+ 154   log_trace(gc, barrier)("    byte_map_base: " INTPTR_FORMAT,  p2i(byte_map_base));
+ 155 }
+ 156 
+ 157 void
+ 158 G1SATBCardTableLoggingModRefBS::write_ref_field_work(void* field,
+ 159                                                      oop new_val,
+ 160                                                      bool release) {
+ 161   volatile jbyte* byte = byte_for(field);
+ 162   if (*byte == g1_young_gen) {
+ 163     return;
+ 164   }
+ 165   OrderAccess::storeload();
+ 166   if (*byte != dirty_card) {
+ 167     *byte = dirty_card;
+ 168     Thread* thr = Thread::current();
+ 169     if (thr-&gt;is_Java_thread()) {
+ 170       JavaThread* jt = (JavaThread*)thr;
+ 171       jt-&gt;dirty_card_queue().enqueue(byte);
+ 172     } else {
+ 173       MutexLockerEx x(Shared_DirtyCardQ_lock,
+ 174                       Mutex::_no_safepoint_check_flag);
+ 175       _dcqs.shared_dirty_card_queue()-&gt;enqueue(byte);
+ 176     }
+ 177   }
+ 178 }
+ 179 
+ 180 void
+ 181 G1SATBCardTableLoggingModRefBS::invalidate(MemRegion mr) {
+ 182   volatile jbyte* byte = byte_for(mr.start());
+ 183   jbyte* last_byte = byte_for(mr.last());
+ 184   Thread* thr = Thread::current();
+ 185     // skip all consecutive young cards
+ 186   for (; byte &lt;= last_byte &amp;&amp; *byte == g1_young_gen; byte++);
+ 187 
+ 188   if (byte &lt;= last_byte) {
+ 189     OrderAccess::storeload();
+ 190     // Enqueue if necessary.
+ 191     if (thr-&gt;is_Java_thread()) {
+ 192       JavaThread* jt = (JavaThread*)thr;
+ 193       for (; byte &lt;= last_byte; byte++) {
+ 194         if (*byte == g1_young_gen) {
+ 195           continue;
+ 196         }
+ 197         if (*byte != dirty_card) {
+ 198           *byte = dirty_card;
+ 199           jt-&gt;dirty_card_queue().enqueue(byte);
+ 200         }
+ 201       }
+ 202     } else {
+ 203       MutexLockerEx x(Shared_DirtyCardQ_lock,
+ 204                       Mutex::_no_safepoint_check_flag);
+ 205       for (; byte &lt;= last_byte; byte++) {
+ 206         if (*byte == g1_young_gen) {
+ 207           continue;
+ 208         }
+ 209         if (*byte != dirty_card) {
+ 210           *byte = dirty_card;
+ 211           _dcqs.shared_dirty_card_queue()-&gt;enqueue(byte);
+ 212         }
+ 213       }
+ 214     }
+ 215   }
+ 216 }
+<a name="1" id="anc1"></a><span class="removed"> 217 </span>
+<span class="removed"> 218 void G1SATBCardTableModRefBS::write_ref_nmethod_post(oop* dst, nmethod* nm) {</span>
+<span class="removed"> 219   oop obj = oopDesc::load_heap_oop(dst);</span>
+<span class="removed"> 220   if (obj != NULL) {</span>
+<span class="removed"> 221     G1CollectedHeap* g1h = G1CollectedHeap::heap();</span>
+<span class="removed"> 222     HeapRegion* hr = g1h-&gt;heap_region_containing(obj);</span>
+<span class="removed"> 223     hr-&gt;add_strong_code_root(nm);</span>
+<span class="removed"> 224   }</span>
+<span class="removed"> 225 }</span>
+<span class="removed"> 226 </span>
+<span class="removed"> 227 class G1EnsureLastRefToRegion : public OopClosure {</span>
+<span class="removed"> 228   G1CollectedHeap* _g1h;</span>
+<span class="removed"> 229   HeapRegion* _hr;</span>
+<span class="removed"> 230   oop* _dst;</span>
+<span class="removed"> 231 </span>
+<span class="removed"> 232   bool _value;</span>
+<span class="removed"> 233 public:</span>
+<span class="removed"> 234   G1EnsureLastRefToRegion(G1CollectedHeap* g1h, HeapRegion* hr, oop* dst) :</span>
+<span class="removed"> 235     _g1h(g1h), _hr(hr), _dst(dst), _value(true) {}</span>
+<span class="removed"> 236 </span>
+<span class="removed"> 237   void do_oop(oop* p) {</span>
+<span class="removed"> 238     if (_value &amp;&amp; p != _dst) {</span>
+<span class="removed"> 239       oop obj = oopDesc::load_heap_oop(p);</span>
+<span class="removed"> 240       if (obj != NULL) {</span>
+<span class="removed"> 241         HeapRegion* hr = _g1h-&gt;heap_region_containing(obj);</span>
+<span class="removed"> 242         if (hr == _hr) {</span>
+<span class="removed"> 243           // Another reference to the same region.</span>
+<span class="removed"> 244           _value = false;</span>
+<span class="removed"> 245         }</span>
+<span class="removed"> 246       }</span>
+<span class="removed"> 247     }</span>
+<span class="removed"> 248   }</span>
+<span class="removed"> 249   void do_oop(narrowOop* p) { ShouldNotReachHere(); }</span>
+<span class="removed"> 250   bool value() const        { return _value;  }</span>
+<span class="removed"> 251 };</span>
+<span class="removed"> 252 </span>
+<span class="removed"> 253 void G1SATBCardTableModRefBS::write_ref_nmethod_pre(oop* dst, nmethod* nm) {</span>
+<span class="removed"> 254   oop obj = oopDesc::load_heap_oop(dst);</span>
+<span class="removed"> 255   if (obj != NULL) {</span>
+<span class="removed"> 256     G1CollectedHeap* g1h = G1CollectedHeap::heap();</span>
+<span class="removed"> 257     HeapRegion* hr = g1h-&gt;heap_region_containing(obj);</span>
+<span class="removed"> 258     G1EnsureLastRefToRegion ensure_last_ref(g1h, hr, dst);</span>
+<span class="removed"> 259     nm-&gt;oops_do(&amp;ensure_last_ref);</span>
+<span class="removed"> 260     if (ensure_last_ref.value()) {</span>
+<span class="removed"> 261       // Last reference to this region, remove the nmethod from the rset.</span>
+<span class="removed"> 262       hr-&gt;remove_strong_code_root(nm);</span>
+<span class="removed"> 263     }</span>
+<span class="removed"> 264   }</span>
+<span class="removed"> 265 }</span>
+<a name="2" id="anc2"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="2" type="hidden" /></form></body></html>

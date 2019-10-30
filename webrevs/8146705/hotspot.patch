@@ -1,0 +1,256 @@
+--- old/src/share/vm/compiler/compileBroker.cpp	2016-01-11 13:55:45.000000000 +0100
++++ new/src/share/vm/compiler/compileBroker.cpp	2016-01-11 13:55:45.000000000 +0100
+@@ -227,6 +227,11 @@
+ CompileTaskWrapper::CompileTaskWrapper(CompileTask* task) {
+   CompilerThread* thread = CompilerThread::current();
+   thread->set_task(task);
++#if INCLUDE_JVMCI
++  if (task->is_blocking() && CompileBroker::compiler(task->comp_level())->is_jvmci()) {
++    task->set_jvmci_compiler_thread(thread);
++  }
++#endif
+   CompileLog*     log  = thread->log();
+   if (log != NULL)  task->log_task_start(log);
+ }
+@@ -245,10 +250,12 @@
+       MutexLocker notifier(task->lock(), thread);
+       task->mark_complete();
+ #if INCLUDE_JVMCI
+-      if (CompileBroker::compiler(task->comp_level())->is_jvmci() &&
+-        !task->has_waiter()) {
+-        // The waiting thread timed out and thus did not free the task.
+-        free_task = true;
++      if (CompileBroker::compiler(task->comp_level())->is_jvmci()) {
++        if (!task->has_waiter()) {
++          // The waiting thread timed out and thus did not free the task.
++          free_task = true;
++        }
++        task->set_jvmci_compiler_thread(NULL);
+       }
+ #endif
+       if (!free_task) {
+@@ -1332,11 +1339,56 @@
+   return new_task;
+ }
+ 
+-// 1 second should be long enough to complete most JVMCI compilations
+-// and not too long to stall a blocking JVMCI compilation that
+-// is trying to acquire a lock held by the app thread that submitted the
+-// compilation.
+-static const long BLOCKING_JVMCI_COMPILATION_TIMEOUT = 1000;
++#if INCLUDE_JVMCI
++// The number of milliseconds to wait before checking if the
++// JVMCI compiler thread is blocked.
++static const long BLOCKING_JVMCI_COMPILATION_WAIT_TIMESLICE = 500;
++
++// The number of successive times the above check is allowed to
++// see a blocked JVMCI compiler thread before unblocking the
++// thread waiting for the compilation to finish.
++static const int BLOCKING_JVMCI_COMPILATION_WAIT_TO_UNBLOCK_ATTEMPTS = 5;
++
++/**
++ * Waits for a JVMCI compiler to complete a given task. This thread
++ * waits until either the task completes or it sees the JVMCI compiler
++ * thread is blocked for N consecutive milliseconds where N is
++ * BLOCKING_JVMCI_COMPILATION_WAIT_TIMESLICE *
++ * BLOCKING_JVMCI_COMPILATION_WAIT_TO_UNBLOCK_ATTEMPTS.
++ *
++ * @return true if this thread needs to free/recycle the task
++ */
++bool CompileBroker::wait_for_jvmci_completion(CompileTask* task, JavaThread* thread) {
++  MutexLocker waiter(task->lock(), thread);
++  int consecutively_blocked = 0;
++  while (task->lock()->wait(!Mutex::_no_safepoint_check_flag, BLOCKING_JVMCI_COMPILATION_WAIT_TIMESLICE)) {
++    CompilerThread* jvmci_compiler_thread = task->jvmci_compiler_thread();
++    if (jvmci_compiler_thread != NULL) {
++      JavaThreadState state;
++      {
++        // A JVMCI compiler thread should not disappear at this point
++        // but let's be extra safe.
++        MutexLocker mu(Threads_lock, thread);
++        state = jvmci_compiler_thread->thread_state();
++      }
++      if (state == _thread_blocked) {
++        if (++consecutively_blocked == BLOCKING_JVMCI_COMPILATION_WAIT_TO_UNBLOCK_ATTEMPTS) {
++          if (PrintCompilation) {
++            task->print(tty, "wait for blocking compilation timed out");
++          }
++          break;
++        }
++      } else {
++        consecutively_blocked = 0;
++      }
++    } else {
++      // Still waiting on JVMCI compiler queue
++    }
++  }
++  task->clear_waiter();
++  return task->is_complete();
++}
++#endif
+ 
+ /**
+  *  Wait for the compilation task to complete.
+@@ -1356,16 +1408,7 @@
+   bool free_task;
+ #if INCLUDE_JVMCI
+   if (compiler(task->comp_level())->is_jvmci()) {
+-    MutexLocker waiter(task->lock(), thread);
+-    // No need to check if compilation has completed - just
+-    // rely on the time out. The JVMCI compiler thread will
+-    // recycle the CompileTask.
+-    task->lock()->wait(!Mutex::_no_safepoint_check_flag, BLOCKING_JVMCI_COMPILATION_TIMEOUT);
+-    // If the compilation completes while has_waiter is true then
+-    // this thread is responsible for freeing the task.  Otherwise
+-    // the compiler thread will free the task.
+-    task->clear_waiter();
+-    free_task = task->is_complete();
++    free_task = wait_for_jvmci_completion(task, thread);
+   } else
+ #endif
+   {
+--- old/src/share/vm/compiler/compileBroker.hpp	2016-01-11 13:55:46.000000000 +0100
++++ new/src/share/vm/compiler/compileBroker.hpp	2016-01-11 13:55:46.000000000 +0100
+@@ -233,6 +233,9 @@
+                                           const char*         comment,
+                                           bool                blocking);
+   static void wait_for_completion(CompileTask* task);
++#if INCLUDE_JVMCI
++  static bool wait_for_jvmci_completion(CompileTask* task, JavaThread* thread);
++#endif
+ 
+   static void invoke_compiler_on_method(CompileTask* task);
+   static void post_compile(CompilerThread* thread, CompileTask* task, EventCompilation& event, bool success, ciEnv* ci_env);
+--- old/src/share/vm/compiler/compileTask.cpp	2016-01-11 13:55:46.000000000 +0100
++++ new/src/share/vm/compiler/compileTask.cpp	2016-01-11 13:55:46.000000000 +0100
+@@ -91,6 +91,7 @@
+   _osr_bci = osr_bci;
+   _is_blocking = is_blocking;
+   JVMCI_ONLY(_has_waiter = CompileBroker::compiler(comp_level)->is_jvmci();)
++  JVMCI_ONLY(_jvmci_compiler_thread = NULL;)
+   _comp_level = comp_level;
+   _num_inlined_bytecodes = 0;
+ 
+--- old/src/share/vm/compiler/compileTask.hpp	2016-01-11 13:55:47.000000000 +0100
++++ new/src/share/vm/compiler/compileTask.hpp	2016-01-11 13:55:47.000000000 +0100
+@@ -56,6 +56,8 @@
+   bool         _is_blocking;
+ #if INCLUDE_JVMCI
+   bool         _has_waiter;
++  // Compiler thread for a blocking JVMCI compilation
++  CompilerThread* _jvmci_compiler_thread;
+ #endif
+   int          _comp_level;
+   int          _num_inlined_bytecodes;
+@@ -92,6 +94,12 @@
+ #if INCLUDE_JVMCI
+   bool         has_waiter() const                { return _has_waiter; }
+   void         clear_waiter()                    { _has_waiter = false; }
++  CompilerThread* jvmci_compiler_thread() const  { return _jvmci_compiler_thread; }
++  void         set_jvmci_compiler_thread(CompilerThread* t) {
++    assert(is_blocking(), "must be");
++    assert((t == NULL) != (_jvmci_compiler_thread == NULL), "must be");
++    _jvmci_compiler_thread = t;
++  }
+ #endif
+ 
+   nmethodLocker* code_handle() const             { return _code_handle; }
+--- old/src/share/vm/runtime/advancedThresholdPolicy.cpp	2016-01-11 13:55:47.000000000 +0100
++++ new/src/share/vm/runtime/advancedThresholdPolicy.cpp	2016-01-11 13:55:47.000000000 +0100
+@@ -165,7 +165,7 @@
+ // Called with the queue locked and with at least one element
+ CompileTask* AdvancedThresholdPolicy::select_task(CompileQueue* compile_queue) {
+ #if INCLUDE_JVMCI
+-  CompileTask *max_non_jvmci_task = NULL;
++  CompileTask *max_blocking_task = NULL;
+ #endif
+   CompileTask *max_task = NULL;
+   Method* max_method = NULL;
+@@ -197,13 +197,25 @@
+         max_method = method;
+       }
+     }
++#ifdef INCLUDE_JVMCI
++    if (UseJVMCICompiler && task->is_blocking()) {
++      if (max_blocking_task == NULL || compare_methods(method, max_blocking_task->method())) {
++        max_blocking_task = task;
++      }
++    }
++#endif
+     task = next_task;
+   }
+ 
+ #if INCLUDE_JVMCI
+   if (UseJVMCICompiler) {
+-    if (max_non_jvmci_task != NULL) {
+-      max_task = max_non_jvmci_task;
++    if (max_blocking_task != NULL) {
++      // In blocking compilation mode, the CompileBroker will make
++      // compilations submitted by a JVMCI compiler thread non-blocking. These
++      // compilations should be scheduled after all blocking compilations
++      // to service non-compiler related compilations sooner and reduce the
++      // chance of such compilations timing out.
++      max_task = max_blocking_task;
+       max_method = max_task->method();
+     }
+   }
+--- old/src/share/vm/runtime/compilationPolicy.cpp	2016-01-11 13:55:48.000000000 +0100
++++ new/src/share/vm/runtime/compilationPolicy.cpp	2016-01-11 13:55:48.000000000 +0100
+@@ -159,6 +159,26 @@
+   return !delay_compilation_during_startup() && CompileBroker::should_compile_new_jobs();
+ }
+ 
++CompileTask* CompilationPolicy::select_task_helper(CompileQueue* compile_queue) {
++#if INCLUDE_JVMCI
++  if (UseJVMCICompiler && !BackgroundCompilation) {
++    /*
++     * In blocking compilation mode, the CompileBroker will make
++     * compilations submitted by a JVMCI compiler thread non-blocking. These
++     * compilations should be scheduled after all blocking compilations
++     * to service non-compiler related compilations sooner and reduce the
++     * chance of such compilations timing out.
++     */
++    for (CompileTask* task = compile_queue->first(); task != NULL; task = task->next()) {
++      if (task->is_blocking()) {
++        return task;
++      }
++    }
++  }
++#endif
++  return compile_queue->first();
++}
++
+ #ifndef PRODUCT
+ void CompilationPolicy::print_time() {
+   tty->print_cr ("Accumulated compilationPolicy times:");
+@@ -339,7 +359,7 @@
+ }
+ 
+ CompileTask* NonTieredCompPolicy::select_task(CompileQueue* compile_queue) {
+-  return compile_queue->first();
++  return select_task_helper(compile_queue);
+ }
+ 
+ bool NonTieredCompPolicy::is_mature(Method* method) {
+--- old/src/share/vm/runtime/compilationPolicy.hpp	2016-01-11 13:55:48.000000000 +0100
++++ new/src/share/vm/runtime/compilationPolicy.hpp	2016-01-11 13:55:48.000000000 +0100
+@@ -58,6 +58,8 @@
+   static void set_policy(CompilationPolicy* policy) { _policy = policy; }
+   static CompilationPolicy* policy()                { return _policy; }
+ 
++  static CompileTask* select_task_helper(CompileQueue* compile_queue);
++
+   // Profiling
+   elapsedTimer* accumulated_time() { return &_accumulated_time; }
+   void print_time() PRODUCT_RETURN;
+--- old/src/share/vm/runtime/simpleThresholdPolicy.cpp	2016-01-11 13:55:49.000000000 +0100
++++ new/src/share/vm/runtime/simpleThresholdPolicy.cpp	2016-01-11 13:55:49.000000000 +0100
+@@ -168,7 +168,7 @@
+ 
+ // Called with the queue locked and with at least one element
+ CompileTask* SimpleThresholdPolicy::select_task(CompileQueue* compile_queue) {
+-  return compile_queue->first();
++  return select_task_helper(compile_queue);
+ }
+ 
+ void SimpleThresholdPolicy::reprofile(ScopeDesc* trap_scope, bool is_osr) {

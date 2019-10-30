@@ -1,0 +1,1669 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>Old src/hotspot/share/jvmci/jvmciCompilerToVM.cpp</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 
+  24 #include "precompiled.hpp"
+  25 #include "ci/ciUtilities.inline.hpp"
+  26 #include "classfile/javaClasses.inline.hpp"
+  27 #include "code/scopeDesc.hpp"
+  28 #include "interpreter/linkResolver.hpp"
+  29 #include "memory/oopFactory.hpp"
+  30 #include "oops/cpCache.inline.hpp"
+  31 #include "oops/generateOopMap.hpp"
+  32 #include "oops/method.inline.hpp"
+  33 #include "oops/objArrayOop.inline.hpp"
+  34 #include "oops/typeArrayOop.inline.hpp"
+  35 #include "compiler/compileBroker.hpp"
+  36 #include "compiler/disassembler.hpp"
+  37 #include "jvmci/jvmciCompilerToVM.hpp"
+  38 #include "jvmci/jvmciCodeInstaller.hpp"
+  39 #include "jvmci/jvmciRuntime.hpp"
+  40 #include "runtime/fieldDescriptor.inline.hpp"
+  41 #include "runtime/flags/jvmFlag.hpp"
+  42 #include "runtime/frame.inline.hpp"
+  43 #include "runtime/interfaceSupport.inline.hpp"
+  44 #include "runtime/jniHandles.inline.hpp"
+  45 #include "runtime/timerTrace.hpp"
+  46 #include "runtime/vframe_hp.hpp"
+  47 
+  48 JVMCIKlassHandle::JVMCIKlassHandle(Thread* thread, Klass* klass) {
+  49   _thread = thread;
+  50   _klass = klass;
+  51   if (klass != NULL) {
+  52     _holder = Handle(_thread, klass-&gt;holder_phantom());
+  53   }
+  54 }
+  55 
+  56 JVMCIKlassHandle&amp; JVMCIKlassHandle::operator=(Klass* klass) {
+  57   _klass = klass;
+  58   if (klass != NULL) {
+  59     _holder = Handle(_thread, klass-&gt;holder_phantom());
+  60   }
+  61   return *this;
+  62 }
+  63 
+  64 void JNIHandleMark::push_jni_handle_block() {
+  65   JavaThread* thread = JavaThread::current();
+  66   if (thread != NULL) {
+  67     // Allocate a new block for JNI handles.
+  68     // Inlined code from jni_PushLocalFrame()
+  69     JNIHandleBlock* java_handles = ((JavaThread*)thread)-&gt;active_handles();
+  70     JNIHandleBlock* compile_handles = JNIHandleBlock::allocate_block(thread);
+  71     assert(compile_handles != NULL &amp;&amp; java_handles != NULL, "should not be NULL");
+  72     compile_handles-&gt;set_pop_frame_link(java_handles);
+  73     thread-&gt;set_active_handles(compile_handles);
+  74   }
+  75 }
+  76 
+  77 void JNIHandleMark::pop_jni_handle_block() {
+  78   JavaThread* thread = JavaThread::current();
+  79   if (thread != NULL) {
+  80     // Release our JNI handle block
+  81     JNIHandleBlock* compile_handles = thread-&gt;active_handles();
+  82     JNIHandleBlock* java_handles = compile_handles-&gt;pop_frame_link();
+  83     thread-&gt;set_active_handles(java_handles);
+  84     compile_handles-&gt;set_pop_frame_link(NULL);
+  85     JNIHandleBlock::release_block(compile_handles, thread); // may block
+  86   }
+  87 }
+  88 
+  89 // Entry to native method implementation that transitions current thread to '_thread_in_vm'.
+  90 #define C2V_VMENTRY(result_type, name, signature) \
+  91   JNIEXPORT result_type JNICALL c2v_ ## name signature { \
+  92   TRACE_jvmci_1("CompilerToVM::" #name); \
+  93   TRACE_CALL(result_type, jvmci_ ## name signature) \
+  94   JVMCI_VM_ENTRY_MARK; \
+  95 
+  96 #define C2V_END }
+  97 
+  98 oop CompilerToVM::get_jvmci_method(const methodHandle&amp; method, TRAPS) {
+  99   if (method() != NULL) {
+ 100     JavaValue result(T_OBJECT);
+ 101     JavaCallArguments args;
+ 102     args.push_long((jlong) (address) method());
+ 103     JavaCalls::call_static(&amp;result, SystemDictionary::HotSpotResolvedJavaMethodImpl_klass(), vmSymbols::fromMetaspace_name(), vmSymbols::method_fromMetaspace_signature(), &amp;args, CHECK_NULL);
+ 104 
+ 105     return (oop)result.get_jobject();
+ 106   }
+ 107   return NULL;
+ 108 }
+ 109 
+ 110 oop CompilerToVM::get_jvmci_type(JVMCIKlassHandle&amp; klass, TRAPS) {
+ 111   if (!klass.is_null()) {
+ 112     JavaValue result(T_OBJECT);
+ 113     JavaCallArguments args;
+ 114     args.push_oop(Handle(THREAD, klass-&gt;java_mirror()));
+ 115     JavaCalls::call_static(&amp;result, SystemDictionary::HotSpotResolvedObjectTypeImpl_klass(), vmSymbols::fromMetaspace_name(), vmSymbols::klass_fromMetaspace_signature(), &amp;args, CHECK_NULL);
+ 116 
+ 117     return (oop)result.get_jobject();
+ 118   }
+ 119   return NULL;
+ 120 }
+ 121 
+ 122 Handle JavaArgumentUnboxer::next_arg(BasicType expectedType) {
+ 123   assert(_index &lt; _args-&gt;length(), "out of bounds");
+ 124   oop arg=((objArrayOop) (_args))-&gt;obj_at(_index++);
+ 125   assert(expectedType == T_OBJECT || java_lang_boxing_object::is_instance(arg, expectedType), "arg type mismatch");
+ 126   return Handle(Thread::current(), arg);
+ 127 }
+ 128 
+ 129 jobjectArray readConfiguration0(JNIEnv *env, TRAPS);
+ 130 
+ 131 C2V_VMENTRY(jobjectArray, readConfiguration, (JNIEnv *env))
+ 132    jobjectArray config = readConfiguration0(env, CHECK_NULL);
+ 133    return config;
+ 134 C2V_END
+ 135 
+ 136 C2V_VMENTRY(jobject, getFlagValue, (JNIEnv *, jobject c2vm, jobject name_handle))
+ 137 #define RETURN_BOXED_LONG(value) oop box; jvalue p; p.j = (jlong) (value); box = java_lang_boxing_object::create(T_LONG, &amp;p, CHECK_NULL); return JNIHandles::make_local(THREAD, box);
+ 138 #define RETURN_BOXED_DOUBLE(value) oop box; jvalue p; p.d = (jdouble) (value); box = java_lang_boxing_object::create(T_DOUBLE, &amp;p, CHECK_NULL); return JNIHandles::make_local(THREAD, box);
+ 139   Handle name(THREAD, JNIHandles::resolve(name_handle));
+ 140   if (name.is_null()) {
+ 141     THROW_0(vmSymbols::java_lang_NullPointerException());
+ 142   }
+ 143   ResourceMark rm;
+ 144   const char* cstring = java_lang_String::as_utf8_string(name());
+ 145   JVMFlag* flag = JVMFlag::find_flag(cstring, strlen(cstring), /* allow_locked */ true, /* return_flag */ true);
+ 146   if (flag == NULL) {
+ 147     return c2vm;
+ 148   }
+ 149   if (flag-&gt;is_bool()) {
+ 150     jvalue prim;
+ 151     prim.z = flag-&gt;get_bool();
+ 152     oop box = java_lang_boxing_object::create(T_BOOLEAN, &amp;prim, CHECK_NULL);
+ 153     return JNIHandles::make_local(THREAD, box);
+ 154   } else if (flag-&gt;is_ccstr()) {
+ 155     Handle value = java_lang_String::create_from_str(flag-&gt;get_ccstr(), CHECK_NULL);
+ 156     return JNIHandles::make_local(THREAD, value());
+ 157   } else if (flag-&gt;is_intx()) {
+ 158     RETURN_BOXED_LONG(flag-&gt;get_intx());
+ 159   } else if (flag-&gt;is_int()) {
+ 160     RETURN_BOXED_LONG(flag-&gt;get_int());
+ 161   } else if (flag-&gt;is_uint()) {
+ 162     RETURN_BOXED_LONG(flag-&gt;get_uint());
+ 163   } else if (flag-&gt;is_uint64_t()) {
+ 164     RETURN_BOXED_LONG(flag-&gt;get_uint64_t());
+ 165   } else if (flag-&gt;is_size_t()) {
+ 166     RETURN_BOXED_LONG(flag-&gt;get_size_t());
+ 167   } else if (flag-&gt;is_uintx()) {
+ 168     RETURN_BOXED_LONG(flag-&gt;get_uintx());
+ 169   } else if (flag-&gt;is_double()) {
+ 170     RETURN_BOXED_DOUBLE(flag-&gt;get_double());
+ 171   } else {
+ 172     JVMCI_ERROR_NULL("VM flag %s has unsupported type %s", flag-&gt;_name, flag-&gt;_type);
+ 173   }
+ 174 #undef RETURN_BOXED_LONG
+ 175 #undef RETURN_BOXED_DOUBLE
+ 176 C2V_END
+ 177 
+ 178 C2V_VMENTRY(jbyteArray, getBytecode, (JNIEnv *, jobject, jobject jvmci_method))
+ 179   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+ 180   ResourceMark rm;
+ 181 
+ 182   int code_size = method-&gt;code_size();
+ 183   typeArrayOop reconstituted_code = oopFactory::new_byteArray(code_size, CHECK_NULL);
+ 184 
+ 185   guarantee(method-&gt;method_holder()-&gt;is_rewritten(), "Method's holder should be rewritten");
+ 186   // iterate over all bytecodes and replace non-Java bytecodes
+ 187 
+ 188   for (BytecodeStream s(method); s.next() != Bytecodes::_illegal; ) {
+ 189     Bytecodes::Code code = s.code();
+ 190     Bytecodes::Code raw_code = s.raw_code();
+ 191     int bci = s.bci();
+ 192     int len = s.instruction_size();
+ 193 
+ 194     // Restore original byte code.
+ 195     reconstituted_code-&gt;byte_at_put(bci, (jbyte) (s.is_wide()? Bytecodes::_wide : code));
+ 196     if (len &gt; 1) {
+ 197       memcpy(reconstituted_code-&gt;byte_at_addr(bci + 1), s.bcp()+1, len-1);
+ 198     }
+ 199 
+ 200     if (len &gt; 1) {
+ 201       // Restore the big-endian constant pool indexes.
+ 202       // Cf. Rewriter::scan_method
+ 203       switch (code) {
+ 204         case Bytecodes::_getstatic:
+ 205         case Bytecodes::_putstatic:
+ 206         case Bytecodes::_getfield:
+ 207         case Bytecodes::_putfield:
+ 208         case Bytecodes::_invokevirtual:
+ 209         case Bytecodes::_invokespecial:
+ 210         case Bytecodes::_invokestatic:
+ 211         case Bytecodes::_invokeinterface:
+ 212         case Bytecodes::_invokehandle: {
+ 213           int cp_index = Bytes::get_native_u2((address) reconstituted_code-&gt;byte_at_addr(bci + 1));
+ 214           Bytes::put_Java_u2((address) reconstituted_code-&gt;byte_at_addr(bci + 1), (u2) cp_index);
+ 215           break;
+ 216         }
+ 217 
+ 218         case Bytecodes::_invokedynamic: {
+ 219           int cp_index = Bytes::get_native_u4((address) reconstituted_code-&gt;byte_at_addr(bci + 1));
+ 220           Bytes::put_Java_u4((address) reconstituted_code-&gt;byte_at_addr(bci + 1), (u4) cp_index);
+ 221           break;
+ 222         }
+ 223 
+ 224         default:
+ 225           break;
+ 226       }
+ 227 
+ 228       // Not all ldc byte code are rewritten.
+ 229       switch (raw_code) {
+ 230         case Bytecodes::_fast_aldc: {
+ 231           int cpc_index = reconstituted_code-&gt;byte_at(bci + 1) &amp; 0xff;
+ 232           int cp_index = method-&gt;constants()-&gt;object_to_cp_index(cpc_index);
+ 233           assert(cp_index &lt; method-&gt;constants()-&gt;length(), "sanity check");
+ 234           reconstituted_code-&gt;byte_at_put(bci + 1, (jbyte) cp_index);
+ 235           break;
+ 236         }
+ 237 
+ 238         case Bytecodes::_fast_aldc_w: {
+ 239           int cpc_index = Bytes::get_native_u2((address) reconstituted_code-&gt;byte_at_addr(bci + 1));
+ 240           int cp_index = method-&gt;constants()-&gt;object_to_cp_index(cpc_index);
+ 241           assert(cp_index &lt; method-&gt;constants()-&gt;length(), "sanity check");
+ 242           Bytes::put_Java_u2((address) reconstituted_code-&gt;byte_at_addr(bci + 1), (u2) cp_index);
+ 243           break;
+ 244         }
+ 245 
+ 246         default:
+ 247           break;
+ 248       }
+ 249     }
+ 250   }
+ 251 
+ 252   return (jbyteArray) JNIHandles::make_local(THREAD, reconstituted_code);
+ 253 C2V_END
+ 254 
+ 255 C2V_VMENTRY(jint, getExceptionTableLength, (JNIEnv *, jobject, jobject jvmci_method))
+ 256   ResourceMark rm;
+ 257   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+ 258   return method-&gt;exception_table_length();
+ 259 C2V_END
+ 260 
+ 261 C2V_VMENTRY(jlong, getExceptionTableStart, (JNIEnv *, jobject, jobject jvmci_method))
+ 262   ResourceMark rm;
+ 263   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+ 264   if (method-&gt;exception_table_length() == 0) {
+ 265     return 0L;
+ 266   }
+ 267   return (jlong) (address) method-&gt;exception_table_start();
+ 268 C2V_END
+ 269 
+ 270 C2V_VMENTRY(jobject, asResolvedJavaMethod, (JNIEnv *, jobject, jobject executable_handle))
+ 271   oop executable = JNIHandles::resolve(executable_handle);
+ 272   oop mirror = NULL;
+ 273   int slot = 0;
+ 274 
+ 275   if (executable-&gt;klass() == SystemDictionary::reflect_Constructor_klass()) {
+ 276     mirror = java_lang_reflect_Constructor::clazz(executable);
+ 277     slot = java_lang_reflect_Constructor::slot(executable);
+ 278   } else {
+ 279     assert(executable-&gt;klass() == SystemDictionary::reflect_Method_klass(), "wrong type");
+ 280     mirror = java_lang_reflect_Method::clazz(executable);
+ 281     slot = java_lang_reflect_Method::slot(executable);
+ 282   }
+ 283   Klass* holder = java_lang_Class::as_Klass(mirror);
+ 284   methodHandle method = InstanceKlass::cast(holder)-&gt;method_with_idnum(slot);
+ 285   oop result = CompilerToVM::get_jvmci_method(method, CHECK_NULL);
+ 286   return JNIHandles::make_local(THREAD, result);
+ 287 }
+ 288 
+ 289 C2V_VMENTRY(jobject, getResolvedJavaMethod, (JNIEnv *, jobject, jobject base, jlong offset))
+ 290   methodHandle method;
+ 291   oop base_object = JNIHandles::resolve(base);
+ 292   if (base_object == NULL) {
+ 293     method = *((Method**)(offset));
+ 294   } else if (base_object-&gt;is_a(SystemDictionary::ResolvedMethodName_klass())) {
+ 295     method = (Method*) (intptr_t) base_object-&gt;long_field(offset);
+ 296   } else if (base_object-&gt;is_a(SystemDictionary::HotSpotResolvedJavaMethodImpl_klass())) {
+ 297     method = *((Method**)(HotSpotResolvedJavaMethodImpl::metaspaceMethod(base_object) + offset));
+ 298   } else {
+ 299     THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(),
+ 300                 err_msg("Unexpected type: %s", base_object-&gt;klass()-&gt;external_name()));
+ 301   }
+ 302   assert (method.is_null() || method-&gt;is_method(), "invalid read");
+ 303   oop result = CompilerToVM::get_jvmci_method(method, CHECK_NULL);
+ 304   return JNIHandles::make_local(THREAD, result);
+ 305 }
+ 306 
+ 307 C2V_VMENTRY(jobject, getConstantPool, (JNIEnv *, jobject, jobject object_handle))
+ 308   constantPoolHandle cp;
+ 309   oop object = JNIHandles::resolve(object_handle);
+ 310   if (object == NULL) {
+ 311     THROW_0(vmSymbols::java_lang_NullPointerException());
+ 312   }
+ 313   if (object-&gt;is_a(SystemDictionary::HotSpotResolvedJavaMethodImpl_klass())) {
+ 314     cp = CompilerToVM::asMethod(object)-&gt;constMethod()-&gt;constants();
+ 315   } else if (object-&gt;is_a(SystemDictionary::HotSpotResolvedObjectTypeImpl_klass())) {
+ 316     cp = InstanceKlass::cast(CompilerToVM::asKlass(object))-&gt;constants();
+ 317   } else {
+ 318     THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(),
+ 319                 err_msg("Unexpected type: %s", object-&gt;klass()-&gt;external_name()));
+ 320   }
+ 321   assert(!cp.is_null(), "npe");
+ 322   JavaValue method_result(T_OBJECT);
+ 323   JavaCallArguments args;
+ 324   args.push_long((jlong) (address) cp());
+ 325   JavaCalls::call_static(&amp;method_result, SystemDictionary::HotSpotConstantPool_klass(), vmSymbols::fromMetaspace_name(), vmSymbols::constantPool_fromMetaspace_signature(), &amp;args, CHECK_NULL);
+ 326   return JNIHandles::make_local(THREAD, (oop)method_result.get_jobject());
+ 327 }
+ 328 
+ 329 C2V_VMENTRY(jobject, getResolvedJavaType, (JNIEnv *, jobject, jobject base, jlong offset, jboolean compressed))
+ 330   JVMCIKlassHandle klass(THREAD);
+ 331   oop base_object = JNIHandles::resolve(base);
+ 332   jlong base_address = 0;
+ 333   if (base_object != NULL &amp;&amp; offset == oopDesc::klass_offset_in_bytes()) {
+ 334     klass = base_object-&gt;klass();
+ 335   } else if (!compressed) {
+ 336     if (base_object != NULL) {
+ 337       if (base_object-&gt;is_a(SystemDictionary::HotSpotResolvedJavaMethodImpl_klass())) {
+ 338         base_address = HotSpotResolvedJavaMethodImpl::metaspaceMethod(base_object);
+ 339       } else if (base_object-&gt;is_a(SystemDictionary::HotSpotConstantPool_klass())) {
+ 340         base_address = HotSpotConstantPool::metaspaceConstantPool(base_object);
+ 341       } else if (base_object-&gt;is_a(SystemDictionary::HotSpotResolvedObjectTypeImpl_klass())) {
+ 342         base_address = (jlong) CompilerToVM::asKlass(base_object);
+ 343       } else if (base_object-&gt;is_a(SystemDictionary::Class_klass())) {
+ 344         base_address = (jlong) (address) base_object;
+ 345       } else {
+ 346         THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(),
+ 347                     err_msg("Unexpected arguments: %s " JLONG_FORMAT " %s", base_object-&gt;klass()-&gt;external_name(), offset, compressed ? "true" : "false"));
+ 348       }
+ 349     }
+ 350     klass = *((Klass**) (intptr_t) (base_address + offset));
+ 351   } else {
+ 352     THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(),
+ 353                 err_msg("Unexpected arguments: %s " JLONG_FORMAT " %s",
+ 354                         base_object != NULL ? base_object-&gt;klass()-&gt;external_name() : "null",
+ 355                         offset, compressed ? "true" : "false"));
+ 356   }
+ 357   assert (klass == NULL || klass-&gt;is_klass(), "invalid read");
+ 358   oop result = CompilerToVM::get_jvmci_type(klass, CHECK_NULL);
+ 359   return JNIHandles::make_local(THREAD, result);
+ 360 }
+ 361 
+ 362 C2V_VMENTRY(jobject, findUniqueConcreteMethod, (JNIEnv *, jobject, jobject jvmci_type, jobject jvmci_method))
+ 363   ResourceMark rm;
+ 364   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+ 365   Klass* holder = CompilerToVM::asKlass(jvmci_type);
+ 366   if (holder-&gt;is_interface()) {
+ 367     THROW_MSG_0(vmSymbols::java_lang_InternalError(), err_msg("Interface %s should be handled in Java code", holder-&gt;external_name()));
+ 368   }
+ 369 
+ 370   methodHandle ucm;
+ 371   {
+ 372     MutexLocker locker(Compile_lock);
+ 373     ucm = Dependencies::find_unique_concrete_method(holder, method());
+ 374   }
+ 375   oop result = CompilerToVM::get_jvmci_method(ucm, CHECK_NULL);
+ 376   return JNIHandles::make_local(THREAD, result);
+ 377 C2V_END
+ 378 
+ 379 C2V_VMENTRY(jobject, getImplementor, (JNIEnv *, jobject, jobject jvmci_type))
+ 380   Klass* klass = CompilerToVM::asKlass(jvmci_type);
+ 381   if (!klass-&gt;is_interface()) {
+ 382     THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(),
+ 383         err_msg("Expected interface type, got %s", klass-&gt;external_name()));
+ 384   }
+ 385   InstanceKlass* iklass = InstanceKlass::cast(klass);
+ 386   JVMCIKlassHandle handle(THREAD);
+ 387   {
+ 388     // Need Compile_lock around implementor()
+ 389     MutexLocker locker(Compile_lock);
+ 390     handle = iklass-&gt;implementor();
+ 391   }
+ 392   oop implementor = CompilerToVM::get_jvmci_type(handle, CHECK_NULL);
+ 393   return JNIHandles::make_local(THREAD, implementor);
+ 394 C2V_END
+ 395 
+ 396 C2V_VMENTRY(jboolean, methodIsIgnoredBySecurityStackWalk,(JNIEnv *, jobject, jobject jvmci_method))
+ 397   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+ 398   return method-&gt;is_ignored_by_security_stack_walk();
+ 399 C2V_END
+ 400 
+ 401 C2V_VMENTRY(jboolean, isCompilable,(JNIEnv *, jobject, jobject jvmci_method))
+ 402   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+ 403   constantPoolHandle cp = method-&gt;constMethod()-&gt;constants();
+ 404   assert(!cp.is_null(), "npe");
+ 405   // don't inline method when constant pool contains a CONSTANT_Dynamic
+ 406   return !method-&gt;is_not_compilable(CompLevel_full_optimization) &amp;&amp; !cp-&gt;has_dynamic_constant();
+ 407 C2V_END
+ 408 
+ 409 C2V_VMENTRY(jboolean, hasNeverInlineDirective,(JNIEnv *, jobject, jobject jvmci_method))
+ 410   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+ 411   return !Inline || CompilerOracle::should_not_inline(method) || method-&gt;dont_inline();
+ 412 C2V_END
+ 413 
+ 414 C2V_VMENTRY(jboolean, shouldInlineMethod,(JNIEnv *, jobject, jobject jvmci_method))
+ 415   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+ 416   return CompilerOracle::should_inline(method) || method-&gt;force_inline();
+ 417 C2V_END
+ 418 
+ 419 C2V_VMENTRY(jobject, lookupType, (JNIEnv*, jobject, jstring jname, jclass accessing_class, jboolean resolve))
+ 420   ResourceMark rm;
+ 421   Handle name(THREAD, JNIHandles::resolve(jname));
+ 422   Symbol* class_name = java_lang_String::as_symbol(name(), CHECK_0);
+ 423   if (java_lang_String::length(name()) &lt;= 1) {
+ 424     THROW_MSG_0(vmSymbols::java_lang_InternalError(), err_msg("Primitive type %s should be handled in Java code", class_name-&gt;as_C_string()));
+ 425   }
+ 426 
+ 427   JVMCIKlassHandle resolved_klass(THREAD);
+ 428   if (JNIHandles::resolve(accessing_class) == NULL) {
+ 429     THROW_0(vmSymbols::java_lang_NullPointerException());
+ 430   }
+ 431   Klass* accessing_klass = java_lang_Class::as_Klass(JNIHandles::resolve(accessing_class));
+ 432   Handle class_loader(THREAD, accessing_klass-&gt;class_loader());
+ 433   Handle protection_domain(THREAD, accessing_klass-&gt;protection_domain());
+ 434 
+ 435   if (resolve) {
+ 436     resolved_klass = SystemDictionary::resolve_or_null(class_name, class_loader, protection_domain, CHECK_0);
+ 437   } else {
+ 438     if (class_name-&gt;char_at(0) == 'L' &amp;&amp;
+ 439       class_name-&gt;char_at(class_name-&gt;utf8_length()-1) == ';') {
+ 440       // This is a name from a signature.  Strip off the trimmings.
+ 441       // Call recursive to keep scope of strippedsym.
+ 442       TempNewSymbol strippedsym = SymbolTable::new_symbol(class_name-&gt;as_utf8()+1,
+ 443                                                           class_name-&gt;utf8_length()-2,
+ 444                                                           CHECK_0);
+ 445       resolved_klass = SystemDictionary::find(strippedsym, class_loader, protection_domain, CHECK_0);
+ 446     } else if (FieldType::is_array(class_name)) {
+ 447       FieldArrayInfo fd;
+ 448       // dimension and object_key in FieldArrayInfo are assigned as a side-effect
+ 449       // of this call
+ 450       BasicType t = FieldType::get_array_info(class_name, fd, CHECK_0);
+ 451       if (t == T_OBJECT) {
+ 452         TempNewSymbol strippedsym = SymbolTable::new_symbol(class_name-&gt;as_utf8()+1+fd.dimension(),
+ 453                                                             class_name-&gt;utf8_length()-2-fd.dimension(),
+ 454                                                             CHECK_0);
+ 455         // naked oop "k" is OK here -- we assign back into it
+ 456         resolved_klass = SystemDictionary::find(strippedsym,
+ 457                                                              class_loader,
+ 458                                                              protection_domain,
+ 459                                                              CHECK_0);
+ 460         if (!resolved_klass.is_null()) {
+ 461           resolved_klass = resolved_klass-&gt;array_klass(fd.dimension(), CHECK_0);
+ 462         }
+ 463       } else {
+ 464         resolved_klass = TypeArrayKlass::cast(Universe::typeArrayKlassObj(t))-&gt;array_klass(fd.dimension(), CHECK_0);
+ 465       }
+ 466     }
+ 467   }
+ 468   oop result = CompilerToVM::get_jvmci_type(resolved_klass, CHECK_NULL);
+ 469   return JNIHandles::make_local(THREAD, result);
+ 470 C2V_END
+ 471 
+ 472 C2V_VMENTRY(jobject, resolveConstantInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index))
+ 473   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+ 474   oop result = cp-&gt;resolve_constant_at(index, CHECK_NULL);
+ 475   return JNIHandles::make_local(THREAD, result);
+ 476 C2V_END
+ 477 
+ 478 C2V_VMENTRY(jobject, resolvePossiblyCachedConstantInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index))
+ 479   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+ 480   oop result = cp-&gt;resolve_possibly_cached_constant_at(index, CHECK_NULL);
+ 481   return JNIHandles::make_local(THREAD, result);
+ 482 C2V_END
+ 483 
+ 484 C2V_VMENTRY(jint, lookupNameAndTypeRefIndexInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index))
+ 485   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+ 486   return cp-&gt;name_and_type_ref_index_at(index);
+ 487 C2V_END
+ 488 
+ 489 C2V_VMENTRY(jobject, lookupNameInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint which))
+ 490   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+ 491   Handle sym = java_lang_String::create_from_symbol(cp-&gt;name_ref_at(which), CHECK_NULL);
+ 492   return JNIHandles::make_local(THREAD, sym());
+ 493 C2V_END
+ 494 
+ 495 C2V_VMENTRY(jobject, lookupSignatureInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint which))
+ 496   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+ 497   Handle sym = java_lang_String::create_from_symbol(cp-&gt;signature_ref_at(which), CHECK_NULL);
+ 498   return JNIHandles::make_local(THREAD, sym());
+ 499 C2V_END
+ 500 
+ 501 C2V_VMENTRY(jint, lookupKlassRefIndexInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index))
+ 502   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+ 503   return cp-&gt;klass_ref_index_at(index);
+ 504 C2V_END
+ 505 
+ 506 C2V_VMENTRY(jobject, resolveTypeInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index))
+ 507   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+ 508   Klass* klass = cp-&gt;klass_at(index, CHECK_NULL);
+ 509   JVMCIKlassHandle resolved_klass(THREAD, klass);
+ 510   if (resolved_klass-&gt;is_instance_klass()) {
+ 511     InstanceKlass::cast(resolved_klass())-&gt;link_class_or_fail(THREAD);
+ 512   }
+ 513   oop jvmci_type = CompilerToVM::get_jvmci_type(resolved_klass, CHECK_NULL);
+ 514   return JNIHandles::make_local(THREAD, jvmci_type);
+ 515 C2V_END
+ 516 
+ 517 C2V_VMENTRY(jobject, lookupKlassInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index, jbyte opcode))
+ 518   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+ 519   Klass* loading_klass = cp-&gt;pool_holder();
+ 520   bool is_accessible = false;
+ 521   JVMCIKlassHandle klass(THREAD, JVMCIEnv::get_klass_by_index(cp, index, is_accessible, loading_klass));
+ 522   Symbol* symbol = NULL;
+ 523   if (klass == NULL) {
+ 524     symbol = cp-&gt;klass_name_at(index);
+ 525   }
+ 526   oop result_oop;
+ 527   if (!klass.is_null()) {
+ 528     result_oop = CompilerToVM::get_jvmci_type(klass, CHECK_NULL);
+ 529   } else {
+ 530     Handle result = java_lang_String::create_from_symbol(symbol, CHECK_NULL);
+ 531     result_oop = result();
+ 532   }
+ 533   return JNIHandles::make_local(THREAD, result_oop);
+ 534 C2V_END
+ 535 
+ 536 C2V_VMENTRY(jobject, lookupAppendixInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index))
+ 537   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+ 538   oop appendix_oop = ConstantPool::appendix_at_if_loaded(cp, index);
+ 539   return JNIHandles::make_local(THREAD, appendix_oop);
+ 540 C2V_END
+ 541 
+ 542 C2V_VMENTRY(jobject, lookupMethodInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index, jbyte opcode))
+ 543   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+ 544   InstanceKlass* pool_holder = cp-&gt;pool_holder();
+ 545   Bytecodes::Code bc = (Bytecodes::Code) (((int) opcode) &amp; 0xFF);
+ 546   methodHandle method = JVMCIEnv::get_method_by_index(cp, index, bc, pool_holder);
+ 547   oop result = CompilerToVM::get_jvmci_method(method, CHECK_NULL);
+ 548   return JNIHandles::make_local(THREAD, result);
+ 549 C2V_END
+ 550 
+ 551 C2V_VMENTRY(jint, constantPoolRemapInstructionOperandFromCache, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index))
+ 552   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+ 553   return cp-&gt;remap_instruction_operand_from_cache(index);
+ 554 C2V_END
+ 555 
+ 556 C2V_VMENTRY(jobject, resolveFieldInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index, jobject jvmci_method, jbyte opcode, jintArray info_handle))
+ 557   ResourceMark rm;
+ 558   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+ 559   Bytecodes::Code code = (Bytecodes::Code)(((int) opcode) &amp; 0xFF);
+ 560   fieldDescriptor fd;
+ 561   LinkInfo link_info(cp, index, (jvmci_method != NULL) ? CompilerToVM::asMethod(jvmci_method) : NULL, CHECK_0);
+ 562   LinkResolver::resolve_field(fd, link_info, Bytecodes::java_code(code), false, CHECK_0);
+ 563   typeArrayOop info = (typeArrayOop) JNIHandles::resolve(info_handle);
+ 564   if (info == NULL || info-&gt;length() != 3) {
+ 565     JVMCI_ERROR_NULL("info must not be null and have a length of 3");
+ 566   }
+ 567   info-&gt;int_at_put(0, fd.access_flags().as_int());
+ 568   info-&gt;int_at_put(1, fd.offset());
+ 569   info-&gt;int_at_put(2, fd.index());
+ 570   JVMCIKlassHandle handle(THREAD, fd.field_holder());
+ 571   oop field_holder = CompilerToVM::get_jvmci_type(handle, CHECK_NULL);
+ 572   return JNIHandles::make_local(THREAD, field_holder);
+ 573 C2V_END
+ 574 
+ 575 C2V_VMENTRY(jint, getVtableIndexForInterfaceMethod, (JNIEnv *, jobject, jobject jvmci_type, jobject jvmci_method))
+ 576   ResourceMark rm;
+ 577   Klass* klass = CompilerToVM::asKlass(jvmci_type);
+ 578   Method* method = CompilerToVM::asMethod(jvmci_method);
+ 579   if (klass-&gt;is_interface()) {
+ 580     THROW_MSG_0(vmSymbols::java_lang_InternalError(), err_msg("Interface %s should be handled in Java code", klass-&gt;external_name()));
+ 581   }
+ 582   if (!method-&gt;method_holder()-&gt;is_interface()) {
+ 583     THROW_MSG_0(vmSymbols::java_lang_InternalError(), err_msg("Method %s is not held by an interface, this case should be handled in Java code", method-&gt;name_and_sig_as_C_string()));
+ 584   }
+ 585   if (!InstanceKlass::cast(klass)-&gt;is_linked()) {
+ 586     THROW_MSG_0(vmSymbols::java_lang_InternalError(), err_msg("Class %s must be linked", klass-&gt;external_name()));
+ 587   }
+ 588   return LinkResolver::vtable_index_of_interface_method(klass, method);
+ 589 C2V_END
+ 590 
+ 591 C2V_VMENTRY(jobject, resolveMethod, (JNIEnv *, jobject, jobject receiver_jvmci_type, jobject jvmci_method, jobject caller_jvmci_type))
+ 592   Klass* recv_klass = CompilerToVM::asKlass(receiver_jvmci_type);
+ 593   Klass* caller_klass = CompilerToVM::asKlass(caller_jvmci_type);
+ 594   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+ 595 
+ 596   Klass* resolved     = method-&gt;method_holder();
+ 597   Symbol* h_name      = method-&gt;name();
+ 598   Symbol* h_signature = method-&gt;signature();
+ 599 
+ 600   if (MethodHandles::is_signature_polymorphic_method(method())) {
+ 601       // Signature polymorphic methods are already resolved, JVMCI just returns NULL in this case.
+ 602       return NULL;
+ 603   }
+ 604 
+ 605   LinkInfo link_info(resolved, h_name, h_signature, caller_klass);
+ 606   methodHandle m;
+ 607   // Only do exact lookup if receiver klass has been linked.  Otherwise,
+ 608   // the vtable has not been setup, and the LinkResolver will fail.
+ 609   if (recv_klass-&gt;is_array_klass() ||
+ 610       (InstanceKlass::cast(recv_klass)-&gt;is_linked() &amp;&amp; !recv_klass-&gt;is_interface())) {
+ 611     if (resolved-&gt;is_interface()) {
+ 612       m = LinkResolver::resolve_interface_call_or_null(recv_klass, link_info);
+ 613     } else {
+ 614       m = LinkResolver::resolve_virtual_call_or_null(recv_klass, link_info);
+ 615     }
+ 616   }
+ 617 
+ 618   if (m.is_null()) {
+ 619     // Return NULL if there was a problem with lookup (uninitialized class, etc.)
+ 620     return NULL;
+ 621   }
+ 622 
+ 623   oop result = CompilerToVM::get_jvmci_method(m, CHECK_NULL);
+ 624   return JNIHandles::make_local(THREAD, result);
+ 625 C2V_END
+ 626 
+ 627 C2V_VMENTRY(jboolean, hasFinalizableSubclass,(JNIEnv *, jobject, jobject jvmci_type))
+ 628   Klass* klass = CompilerToVM::asKlass(jvmci_type);
+ 629   assert(klass != NULL, "method must not be called for primitive types");
+ 630   MutexLocker ml(Compile_lock);
+ 631   return Dependencies::find_finalizable_subclass(klass) != NULL;
+ 632 C2V_END
+ 633 
+ 634 C2V_VMENTRY(jobject, getClassInitializer, (JNIEnv *, jobject, jobject jvmci_type))
+ 635   Klass* klass = CompilerToVM::asKlass(jvmci_type);
+ 636   if (!klass-&gt;is_instance_klass()) {
+ 637     return NULL;
+ 638   }
+ 639   InstanceKlass* iklass = InstanceKlass::cast(klass);
+ 640   oop result = CompilerToVM::get_jvmci_method(iklass-&gt;class_initializer(), CHECK_NULL);
+ 641   return JNIHandles::make_local(THREAD, result);
+ 642 C2V_END
+ 643 
+ 644 C2V_VMENTRY(jlong, getMaxCallTargetOffset, (JNIEnv*, jobject, jlong addr))
+ 645   address target_addr = (address) addr;
+ 646   if (target_addr != 0x0) {
+ 647     int64_t off_low = (int64_t)target_addr - ((int64_t)CodeCache::low_bound() + sizeof(int));
+ 648     int64_t off_high = (int64_t)target_addr - ((int64_t)CodeCache::high_bound() + sizeof(int));
+ 649     return MAX2(ABS(off_low), ABS(off_high));
+ 650   }
+ 651   return -1;
+ 652 C2V_END
+ 653 
+ 654 C2V_VMENTRY(void, setNotInlinableOrCompilable,(JNIEnv *, jobject,  jobject jvmci_method))
+ 655   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+ 656   method-&gt;set_not_c1_compilable();
+ 657   method-&gt;set_not_c2_compilable();
+ 658   method-&gt;set_dont_inline(true);
+ 659 C2V_END
+ 660 
+ 661 C2V_VMENTRY(jint, installCode, (JNIEnv *jniEnv, jobject, jobject target, jobject compiled_code, jobject installed_code, jobject speculation_log))
+ 662   ResourceMark rm;
+ 663   HandleMark hm;
+ 664   JNIHandleMark jni_hm;
+ 665 
+ 666   Handle target_handle(THREAD, JNIHandles::resolve(target));
+ 667   Handle compiled_code_handle(THREAD, JNIHandles::resolve(compiled_code));
+ 668   CodeBlob* cb = NULL;
+ 669   Handle installed_code_handle(THREAD, JNIHandles::resolve(installed_code));
+ 670   Handle speculation_log_handle(THREAD, JNIHandles::resolve(speculation_log));
+ 671 
+ 672   JVMCICompiler* compiler = JVMCICompiler::instance(true, CHECK_JNI_ERR);
+ 673 
+ 674   TraceTime install_time("installCode", JVMCICompiler::codeInstallTimer());
+ 675   bool is_immutable_PIC = HotSpotCompiledCode::isImmutablePIC(compiled_code_handle) &gt; 0;
+ 676   CodeInstaller installer(is_immutable_PIC);
+ 677   JVMCIEnv::CodeInstallResult result = installer.install(compiler, target_handle, compiled_code_handle, cb, installed_code_handle, speculation_log_handle, CHECK_0);
+ 678 
+ 679   if (PrintCodeCacheOnCompilation) {
+ 680     stringStream s;
+ 681     // Dump code cache  into a buffer before locking the tty,
+ 682     {
+ 683       MutexLockerEx mu(CodeCache_lock, Mutex::_no_safepoint_check_flag);
+ 684       CodeCache::print_summary(&amp;s, false);
+ 685     }
+ 686     ttyLocker ttyl;
+ 687     tty-&gt;print_raw_cr(s.as_string());
+ 688   }
+ 689 
+ 690   if (result != JVMCIEnv::ok) {
+ 691     assert(cb == NULL, "should be");
+ 692   } else {
+ 693     if (installed_code_handle.not_null()) {
+ 694       assert(installed_code_handle-&gt;is_a(InstalledCode::klass()), "wrong type");
+ 695       nmethod::invalidate_installed_code(installed_code_handle, CHECK_0);
+ 696       {
+ 697         // Ensure that all updates to the InstalledCode fields are consistent.
+ 698         MutexLockerEx pl(Patching_lock, Mutex::_no_safepoint_check_flag);
+ 699         InstalledCode::set_address(installed_code_handle, (jlong) cb);
+ 700         InstalledCode::set_version(installed_code_handle, InstalledCode::version(installed_code_handle) + 1);
+ 701         if (cb-&gt;is_nmethod()) {
+ 702           InstalledCode::set_entryPoint(installed_code_handle, (jlong) cb-&gt;as_nmethod_or_null()-&gt;verified_entry_point());
+ 703         } else {
+ 704           InstalledCode::set_entryPoint(installed_code_handle, (jlong) cb-&gt;code_begin());
+ 705         }
+ 706         if (installed_code_handle-&gt;is_a(HotSpotInstalledCode::klass())) {
+ 707           HotSpotInstalledCode::set_size(installed_code_handle, cb-&gt;size());
+ 708           HotSpotInstalledCode::set_codeStart(installed_code_handle, (jlong) cb-&gt;code_begin());
+ 709           HotSpotInstalledCode::set_codeSize(installed_code_handle, cb-&gt;code_size());
+ 710         }
+ 711       }
+ 712     }
+ 713   }
+ 714   return result;
+ 715 C2V_END
+ 716 
+ 717 C2V_VMENTRY(jint, getMetadata, (JNIEnv *jniEnv, jobject, jobject target, jobject compiled_code, jobject metadata))
+ 718   ResourceMark rm;
+ 719   HandleMark hm;
+ 720 
+ 721   Handle target_handle(THREAD, JNIHandles::resolve(target));
+ 722   Handle compiled_code_handle(THREAD, JNIHandles::resolve(compiled_code));
+ 723   Handle metadata_handle(THREAD, JNIHandles::resolve(metadata));
+ 724 
+ 725   CodeMetadata code_metadata;
+ 726   CodeBlob *cb = NULL;
+ 727   CodeInstaller installer(true /* immutable PIC compilation */);
+ 728 
+ 729   JVMCIEnv::CodeInstallResult result = installer.gather_metadata(target_handle, compiled_code_handle, code_metadata, CHECK_0);
+ 730   if (result != JVMCIEnv::ok) {
+ 731     return result;
+ 732   }
+ 733 
+ 734   if (code_metadata.get_nr_pc_desc() &gt; 0) {
+ 735     typeArrayHandle pcArrayOop = oopFactory::new_byteArray_handle(sizeof(PcDesc) * code_metadata.get_nr_pc_desc(), CHECK_(JVMCIEnv::cache_full));
+ 736     memcpy(pcArrayOop-&gt;byte_at_addr(0), code_metadata.get_pc_desc(), sizeof(PcDesc) * code_metadata.get_nr_pc_desc());
+ 737     HotSpotMetaData::set_pcDescBytes(metadata_handle, pcArrayOop());
+ 738   }
+ 739 
+ 740   if (code_metadata.get_scopes_size() &gt; 0) {
+ 741     typeArrayHandle scopesArrayOop = oopFactory::new_byteArray_handle(code_metadata.get_scopes_size(), CHECK_(JVMCIEnv::cache_full));
+ 742     memcpy(scopesArrayOop-&gt;byte_at_addr(0), code_metadata.get_scopes_desc(), code_metadata.get_scopes_size());
+ 743     HotSpotMetaData::set_scopesDescBytes(metadata_handle, scopesArrayOop());
+ 744   }
+ 745 
+ 746   RelocBuffer* reloc_buffer = code_metadata.get_reloc_buffer();
+ 747   typeArrayHandle relocArrayOop = oopFactory::new_byteArray_handle((int) reloc_buffer-&gt;size(), CHECK_(JVMCIEnv::cache_full));
+ 748   if (reloc_buffer-&gt;size() &gt; 0) {
+ 749     memcpy(relocArrayOop-&gt;byte_at_addr(0), reloc_buffer-&gt;begin(), reloc_buffer-&gt;size());
+ 750   }
+ 751   HotSpotMetaData::set_relocBytes(metadata_handle, relocArrayOop());
+ 752 
+ 753   const OopMapSet* oopMapSet = installer.oopMapSet();
+ 754   {
+ 755     ResourceMark mark;
+ 756     ImmutableOopMapBuilder builder(oopMapSet);
+ 757     int oopmap_size = builder.heap_size();
+ 758     typeArrayHandle oopMapArrayHandle = oopFactory::new_byteArray_handle(oopmap_size, CHECK_(JVMCIEnv::cache_full));
+ 759     builder.generate_into((address) oopMapArrayHandle-&gt;byte_at_addr(0));
+ 760     HotSpotMetaData::set_oopMaps(metadata_handle, oopMapArrayHandle());
+ 761   }
+ 762 
+ 763   AOTOopRecorder* recorder = code_metadata.get_oop_recorder();
+ 764 
+ 765   int nr_meta_refs = recorder-&gt;nr_meta_refs();
+ 766   objArrayOop metadataArray = oopFactory::new_objectArray(nr_meta_refs, CHECK_(JVMCIEnv::cache_full));
+ 767   objArrayHandle metadataArrayHandle(THREAD, metadataArray);
+ 768   for (int i = 0; i &lt; nr_meta_refs; ++i) {
+ 769     jobject element = recorder-&gt;meta_element(i);
+ 770     if (element == NULL) {
+ 771       return JVMCIEnv::cache_full;
+ 772     }
+ 773     metadataArrayHandle-&gt;obj_at_put(i, JNIHandles::resolve(element));
+ 774   }
+ 775   HotSpotMetaData::set_metadata(metadata_handle, metadataArrayHandle());
+ 776 
+ 777   ExceptionHandlerTable* handler = code_metadata.get_exception_table();
+ 778   int table_size = handler-&gt;size_in_bytes();
+ 779   typeArrayHandle exceptionArrayOop = oopFactory::new_byteArray_handle(table_size, CHECK_(JVMCIEnv::cache_full));
+ 780 
+ 781   if (table_size &gt; 0) {
+ 782     handler-&gt;copy_bytes_to((address) exceptionArrayOop-&gt;byte_at_addr(0));
+ 783   }
+ 784   HotSpotMetaData::set_exceptionBytes(metadata_handle, exceptionArrayOop());
+ 785 
+ 786   return result;
+ 787 C2V_END
+ 788 
+ 789 C2V_VMENTRY(void, resetCompilationStatistics, (JNIEnv *jniEnv, jobject))
+ 790   JVMCICompiler* compiler = JVMCICompiler::instance(true, CHECK);
+ 791   CompilerStatistics* stats = compiler-&gt;stats();
+ 792   stats-&gt;_standard.reset();
+ 793   stats-&gt;_osr.reset();
+ 794 C2V_END
+ 795 
+ 796 C2V_VMENTRY(jobject, disassembleCodeBlob, (JNIEnv *jniEnv, jobject, jobject installedCode))
+ 797   ResourceMark rm;
+ 798   HandleMark hm;
+ 799 
+ 800   if (installedCode == NULL) {
+ 801     THROW_MSG_NULL(vmSymbols::java_lang_NullPointerException(), "installedCode is null");
+ 802   }
+ 803 
+ 804   jlong codeBlob = InstalledCode::address(installedCode);
+ 805   if (codeBlob == 0L) {
+ 806     return NULL;
+ 807   }
+ 808 
+ 809   CodeBlob* cb = (CodeBlob*) (address) codeBlob;
+ 810   if (cb == NULL) {
+ 811     return NULL;
+ 812   }
+ 813 
+ 814   // We don't want the stringStream buffer to resize during disassembly as it
+ 815   // uses scoped resource memory. If a nested function called during disassembly uses
+ 816   // a ResourceMark and the buffer expands within the scope of the mark,
+ 817   // the buffer becomes garbage when that scope is exited. Experience shows that
+ 818   // the disassembled code is typically about 10x the code size so a fixed buffer
+ 819   // sized to 20x code size plus a fixed amount for header info should be sufficient.
+ 820   int bufferSize = cb-&gt;code_size() * 20 + 1024;
+ 821   char* buffer = NEW_RESOURCE_ARRAY(char, bufferSize);
+ 822   stringStream st(buffer, bufferSize);
+ 823   if (cb-&gt;is_nmethod()) {
+ 824     nmethod* nm = (nmethod*) cb;
+ 825     if (!nm-&gt;is_alive()) {
+ 826       return NULL;
+ 827     }
+ 828   }
+ 829   Disassembler::decode(cb, &amp;st);
+ 830   if (st.size() &lt;= 0) {
+ 831     return NULL;
+ 832   }
+ 833 
+ 834   Handle result = java_lang_String::create_from_platform_dependent_str(st.as_string(), CHECK_NULL);
+ 835   return JNIHandles::make_local(THREAD, result());
+ 836 C2V_END
+ 837 
+ 838 C2V_VMENTRY(jobject, getStackTraceElement, (JNIEnv*, jobject, jobject jvmci_method, int bci))
+ 839   ResourceMark rm;
+ 840   HandleMark hm;
+ 841 
+ 842   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+ 843   oop element = java_lang_StackTraceElement::create(method, bci, CHECK_NULL);
+ 844   return JNIHandles::make_local(THREAD, element);
+ 845 C2V_END
+ 846 
+ 847 C2V_VMENTRY(jobject, executeInstalledCode, (JNIEnv*, jobject, jobject args, jobject hotspotInstalledCode))
+ 848   ResourceMark rm;
+ 849   HandleMark hm;
+ 850 
+ 851   jlong nmethodValue = InstalledCode::address(hotspotInstalledCode);
+ 852   if (nmethodValue == 0L) {
+ 853     THROW_NULL(vmSymbols::jdk_vm_ci_code_InvalidInstalledCodeException());
+ 854   }
+ 855   nmethod* nm = (nmethod*) (address) nmethodValue;
+ 856   methodHandle mh = nm-&gt;method();
+ 857   Symbol* signature = mh-&gt;signature();
+ 858   JavaCallArguments jca(mh-&gt;size_of_parameters());
+ 859 
+ 860   JavaArgumentUnboxer jap(signature, &amp;jca, (arrayOop) JNIHandles::resolve(args), mh-&gt;is_static());
+ 861   JavaValue result(jap.get_ret_type());
+ 862   jca.set_alternative_target(nm);
+ 863   JavaCalls::call(&amp;result, mh, &amp;jca, CHECK_NULL);
+ 864 
+ 865   if (jap.get_ret_type() == T_VOID) {
+ 866     return NULL;
+ 867   } else if (jap.get_ret_type() == T_OBJECT || jap.get_ret_type() == T_ARRAY) {
+ 868     return JNIHandles::make_local(THREAD, (oop) result.get_jobject());
+ 869   } else {
+ 870     jvalue *value = (jvalue *) result.get_value_addr();
+ 871     // Narrow the value down if required (Important on big endian machines)
+ 872     switch (jap.get_ret_type()) {
+ 873       case T_BOOLEAN:
+ 874        value-&gt;z = (jboolean) value-&gt;i;
+ 875        break;
+ 876       case T_BYTE:
+ 877        value-&gt;b = (jbyte) value-&gt;i;
+ 878        break;
+ 879       case T_CHAR:
+ 880        value-&gt;c = (jchar) value-&gt;i;
+ 881        break;
+ 882       case T_SHORT:
+ 883        value-&gt;s = (jshort) value-&gt;i;
+ 884        break;
+ 885       default:
+ 886         break;
+ 887     }
+ 888     oop o = java_lang_boxing_object::create(jap.get_ret_type(), value, CHECK_NULL);
+ 889     return JNIHandles::make_local(THREAD, o);
+ 890   }
+ 891 C2V_END
+ 892 
+ 893 C2V_VMENTRY(jlongArray, getLineNumberTable, (JNIEnv *, jobject, jobject jvmci_method))
+ 894   Method* method = CompilerToVM::asMethod(jvmci_method);
+ 895   if (!method-&gt;has_linenumber_table()) {
+ 896     return NULL;
+ 897   }
+ 898   u2 num_entries = 0;
+ 899   CompressedLineNumberReadStream streamForSize(method-&gt;compressed_linenumber_table());
+ 900   while (streamForSize.read_pair()) {
+ 901     num_entries++;
+ 902   }
+ 903 
+ 904   CompressedLineNumberReadStream stream(method-&gt;compressed_linenumber_table());
+ 905   typeArrayOop result = oopFactory::new_longArray(2 * num_entries, CHECK_NULL);
+ 906 
+ 907   int i = 0;
+ 908   jlong value;
+ 909   while (stream.read_pair()) {
+ 910     value = ((long) stream.bci());
+ 911     result-&gt;long_at_put(i, value);
+ 912     value = ((long) stream.line());
+ 913     result-&gt;long_at_put(i + 1, value);
+ 914     i += 2;
+ 915   }
+ 916 
+ 917   return (jlongArray) JNIHandles::make_local(THREAD, result);
+ 918 C2V_END
+ 919 
+ 920 C2V_VMENTRY(jlong, getLocalVariableTableStart, (JNIEnv *, jobject, jobject jvmci_method))
+ 921   ResourceMark rm;
+ 922   Method* method = CompilerToVM::asMethod(jvmci_method);
+ 923   if (!method-&gt;has_localvariable_table()) {
+ 924     return 0;
+ 925   }
+ 926   return (jlong) (address) method-&gt;localvariable_table_start();
+ 927 C2V_END
+ 928 
+ 929 C2V_VMENTRY(jint, getLocalVariableTableLength, (JNIEnv *, jobject, jobject jvmci_method))
+ 930   ResourceMark rm;
+ 931   Method* method = CompilerToVM::asMethod(jvmci_method);
+ 932   return method-&gt;localvariable_table_length();
+ 933 C2V_END
+ 934 
+ 935 C2V_VMENTRY(void, reprofile, (JNIEnv*, jobject, jobject jvmci_method))
+ 936   Method* method = CompilerToVM::asMethod(jvmci_method);
+ 937   MethodCounters* mcs = method-&gt;method_counters();
+ 938   if (mcs != NULL) {
+ 939     mcs-&gt;clear_counters();
+ 940   }
+ 941   NOT_PRODUCT(method-&gt;set_compiled_invocation_count(0));
+ 942 
+ 943   CompiledMethod* code = method-&gt;code();
+ 944   if (code != NULL) {
+ 945     code-&gt;make_not_entrant();
+ 946   }
+ 947 
+ 948   MethodData* method_data = method-&gt;method_data();
+ 949   if (method_data == NULL) {
+ 950     ClassLoaderData* loader_data = method-&gt;method_holder()-&gt;class_loader_data();
+ 951     method_data = MethodData::allocate(loader_data, method, CHECK);
+ 952     method-&gt;set_method_data(method_data);
+ 953   } else {
+ 954     method_data-&gt;initialize();
+ 955   }
+ 956 C2V_END
+ 957 
+ 958 
+ 959 C2V_VMENTRY(void, invalidateInstalledCode, (JNIEnv*, jobject, jobject installed_code))
+ 960   Handle installed_code_handle(THREAD, JNIHandles::resolve(installed_code));
+ 961   nmethod::invalidate_installed_code(installed_code_handle, CHECK);
+ 962 C2V_END
+ 963 
+ 964 C2V_VMENTRY(jlongArray, collectCounters, (JNIEnv*, jobject))
+ 965   typeArrayOop arrayOop = oopFactory::new_longArray(JVMCICounterSize, CHECK_NULL);
+ 966   JavaThread::collect_counters(arrayOop);
+ 967   return (jlongArray) JNIHandles::make_local(THREAD, arrayOop);
+ 968 C2V_END
+ 969 
+ 970 C2V_VMENTRY(int, allocateCompileId, (JNIEnv*, jobject, jobject jvmci_method, int entry_bci))
+ 971   HandleMark hm;
+ 972   ResourceMark rm;
+ 973   if (JNIHandles::resolve(jvmci_method) == NULL) {
+ 974     THROW_0(vmSymbols::java_lang_NullPointerException());
+ 975   }
+ 976   Method* method = CompilerToVM::asMethod(jvmci_method);
+ 977   if (entry_bci &gt;= method-&gt;code_size() || entry_bci &lt; -1) {
+ 978     THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(), err_msg("Unexpected bci %d", entry_bci));
+ 979   }
+ 980   return CompileBroker::assign_compile_id_unlocked(THREAD, method, entry_bci);
+ 981 C2V_END
+ 982 
+ 983 
+ 984 C2V_VMENTRY(jboolean, isMature, (JNIEnv*, jobject, jlong metaspace_method_data))
+ 985   MethodData* mdo = CompilerToVM::asMethodData(metaspace_method_data);
+ 986   return mdo != NULL &amp;&amp; mdo-&gt;is_mature();
+ 987 C2V_END
+ 988 
+ 989 C2V_VMENTRY(jboolean, hasCompiledCodeForOSR, (JNIEnv*, jobject, jobject jvmci_method, int entry_bci, int comp_level))
+ 990   Method* method = CompilerToVM::asMethod(jvmci_method);
+ 991   return method-&gt;lookup_osr_nmethod_for(entry_bci, comp_level, true) != NULL;
+ 992 C2V_END
+ 993 
+ 994 C2V_VMENTRY(jobject, getSymbol, (JNIEnv*, jobject, jlong symbol))
+ 995   Handle sym = java_lang_String::create_from_symbol((Symbol*)(address)symbol, CHECK_NULL);
+ 996   return JNIHandles::make_local(THREAD, sym());
+ 997 C2V_END
+ 998 
+ 999 bool matches(jobjectArray methods, Method* method) {
+1000   objArrayOop methods_oop = (objArrayOop) JNIHandles::resolve(methods);
+1001 
+1002   for (int i = 0; i &lt; methods_oop-&gt;length(); i++) {
+1003     oop resolved = methods_oop-&gt;obj_at(i);
+1004     if (resolved-&gt;is_a(HotSpotResolvedJavaMethodImpl::klass()) &amp;&amp; CompilerToVM::asMethod(resolved) == method) {
+1005       return true;
+1006     }
+1007   }
+1008   return false;
+1009 }
+1010 
+1011 void call_interface(JavaValue* result, Klass* spec_klass, Symbol* name, Symbol* signature, JavaCallArguments* args, TRAPS) {
+1012   CallInfo callinfo;
+1013   Handle receiver = args-&gt;receiver();
+1014   Klass* recvrKlass = receiver.is_null() ? (Klass*)NULL : receiver-&gt;klass();
+1015   LinkInfo link_info(spec_klass, name, signature);
+1016   LinkResolver::resolve_interface_call(
+1017           callinfo, receiver, recvrKlass, link_info, true, CHECK);
+1018   methodHandle method = callinfo.selected_method();
+1019   assert(method.not_null(), "should have thrown exception");
+1020 
+1021   // Invoke the method
+1022   JavaCalls::call(result, method, args, CHECK);
+1023 }
+1024 
+1025 C2V_VMENTRY(jobject, iterateFrames, (JNIEnv*, jobject compilerToVM, jobjectArray initial_methods, jobjectArray match_methods, jint initialSkip, jobject visitor_handle))
+1026   ResourceMark rm;
+1027 
+1028   if (!thread-&gt;has_last_Java_frame()) {
+1029     return NULL;
+1030   }
+1031   Handle visitor(THREAD, JNIHandles::resolve_non_null(visitor_handle));
+1032   Handle frame_reference = HotSpotStackFrameReference::klass()-&gt;allocate_instance_handle(CHECK_NULL);
+1033   HotSpotStackFrameReference::klass()-&gt;initialize(CHECK_NULL);
+1034 
+1035   StackFrameStream fst(thread);
+1036 
+1037   jobjectArray methods = initial_methods;
+1038 
+1039   int frame_number = 0;
+1040   vframe* vf = vframe::new_vframe(fst.current(), fst.register_map(), thread);
+1041 
+1042   while (true) {
+1043     // look for the given method
+1044     bool realloc_called = false;
+1045     while (true) {
+1046       StackValueCollection* locals = NULL;
+1047       if (vf-&gt;is_compiled_frame()) {
+1048         // compiled method frame
+1049         compiledVFrame* cvf = compiledVFrame::cast(vf);
+1050         if (methods == NULL || matches(methods, cvf-&gt;method())) {
+1051           if (initialSkip &gt; 0) {
+1052             initialSkip--;
+1053           } else {
+1054             ScopeDesc* scope = cvf-&gt;scope();
+1055             // native wrappers do not have a scope
+1056             if (scope != NULL &amp;&amp; scope-&gt;objects() != NULL) {
+1057               GrowableArray&lt;ScopeValue*&gt;* objects;
+1058               if (!realloc_called) {
+1059                 objects = scope-&gt;objects();
+1060               } else {
+1061                 // some object might already have been re-allocated, only reallocate the non-allocated ones
+1062                 objects = new GrowableArray&lt;ScopeValue*&gt;(scope-&gt;objects()-&gt;length());
+1063                 for (int i = 0; i &lt; scope-&gt;objects()-&gt;length(); i++) {
+1064                   ObjectValue* sv = (ObjectValue*) scope-&gt;objects()-&gt;at(i);
+1065                   if (sv-&gt;value().is_null()) {
+1066                     objects-&gt;append(sv);
+1067                   }
+1068                 }
+1069               }
+1070               bool realloc_failures = Deoptimization::realloc_objects(thread, fst.current(), objects, CHECK_NULL);
+1071               Deoptimization::reassign_fields(fst.current(), fst.register_map(), objects, realloc_failures, false);
+1072               realloc_called = true;
+1073 
+1074               GrowableArray&lt;ScopeValue*&gt;* local_values = scope-&gt;locals();
+1075               assert(local_values != NULL, "NULL locals");
+1076               typeArrayOop array_oop = oopFactory::new_boolArray(local_values-&gt;length(), CHECK_NULL);
+1077               typeArrayHandle array(THREAD, array_oop);
+1078               for (int i = 0; i &lt; local_values-&gt;length(); i++) {
+1079                 ScopeValue* value = local_values-&gt;at(i);
+1080                 if (value-&gt;is_object()) {
+1081                   array-&gt;bool_at_put(i, true);
+1082                 }
+1083               }
+1084               HotSpotStackFrameReference::set_localIsVirtual(frame_reference, array());
+1085             } else {
+1086               HotSpotStackFrameReference::set_localIsVirtual(frame_reference, NULL);
+1087             }
+1088 
+1089             locals = cvf-&gt;locals();
+1090             HotSpotStackFrameReference::set_bci(frame_reference, cvf-&gt;bci());
+1091             oop method = CompilerToVM::get_jvmci_method(cvf-&gt;method(), CHECK_NULL);
+1092             HotSpotStackFrameReference::set_method(frame_reference, method);
+1093           }
+1094         }
+1095       } else if (vf-&gt;is_interpreted_frame()) {
+1096         // interpreted method frame
+1097         interpretedVFrame* ivf = interpretedVFrame::cast(vf);
+1098         if (methods == NULL || matches(methods, ivf-&gt;method())) {
+1099           if (initialSkip &gt; 0) {
+1100             initialSkip--;
+1101           } else {
+1102             locals = ivf-&gt;locals();
+1103             HotSpotStackFrameReference::set_bci(frame_reference, ivf-&gt;bci());
+1104             oop method = CompilerToVM::get_jvmci_method(ivf-&gt;method(), CHECK_NULL);
+1105             HotSpotStackFrameReference::set_method(frame_reference, method);
+1106             HotSpotStackFrameReference::set_localIsVirtual(frame_reference, NULL);
+1107           }
+1108         }
+1109       }
+1110 
+1111       // locals != NULL means that we found a matching frame and result is already partially initialized
+1112       if (locals != NULL) {
+1113         methods = match_methods;
+1114         HotSpotStackFrameReference::set_compilerToVM(frame_reference, JNIHandles::resolve(compilerToVM));
+1115         HotSpotStackFrameReference::set_stackPointer(frame_reference, (jlong) fst.current()-&gt;sp());
+1116         HotSpotStackFrameReference::set_frameNumber(frame_reference, frame_number);
+1117 
+1118         // initialize the locals array
+1119         objArrayOop array_oop = oopFactory::new_objectArray(locals-&gt;size(), CHECK_NULL);
+1120         objArrayHandle array(THREAD, array_oop);
+1121         for (int i = 0; i &lt; locals-&gt;size(); i++) {
+1122           StackValue* var = locals-&gt;at(i);
+1123           if (var-&gt;type() == T_OBJECT) {
+1124             array-&gt;obj_at_put(i, locals-&gt;at(i)-&gt;get_obj()());
+1125           }
+1126         }
+1127         HotSpotStackFrameReference::set_locals(frame_reference, array());
+1128         HotSpotStackFrameReference::set_objectsMaterialized(frame_reference, JNI_FALSE);
+1129 
+1130         JavaValue result(T_OBJECT);
+1131         JavaCallArguments args(visitor);
+1132         args.push_oop(frame_reference);
+1133         call_interface(&amp;result, SystemDictionary::InspectedFrameVisitor_klass(), vmSymbols::visitFrame_name(), vmSymbols::visitFrame_signature(), &amp;args, CHECK_NULL);
+1134         if (result.get_jobject() != NULL) {
+1135           return JNIHandles::make_local(thread, (oop) result.get_jobject());
+1136         }
+1137         assert(initialSkip == 0, "There should be no match before initialSkip == 0");
+1138         if (HotSpotStackFrameReference::objectsMaterialized(frame_reference) == JNI_TRUE) {
+1139           // the frame has been deoptimized, we need to re-synchronize the frame and vframe
+1140           intptr_t* stack_pointer = (intptr_t*) HotSpotStackFrameReference::stackPointer(frame_reference);
+1141           fst = StackFrameStream(thread);
+1142           while (fst.current()-&gt;sp() != stack_pointer &amp;&amp; !fst.is_done()) {
+1143             fst.next();
+1144           }
+1145           if (fst.current()-&gt;sp() != stack_pointer) {
+1146             THROW_MSG_NULL(vmSymbols::java_lang_IllegalStateException(), "stack frame not found after deopt")
+1147           }
+1148           vf = vframe::new_vframe(fst.current(), fst.register_map(), thread);
+1149           if (!vf-&gt;is_compiled_frame()) {
+1150             THROW_MSG_NULL(vmSymbols::java_lang_IllegalStateException(), "compiled stack frame expected")
+1151           }
+1152           for (int i = 0; i &lt; frame_number; i++) {
+1153             if (vf-&gt;is_top()) {
+1154               THROW_MSG_NULL(vmSymbols::java_lang_IllegalStateException(), "vframe not found after deopt")
+1155             }
+1156             vf = vf-&gt;sender();
+1157             assert(vf-&gt;is_compiled_frame(), "Wrong frame type");
+1158           }
+1159         }
+1160         frame_reference = HotSpotStackFrameReference::klass()-&gt;allocate_instance_handle(CHECK_NULL);
+1161         HotSpotStackFrameReference::klass()-&gt;initialize(CHECK_NULL);
+1162       }
+1163 
+1164       if (vf-&gt;is_top()) {
+1165         break;
+1166       }
+1167       frame_number++;
+1168       vf = vf-&gt;sender();
+1169     } // end of vframe loop
+1170 
+1171     if (fst.is_done()) {
+1172       break;
+1173     }
+1174     fst.next();
+1175     vf = vframe::new_vframe(fst.current(), fst.register_map(), thread);
+1176     frame_number = 0;
+1177   } // end of frame loop
+1178 
+1179   // the end was reached without finding a matching method
+1180   return NULL;
+1181 C2V_END
+1182 
+1183 C2V_VMENTRY(void, resolveInvokeDynamicInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index))
+1184   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+1185   CallInfo callInfo;
+1186   LinkResolver::resolve_invoke(callInfo, Handle(), cp, index, Bytecodes::_invokedynamic, CHECK);
+1187   ConstantPoolCacheEntry* cp_cache_entry = cp-&gt;invokedynamic_cp_cache_entry_at(index);
+1188   cp_cache_entry-&gt;set_dynamic_call(cp, callInfo);
+1189 C2V_END
+1190 
+1191 C2V_VMENTRY(void, resolveInvokeHandleInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index))
+1192   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+1193   Klass* holder = cp-&gt;klass_ref_at(index, CHECK);
+1194   Symbol* name = cp-&gt;name_ref_at(index);
+1195   if (MethodHandles::is_signature_polymorphic_name(holder, name)) {
+1196     CallInfo callInfo;
+1197     LinkResolver::resolve_invoke(callInfo, Handle(), cp, index, Bytecodes::_invokehandle, CHECK);
+1198     ConstantPoolCacheEntry* cp_cache_entry = cp-&gt;cache()-&gt;entry_at(cp-&gt;decode_cpcache_index(index));
+1199     cp_cache_entry-&gt;set_method_handle(cp, callInfo);
+1200   }
+1201 C2V_END
+1202 
+1203 C2V_VMENTRY(jint, isResolvedInvokeHandleInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index))
+1204   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+1205   ConstantPoolCacheEntry* cp_cache_entry = cp-&gt;cache()-&gt;entry_at(cp-&gt;decode_cpcache_index(index));
+1206   if (cp_cache_entry-&gt;is_resolved(Bytecodes::_invokehandle)) {
+1207     // MethodHandle.invoke* --&gt; LambdaForm?
+1208     ResourceMark rm;
+1209 
+1210     LinkInfo link_info(cp, index, CATCH);
+1211 
+1212     Klass* resolved_klass = link_info.resolved_klass();
+1213 
+1214     Symbol* name_sym = cp-&gt;name_ref_at(index);
+1215 
+1216     vmassert(MethodHandles::is_method_handle_invoke_name(resolved_klass, name_sym), "!");
+1217     vmassert(MethodHandles::is_signature_polymorphic_name(resolved_klass, name_sym), "!");
+1218 
+1219     methodHandle adapter_method(cp_cache_entry-&gt;f1_as_method());
+1220 
+1221     methodHandle resolved_method(adapter_method);
+1222 
+1223     // Can we treat it as a regular invokevirtual?
+1224     if (resolved_method-&gt;method_holder() == resolved_klass &amp;&amp; resolved_method-&gt;name() == name_sym) {
+1225       vmassert(!resolved_method-&gt;is_static(),"!");
+1226       vmassert(MethodHandles::is_signature_polymorphic_method(resolved_method()),"!");
+1227       vmassert(!MethodHandles::is_signature_polymorphic_static(resolved_method-&gt;intrinsic_id()), "!");
+1228       vmassert(cp_cache_entry-&gt;appendix_if_resolved(cp) == NULL, "!");
+1229       vmassert(cp_cache_entry-&gt;method_type_if_resolved(cp) == NULL, "!");
+1230 
+1231       methodHandle m(LinkResolver::linktime_resolve_virtual_method_or_null(link_info));
+1232       vmassert(m == resolved_method, "!!");
+1233       return -1;
+1234     }
+1235 
+1236     return Bytecodes::_invokevirtual;
+1237   }
+1238   if (cp_cache_entry-&gt;is_resolved(Bytecodes::_invokedynamic)) {
+1239     return Bytecodes::_invokedynamic;
+1240   }
+1241   return -1;
+1242 C2V_END
+1243 
+1244 
+1245 C2V_VMENTRY(jobject, getSignaturePolymorphicHolders, (JNIEnv*, jobject))
+1246   objArrayHandle holders = oopFactory::new_objArray_handle(SystemDictionary::String_klass(), 2, CHECK_NULL);
+1247   Handle mh = java_lang_String::create_from_str("Ljava/lang/invoke/MethodHandle;", CHECK_NULL);
+1248   Handle vh = java_lang_String::create_from_str("Ljava/lang/invoke/VarHandle;", CHECK_NULL);
+1249   holders-&gt;obj_at_put(0, mh());
+1250   holders-&gt;obj_at_put(1, vh());
+1251   return JNIHandles::make_local(THREAD, holders());
+1252 C2V_END
+1253 
+1254 C2V_VMENTRY(jboolean, shouldDebugNonSafepoints, (JNIEnv*, jobject))
+1255   //see compute_recording_non_safepoints in debugInfroRec.cpp
+1256   if (JvmtiExport::should_post_compiled_method_load() &amp;&amp; FLAG_IS_DEFAULT(DebugNonSafepoints)) {
+1257     return true;
+1258   }
+1259   return DebugNonSafepoints;
+1260 C2V_END
+1261 
+1262 // public native void materializeVirtualObjects(HotSpotStackFrameReference stackFrame, boolean invalidate);
+1263 C2V_VMENTRY(void, materializeVirtualObjects, (JNIEnv*, jobject, jobject hs_frame, bool invalidate))
+1264   ResourceMark rm;
+1265 
+1266   if (hs_frame == NULL) {
+1267     THROW_MSG(vmSymbols::java_lang_NullPointerException(), "stack frame is null")
+1268   }
+1269 
+1270   HotSpotStackFrameReference::klass()-&gt;initialize(CHECK);
+1271 
+1272   // look for the given stack frame
+1273   StackFrameStream fst(thread);
+1274   intptr_t* stack_pointer = (intptr_t*) HotSpotStackFrameReference::stackPointer(hs_frame);
+1275   while (fst.current()-&gt;sp() != stack_pointer &amp;&amp; !fst.is_done()) {
+1276     fst.next();
+1277   }
+1278   if (fst.current()-&gt;sp() != stack_pointer) {
+1279     THROW_MSG(vmSymbols::java_lang_IllegalStateException(), "stack frame not found")
+1280   }
+1281 
+1282   if (invalidate) {
+1283     if (!fst.current()-&gt;is_compiled_frame()) {
+1284       THROW_MSG(vmSymbols::java_lang_IllegalStateException(), "compiled stack frame expected")
+1285     }
+1286     assert(fst.current()-&gt;cb()-&gt;is_nmethod(), "nmethod expected");
+1287     ((nmethod*) fst.current()-&gt;cb())-&gt;make_not_entrant();
+1288   }
+1289   Deoptimization::deoptimize(thread, *fst.current(), fst.register_map(), Deoptimization::Reason_none);
+1290   // look for the frame again as it has been updated by deopt (pc, deopt state...)
+1291   StackFrameStream fstAfterDeopt(thread);
+1292   while (fstAfterDeopt.current()-&gt;sp() != stack_pointer &amp;&amp; !fstAfterDeopt.is_done()) {
+1293     fstAfterDeopt.next();
+1294   }
+1295   if (fstAfterDeopt.current()-&gt;sp() != stack_pointer) {
+1296     THROW_MSG(vmSymbols::java_lang_IllegalStateException(), "stack frame not found after deopt")
+1297   }
+1298 
+1299   vframe* vf = vframe::new_vframe(fstAfterDeopt.current(), fstAfterDeopt.register_map(), thread);
+1300   if (!vf-&gt;is_compiled_frame()) {
+1301     THROW_MSG(vmSymbols::java_lang_IllegalStateException(), "compiled stack frame expected")
+1302   }
+1303 
+1304   GrowableArray&lt;compiledVFrame*&gt;* virtualFrames = new GrowableArray&lt;compiledVFrame*&gt;(10);
+1305   while (true) {
+1306     assert(vf-&gt;is_compiled_frame(), "Wrong frame type");
+1307     virtualFrames-&gt;push(compiledVFrame::cast(vf));
+1308     if (vf-&gt;is_top()) {
+1309       break;
+1310     }
+1311     vf = vf-&gt;sender();
+1312   }
+1313 
+1314   int last_frame_number = HotSpotStackFrameReference::frameNumber(hs_frame);
+1315   if (last_frame_number &gt;= virtualFrames-&gt;length()) {
+1316     THROW_MSG(vmSymbols::java_lang_IllegalStateException(), "invalid frame number")
+1317   }
+1318 
+1319   // Reallocate the non-escaping objects and restore their fields.
+1320   assert (virtualFrames-&gt;at(last_frame_number)-&gt;scope() != NULL,"invalid scope");
+1321   GrowableArray&lt;ScopeValue*&gt;* objects = virtualFrames-&gt;at(last_frame_number)-&gt;scope()-&gt;objects();
+1322 
+1323   if (objects == NULL) {
+1324     // no objects to materialize
+1325     return;
+1326   }
+1327 
+1328   bool realloc_failures = Deoptimization::realloc_objects(thread, fstAfterDeopt.current(), objects, CHECK);
+1329   Deoptimization::reassign_fields(fstAfterDeopt.current(), fstAfterDeopt.register_map(), objects, realloc_failures, false);
+1330 
+1331   for (int frame_index = 0; frame_index &lt; virtualFrames-&gt;length(); frame_index++) {
+1332     compiledVFrame* cvf = virtualFrames-&gt;at(frame_index);
+1333 
+1334     GrowableArray&lt;ScopeValue*&gt;* scopeLocals = cvf-&gt;scope()-&gt;locals();
+1335     StackValueCollection* locals = cvf-&gt;locals();
+1336     if (locals != NULL) {
+1337       for (int i2 = 0; i2 &lt; locals-&gt;size(); i2++) {
+1338         StackValue* var = locals-&gt;at(i2);
+1339         if (var-&gt;type() == T_OBJECT &amp;&amp; scopeLocals-&gt;at(i2)-&gt;is_object()) {
+1340           jvalue val;
+1341           val.l = (jobject) locals-&gt;at(i2)-&gt;get_obj()();
+1342           cvf-&gt;update_local(T_OBJECT, i2, val);
+1343         }
+1344       }
+1345     }
+1346 
+1347     GrowableArray&lt;ScopeValue*&gt;* scopeExpressions = cvf-&gt;scope()-&gt;expressions();
+1348     StackValueCollection* expressions = cvf-&gt;expressions();
+1349     if (expressions != NULL) {
+1350       for (int i2 = 0; i2 &lt; expressions-&gt;size(); i2++) {
+1351         StackValue* var = expressions-&gt;at(i2);
+1352         if (var-&gt;type() == T_OBJECT &amp;&amp; scopeExpressions-&gt;at(i2)-&gt;is_object()) {
+1353           jvalue val;
+1354           val.l = (jobject) expressions-&gt;at(i2)-&gt;get_obj()();
+1355           cvf-&gt;update_stack(T_OBJECT, i2, val);
+1356         }
+1357       }
+1358     }
+1359 
+1360     GrowableArray&lt;MonitorValue*&gt;* scopeMonitors = cvf-&gt;scope()-&gt;monitors();
+1361     GrowableArray&lt;MonitorInfo*&gt;* monitors = cvf-&gt;monitors();
+1362     if (monitors != NULL) {
+1363       for (int i2 = 0; i2 &lt; monitors-&gt;length(); i2++) {
+1364         cvf-&gt;update_monitor(i2, monitors-&gt;at(i2));
+1365       }
+1366     }
+1367   }
+1368 
+1369   // all locals are materialized by now
+1370   HotSpotStackFrameReference::set_localIsVirtual(hs_frame, NULL);
+1371 
+1372   // update the locals array
+1373   objArrayHandle array(THREAD, HotSpotStackFrameReference::locals(hs_frame));
+1374   StackValueCollection* locals = virtualFrames-&gt;at(last_frame_number)-&gt;locals();
+1375   for (int i = 0; i &lt; locals-&gt;size(); i++) {
+1376     StackValue* var = locals-&gt;at(i);
+1377     if (var-&gt;type() == T_OBJECT) {
+1378       array-&gt;obj_at_put(i, locals-&gt;at(i)-&gt;get_obj()());
+1379     }
+1380   }
+1381   HotSpotStackFrameReference::set_objectsMaterialized(hs_frame, JNI_TRUE);
+1382 C2V_END
+1383 
+1384 C2V_VMENTRY(void, writeDebugOutput, (JNIEnv*, jobject, jbyteArray bytes, jint offset, jint length))
+1385   if (bytes == NULL) {
+1386     THROW(vmSymbols::java_lang_NullPointerException());
+1387   }
+1388   typeArrayOop array = (typeArrayOop) JNIHandles::resolve(bytes);
+1389 
+1390   // Check if offset and length are non negative.
+1391   if (offset &lt; 0 || length &lt; 0) {
+1392     THROW(vmSymbols::java_lang_ArrayIndexOutOfBoundsException());
+1393   }
+1394   // Check if the range is valid.
+1395   if ((((unsigned int) length + (unsigned int) offset) &gt; (unsigned int) array-&gt;length())) {
+1396     THROW(vmSymbols::java_lang_ArrayIndexOutOfBoundsException());
+1397   }
+1398   while (length &gt; 0) {
+1399     jbyte* start = array-&gt;byte_at_addr(offset);
+1400     tty-&gt;write((char*) start, MIN2(length, (jint)O_BUFLEN));
+1401     length -= O_BUFLEN;
+1402     offset += O_BUFLEN;
+1403   }
+1404 C2V_END
+1405 
+1406 C2V_VMENTRY(void, flushDebugOutput, (JNIEnv*, jobject))
+1407   tty-&gt;flush();
+1408 C2V_END
+1409 
+1410 C2V_VMENTRY(int, methodDataProfileDataSize, (JNIEnv*, jobject, jlong metaspace_method_data, jint position))
+1411   ResourceMark rm;
+1412   MethodData* mdo = CompilerToVM::asMethodData(metaspace_method_data);
+1413   ProfileData* profile_data = mdo-&gt;data_at(position);
+1414   if (mdo-&gt;is_valid(profile_data)) {
+1415     return profile_data-&gt;size_in_bytes();
+1416   }
+1417   DataLayout* data    = mdo-&gt;extra_data_base();
+1418   DataLayout* end   = mdo-&gt;extra_data_limit();
+1419   for (;; data = mdo-&gt;next_extra(data)) {
+1420     assert(data &lt; end, "moved past end of extra data");
+1421     profile_data = data-&gt;data_in();
+1422     if (mdo-&gt;dp_to_di(profile_data-&gt;dp()) == position) {
+1423       return profile_data-&gt;size_in_bytes();
+1424     }
+1425   }
+1426   THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(), err_msg("Invalid profile data position %d", position));
+1427 C2V_END
+1428 
+1429 C2V_VMENTRY(jlong, getFingerprint, (JNIEnv*, jobject, jlong metaspace_klass))
+1430   Klass *k = CompilerToVM::asKlass(metaspace_klass);
+1431   if (k-&gt;is_instance_klass()) {
+1432     return InstanceKlass::cast(k)-&gt;get_stored_fingerprint();
+1433   } else {
+1434     return 0;
+1435   }
+1436 C2V_END
+1437 
+1438 C2V_VMENTRY(jobject, getHostClass, (JNIEnv*, jobject, jobject jvmci_type))
+1439   InstanceKlass* k = InstanceKlass::cast(CompilerToVM::asKlass(jvmci_type));
+1440   InstanceKlass* host = k-&gt;unsafe_anonymous_host();
+1441   JVMCIKlassHandle handle(THREAD, host);
+1442   oop result = CompilerToVM::get_jvmci_type(handle, CHECK_NULL);
+1443   return JNIHandles::make_local(THREAD, result);
+1444 C2V_END
+1445 
+1446 C2V_VMENTRY(int, interpreterFrameSize, (JNIEnv*, jobject, jobject bytecode_frame_handle))
+1447   if (bytecode_frame_handle == NULL) {
+1448     THROW_0(vmSymbols::java_lang_NullPointerException());
+1449   }
+1450 
+1451   oop top_bytecode_frame = JNIHandles::resolve_non_null(bytecode_frame_handle);
+1452   oop bytecode_frame = top_bytecode_frame;
+1453   int size = 0;
+1454   int callee_parameters = 0;
+1455   int callee_locals = 0;
+1456   Method* method = getMethodFromHotSpotMethod(BytecodePosition::method(bytecode_frame));
+1457   int extra_args = method-&gt;max_stack() - BytecodeFrame::numStack(bytecode_frame);
+1458 
+1459   while (bytecode_frame != NULL) {
+1460     int locks = BytecodeFrame::numLocks(bytecode_frame);
+1461     int temps = BytecodeFrame::numStack(bytecode_frame);
+1462     bool is_top_frame = (bytecode_frame == top_bytecode_frame);
+1463     Method* method = getMethodFromHotSpotMethod(BytecodePosition::method(bytecode_frame));
+1464 
+1465     int frame_size = BytesPerWord * Interpreter::size_activation(method-&gt;max_stack(),
+1466                                                                  temps + callee_parameters,
+1467                                                                  extra_args,
+1468                                                                  locks,
+1469                                                                  callee_parameters,
+1470                                                                  callee_locals,
+1471                                                                  is_top_frame);
+1472     size += frame_size;
+1473 
+1474     callee_parameters = method-&gt;size_of_parameters();
+1475     callee_locals = method-&gt;max_locals();
+1476     extra_args = 0;
+1477     bytecode_frame = BytecodePosition::caller(bytecode_frame);
+1478   }
+1479   return size + Deoptimization::last_frame_adjust(0, callee_locals) * BytesPerWord;
+1480 C2V_END
+1481 
+1482 C2V_VMENTRY(void, compileToBytecode, (JNIEnv*, jobject, jobject lambda_form_handle))
+1483   Handle lambda_form(THREAD, JNIHandles::resolve_non_null(lambda_form_handle));
+1484   if (lambda_form-&gt;is_a(SystemDictionary::LambdaForm_klass())) {
+1485     TempNewSymbol compileToBytecode = SymbolTable::new_symbol("compileToBytecode", CHECK);
+1486     JavaValue result(T_VOID);
+1487     JavaCalls::call_special(&amp;result, lambda_form, SystemDictionary::LambdaForm_klass(), compileToBytecode, vmSymbols::void_method_signature(), CHECK);
+1488   } else {
+1489     THROW_MSG(vmSymbols::java_lang_IllegalArgumentException(),
+1490                 err_msg("Unexpected type: %s", lambda_form-&gt;klass()-&gt;external_name()));
+1491   }
+1492 C2V_END
+1493 
+1494 #define CC (char*)  /*cast a literal from (const char*)*/
+1495 #define FN_PTR(f) CAST_FROM_FN_PTR(void*, &amp;(c2v_ ## f))
+1496 
+1497 #define STRING                  "Ljava/lang/String;"
+1498 #define OBJECT                  "Ljava/lang/Object;"
+1499 #define CLASS                   "Ljava/lang/Class;"
+1500 #define EXECUTABLE              "Ljava/lang/reflect/Executable;"
+1501 #define STACK_TRACE_ELEMENT     "Ljava/lang/StackTraceElement;"
+1502 #define INSTALLED_CODE          "Ljdk/vm/ci/code/InstalledCode;"
+1503 #define TARGET_DESCRIPTION      "Ljdk/vm/ci/code/TargetDescription;"
+1504 #define BYTECODE_FRAME          "Ljdk/vm/ci/code/BytecodeFrame;"
+1505 #define INSPECTED_FRAME_VISITOR "Ljdk/vm/ci/code/stack/InspectedFrameVisitor;"
+1506 #define RESOLVED_METHOD         "Ljdk/vm/ci/meta/ResolvedJavaMethod;"
+1507 #define HS_RESOLVED_METHOD      "Ljdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl;"
+1508 #define HS_RESOLVED_KLASS       "Ljdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl;"
+1509 #define HS_CONSTANT_POOL        "Ljdk/vm/ci/hotspot/HotSpotConstantPool;"
+1510 #define HS_COMPILED_CODE        "Ljdk/vm/ci/hotspot/HotSpotCompiledCode;"
+1511 #define HS_CONFIG               "Ljdk/vm/ci/hotspot/HotSpotVMConfig;"
+1512 #define HS_METADATA             "Ljdk/vm/ci/hotspot/HotSpotMetaData;"
+1513 #define HS_STACK_FRAME_REF      "Ljdk/vm/ci/hotspot/HotSpotStackFrameReference;"
+1514 #define HS_SPECULATION_LOG      "Ljdk/vm/ci/hotspot/HotSpotSpeculationLog;"
+1515 #define METASPACE_METHOD_DATA   "J"
+1516 
+1517 JNINativeMethod CompilerToVM::methods[] = {
+1518   {CC "getBytecode",                                  CC "(" HS_RESOLVED_METHOD ")[B",                                                      FN_PTR(getBytecode)},
+1519   {CC "getExceptionTableStart",                       CC "(" HS_RESOLVED_METHOD ")J",                                                       FN_PTR(getExceptionTableStart)},
+1520   {CC "getExceptionTableLength",                      CC "(" HS_RESOLVED_METHOD ")I",                                                       FN_PTR(getExceptionTableLength)},
+1521   {CC "findUniqueConcreteMethod",                     CC "(" HS_RESOLVED_KLASS HS_RESOLVED_METHOD ")" HS_RESOLVED_METHOD,                   FN_PTR(findUniqueConcreteMethod)},
+1522   {CC "getImplementor",                               CC "(" HS_RESOLVED_KLASS ")" HS_RESOLVED_KLASS,                                       FN_PTR(getImplementor)},
+1523   {CC "getStackTraceElement",                         CC "(" HS_RESOLVED_METHOD "I)" STACK_TRACE_ELEMENT,                                   FN_PTR(getStackTraceElement)},
+1524   {CC "methodIsIgnoredBySecurityStackWalk",           CC "(" HS_RESOLVED_METHOD ")Z",                                                       FN_PTR(methodIsIgnoredBySecurityStackWalk)},
+1525   {CC "setNotInlinableOrCompilable",                  CC "(" HS_RESOLVED_METHOD ")V",                                                       FN_PTR(setNotInlinableOrCompilable)},
+1526   {CC "isCompilable",                                 CC "(" HS_RESOLVED_METHOD ")Z",                                                       FN_PTR(isCompilable)},
+1527   {CC "hasNeverInlineDirective",                      CC "(" HS_RESOLVED_METHOD ")Z",                                                       FN_PTR(hasNeverInlineDirective)},
+1528   {CC "shouldInlineMethod",                           CC "(" HS_RESOLVED_METHOD ")Z",                                                       FN_PTR(shouldInlineMethod)},
+1529   {CC "lookupType",                                   CC "(" STRING CLASS "Z)" HS_RESOLVED_KLASS,                                           FN_PTR(lookupType)},
+1530   {CC "lookupNameInPool",                             CC "(" HS_CONSTANT_POOL "I)" STRING,                                                  FN_PTR(lookupNameInPool)},
+1531   {CC "lookupNameAndTypeRefIndexInPool",              CC "(" HS_CONSTANT_POOL "I)I",                                                        FN_PTR(lookupNameAndTypeRefIndexInPool)},
+1532   {CC "lookupSignatureInPool",                        CC "(" HS_CONSTANT_POOL "I)" STRING,                                                  FN_PTR(lookupSignatureInPool)},
+1533   {CC "lookupKlassRefIndexInPool",                    CC "(" HS_CONSTANT_POOL "I)I",                                                        FN_PTR(lookupKlassRefIndexInPool)},
+1534   {CC "lookupKlassInPool",                            CC "(" HS_CONSTANT_POOL "I)Ljava/lang/Object;",                                       FN_PTR(lookupKlassInPool)},
+1535   {CC "lookupAppendixInPool",                         CC "(" HS_CONSTANT_POOL "I)" OBJECT,                                                  FN_PTR(lookupAppendixInPool)},
+1536   {CC "lookupMethodInPool",                           CC "(" HS_CONSTANT_POOL "IB)" HS_RESOLVED_METHOD,                                     FN_PTR(lookupMethodInPool)},
+1537   {CC "constantPoolRemapInstructionOperandFromCache", CC "(" HS_CONSTANT_POOL "I)I",                                                        FN_PTR(constantPoolRemapInstructionOperandFromCache)},
+1538   {CC "resolveConstantInPool",                        CC "(" HS_CONSTANT_POOL "I)" OBJECT,                                                  FN_PTR(resolveConstantInPool)},
+1539   {CC "resolvePossiblyCachedConstantInPool",          CC "(" HS_CONSTANT_POOL "I)" OBJECT,                                                  FN_PTR(resolvePossiblyCachedConstantInPool)},
+1540   {CC "resolveTypeInPool",                            CC "(" HS_CONSTANT_POOL "I)" HS_RESOLVED_KLASS,                                       FN_PTR(resolveTypeInPool)},
+1541   {CC "resolveFieldInPool",                           CC "(" HS_CONSTANT_POOL "I" HS_RESOLVED_METHOD "B[I)" HS_RESOLVED_KLASS,              FN_PTR(resolveFieldInPool)},
+1542   {CC "resolveInvokeDynamicInPool",                   CC "(" HS_CONSTANT_POOL "I)V",                                                        FN_PTR(resolveInvokeDynamicInPool)},
+1543   {CC "resolveInvokeHandleInPool",                    CC "(" HS_CONSTANT_POOL "I)V",                                                        FN_PTR(resolveInvokeHandleInPool)},
+1544   {CC "isResolvedInvokeHandleInPool",                 CC "(" HS_CONSTANT_POOL "I)I",                                                        FN_PTR(isResolvedInvokeHandleInPool)},
+1545   {CC "resolveMethod",                                CC "(" HS_RESOLVED_KLASS HS_RESOLVED_METHOD HS_RESOLVED_KLASS ")" HS_RESOLVED_METHOD, FN_PTR(resolveMethod)},
+1546   {CC "getSignaturePolymorphicHolders",               CC "()[" STRING,                                                                      FN_PTR(getSignaturePolymorphicHolders)},
+1547   {CC "getVtableIndexForInterfaceMethod",             CC "(" HS_RESOLVED_KLASS HS_RESOLVED_METHOD ")I",                                     FN_PTR(getVtableIndexForInterfaceMethod)},
+1548   {CC "getClassInitializer",                          CC "(" HS_RESOLVED_KLASS ")" HS_RESOLVED_METHOD,                                      FN_PTR(getClassInitializer)},
+1549   {CC "hasFinalizableSubclass",                       CC "(" HS_RESOLVED_KLASS ")Z",                                                        FN_PTR(hasFinalizableSubclass)},
+1550   {CC "getMaxCallTargetOffset",                       CC "(J)J",                                                                            FN_PTR(getMaxCallTargetOffset)},
+1551   {CC "asResolvedJavaMethod",                         CC "(" EXECUTABLE ")" HS_RESOLVED_METHOD,                                             FN_PTR(asResolvedJavaMethod)},
+1552   {CC "getResolvedJavaMethod",                        CC "(Ljava/lang/Object;J)" HS_RESOLVED_METHOD,                                        FN_PTR(getResolvedJavaMethod)},
+1553   {CC "getConstantPool",                              CC "(Ljava/lang/Object;)" HS_CONSTANT_POOL,                                           FN_PTR(getConstantPool)},
+1554   {CC "getResolvedJavaType",                          CC "(Ljava/lang/Object;JZ)" HS_RESOLVED_KLASS,                                        FN_PTR(getResolvedJavaType)},
+1555   {CC "readConfiguration",                            CC "()[" OBJECT,                                                                      FN_PTR(readConfiguration)},
+1556   {CC "installCode",                                  CC "(" TARGET_DESCRIPTION HS_COMPILED_CODE INSTALLED_CODE HS_SPECULATION_LOG ")I",    FN_PTR(installCode)},
+1557   {CC "getMetadata",                                  CC "(" TARGET_DESCRIPTION HS_COMPILED_CODE HS_METADATA ")I",                          FN_PTR(getMetadata)},
+1558   {CC "resetCompilationStatistics",                   CC "()V",                                                                             FN_PTR(resetCompilationStatistics)},
+1559   {CC "disassembleCodeBlob",                          CC "(" INSTALLED_CODE ")" STRING,                                                     FN_PTR(disassembleCodeBlob)},
+1560   {CC "executeInstalledCode",                         CC "([" OBJECT INSTALLED_CODE ")" OBJECT,                                             FN_PTR(executeInstalledCode)},
+1561   {CC "getLineNumberTable",                           CC "(" HS_RESOLVED_METHOD ")[J",                                                      FN_PTR(getLineNumberTable)},
+1562   {CC "getLocalVariableTableStart",                   CC "(" HS_RESOLVED_METHOD ")J",                                                       FN_PTR(getLocalVariableTableStart)},
+1563   {CC "getLocalVariableTableLength",                  CC "(" HS_RESOLVED_METHOD ")I",                                                       FN_PTR(getLocalVariableTableLength)},
+1564   {CC "reprofile",                                    CC "(" HS_RESOLVED_METHOD ")V",                                                       FN_PTR(reprofile)},
+1565   {CC "invalidateInstalledCode",                      CC "(" INSTALLED_CODE ")V",                                                           FN_PTR(invalidateInstalledCode)},
+1566   {CC "collectCounters",                              CC "()[J",                                                                            FN_PTR(collectCounters)},
+1567   {CC "allocateCompileId",                            CC "(" HS_RESOLVED_METHOD "I)I",                                                      FN_PTR(allocateCompileId)},
+1568   {CC "isMature",                                     CC "(" METASPACE_METHOD_DATA ")Z",                                                    FN_PTR(isMature)},
+1569   {CC "hasCompiledCodeForOSR",                        CC "(" HS_RESOLVED_METHOD "II)Z",                                                     FN_PTR(hasCompiledCodeForOSR)},
+1570   {CC "getSymbol",                                    CC "(J)" STRING,                                                                      FN_PTR(getSymbol)},
+1571   {CC "iterateFrames",                                CC "([" RESOLVED_METHOD "[" RESOLVED_METHOD "I" INSPECTED_FRAME_VISITOR ")" OBJECT,   FN_PTR(iterateFrames)},
+1572   {CC "materializeVirtualObjects",                    CC "(" HS_STACK_FRAME_REF "Z)V",                                                      FN_PTR(materializeVirtualObjects)},
+1573   {CC "shouldDebugNonSafepoints",                     CC "()Z",                                                                             FN_PTR(shouldDebugNonSafepoints)},
+1574   {CC "writeDebugOutput",                             CC "([BII)V",                                                                         FN_PTR(writeDebugOutput)},
+1575   {CC "flushDebugOutput",                             CC "()V",                                                                             FN_PTR(flushDebugOutput)},
+1576   {CC "methodDataProfileDataSize",                    CC "(JI)I",                                                                           FN_PTR(methodDataProfileDataSize)},
+1577   {CC "getFingerprint",                               CC "(J)J",                                                                            FN_PTR(getFingerprint)},
+1578   {CC "getHostClass",                                 CC "(" HS_RESOLVED_KLASS ")" HS_RESOLVED_KLASS,                                       FN_PTR(getHostClass)},
+1579   {CC "interpreterFrameSize",                         CC "(" BYTECODE_FRAME ")I",                                                           FN_PTR(interpreterFrameSize)},
+1580   {CC "compileToBytecode",                            CC "(" OBJECT ")V",                                                                   FN_PTR(compileToBytecode)},
+1581   {CC "getFlagValue",                                 CC "(" STRING ")" OBJECT,                                                             FN_PTR(getFlagValue)},
+1582 };
+1583 
+1584 int CompilerToVM::methods_count() {
+1585   return sizeof(methods) / sizeof(JNINativeMethod);
+1586 }
+</pre></body></html>

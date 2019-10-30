@@ -1,0 +1,1136 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 
+  24 #include "precompiled.hpp"
+  25 #include "jvm.h"
+  26 #include "asm/codeBuffer.hpp"
+  27 #include "classfile/javaClasses.inline.hpp"
+  28 #include "code/codeCache.hpp"
+  29 #include "code/compiledMethod.inline.hpp"
+  30 #include "compiler/compileBroker.hpp"
+  31 #include "compiler/disassembler.hpp"
+  32 #include "jvmci/jvmciRuntime.hpp"
+  33 #include "jvmci/jvmciCompilerToVM.hpp"
+  34 #include "jvmci/jvmciCompiler.hpp"
+  35 #include "jvmci/jvmciJavaClasses.hpp"
+  36 #include "jvmci/jvmciEnv.hpp"
+  37 #include "logging/log.hpp"
+  38 #include "memory/allocation.inline.hpp"
+  39 #include "memory/oopFactory.hpp"
+  40 #include "memory/resourceArea.hpp"
+  41 #include "oops/oop.inline.hpp"
+  42 #include "oops/objArrayOop.inline.hpp"
+  43 #include "runtime/biasedLocking.hpp"
+  44 #include "runtime/frame.inline.hpp"
+  45 #include "runtime/interfaceSupport.inline.hpp"
+  46 #include "runtime/jniHandles.inline.hpp"
+  47 #include "runtime/reflection.hpp"
+  48 #include "runtime/sharedRuntime.hpp"
+  49 #include "runtime/threadSMR.hpp"
+  50 #include "utilities/debug.hpp"
+  51 #include "utilities/defaultStream.hpp"
+  52 #include "utilities/macros.hpp"
+  53 #if INCLUDE_G1GC
+  54 #include "gc/g1/g1ThreadLocalData.hpp"
+  55 #endif // INCLUDE_G1GC
+  56 
+  57 #if defined(_MSC_VER)
+  58 #define strtoll _strtoi64
+  59 #endif
+  60 
+  61 jobject JVMCIRuntime::_HotSpotJVMCIRuntime_instance = NULL;
+  62 bool JVMCIRuntime::_HotSpotJVMCIRuntime_initialized = false;
+  63 bool JVMCIRuntime::_well_known_classes_initialized = false;
+  64 JVMCIRuntime::CompLevelAdjustment JVMCIRuntime::_comp_level_adjustment = JVMCIRuntime::none;
+  65 bool JVMCIRuntime::_shutdown_called = false;
+  66 
+  67 BasicType JVMCIRuntime::kindToBasicType(Handle kind, TRAPS) {
+  68   if (kind.is_null()) {
+  69     THROW_(vmSymbols::java_lang_NullPointerException(), T_ILLEGAL);
+  70   }
+  71   jchar ch = JavaKind::typeChar(kind);
+  72   switch(ch) {
+  73     case 'Z': return T_BOOLEAN;
+  74     case 'B': return T_BYTE;
+  75     case 'S': return T_SHORT;
+  76     case 'C': return T_CHAR;
+  77     case 'I': return T_INT;
+  78     case 'F': return T_FLOAT;
+  79     case 'J': return T_LONG;
+  80     case 'D': return T_DOUBLE;
+  81     case 'A': return T_OBJECT;
+  82     case '-': return T_ILLEGAL;
+  83     default:
+  84       JVMCI_ERROR_(T_ILLEGAL, "unexpected Kind: %c", ch);
+  85   }
+  86 }
+  87 
+  88 // Simple helper to see if the caller of a runtime stub which
+  89 // entered the VM has been deoptimized
+  90 
+  91 static bool caller_is_deopted() {
+  92   JavaThread* thread = JavaThread::current();
+  93   RegisterMap reg_map(thread, false);
+  94   frame runtime_frame = thread-&gt;last_frame();
+  95   frame caller_frame = runtime_frame.sender(&amp;reg_map);
+  96   assert(caller_frame.is_compiled_frame(), "must be compiled");
+  97   return caller_frame.is_deoptimized_frame();
+  98 }
+  99 
+ 100 // Stress deoptimization
+ 101 static void deopt_caller() {
+ 102   if ( !caller_is_deopted()) {
+ 103     JavaThread* thread = JavaThread::current();
+ 104     RegisterMap reg_map(thread, false);
+ 105     frame runtime_frame = thread-&gt;last_frame();
+ 106     frame caller_frame = runtime_frame.sender(&amp;reg_map);
+ 107     Deoptimization::deoptimize_frame(thread, caller_frame.id(), Deoptimization::Reason_constraint);
+ 108     assert(caller_is_deopted(), "Must be deoptimized");
+ 109   }
+ 110 }
+ 111 
+<a name="1" id="anc1"></a><span class="changed"> 112 // Manages a scope for a JVMCI runtime call that attempts a heap allocation.</span>
+<span class="changed"> 113 // If there is a pending exception upon closing the scope and the runtime</span>
+<span class="changed"> 114 // call is of the variety where allocation failure returns NULL without an</span>
+<span class="changed"> 115 // exception, the following action is taken:</span>
+<span class="changed"> 116 //   1. The pending exception is cleared</span>
+<span class="changed"> 117 //   2. NULL is written to JavaThread::_vm_result</span>
+<span class="changed"> 118 //   3. Checks that an OutOfMemoryError is Universe::out_of_memory_error_retry().</span>
+<span class="changed"> 119 class RetryableAllocationMark: public StackObj {</span>
+<span class="changed"> 120  private:</span>
+<span class="changed"> 121   JavaThread* _thread;</span>
+<span class="changed"> 122  public:</span>
+<span class="changed"> 123   RetryableAllocationMark(JavaThread* thread, bool activate) {</span>
+<span class="changed"> 124     if (activate) {</span>
+<span class="changed"> 125       assert(!thread-&gt;in_retryable_allocation(), "retryable allocation scope is non-reentrant");</span>
+<span class="changed"> 126       _thread = thread;</span>
+<span class="changed"> 127       _thread-&gt;set_in_retryable_allocation(true);</span>
+<span class="changed"> 128     } else {</span>
+<span class="changed"> 129       _thread = NULL;</span>
+<span class="changed"> 130     }</span>
+<span class="changed"> 131   }</span>
+<span class="changed"> 132   ~RetryableAllocationMark() {</span>
+<span class="changed"> 133     if (_thread != NULL) {</span>
+<span class="changed"> 134       _thread-&gt;set_in_retryable_allocation(false);</span>
+<span class="changed"> 135       JavaThread* THREAD = _thread;</span>
+<span class="changed"> 136       if (HAS_PENDING_EXCEPTION) {</span>
+<span class="changed"> 137         oop ex = PENDING_EXCEPTION;</span>
+<span class="changed"> 138         CLEAR_PENDING_EXCEPTION;</span>
+<span class="changed"> 139         oop retry_oome = Universe::out_of_memory_error_retry();</span>
+<span class="changed"> 140         if (ex-&gt;is_a(retry_oome-&gt;klass()) &amp;&amp; retry_oome != ex) {</span>
+<span class="changed"> 141           ResourceMark rm;</span>
+<span class="changed"> 142           fatal("Unexpected exception in scope of retryable allocation: " INTPTR_FORMAT " of type %s", p2i(ex), ex-&gt;klass()-&gt;external_name());</span>
+<span class="changed"> 143         }</span>
+<span class="changed"> 144         _thread-&gt;set_vm_result(NULL);</span>
+<span class="changed"> 145       }</span>
+<span class="changed"> 146     }</span>
+<span class="changed"> 147   }</span>
+<span class="changed"> 148 };</span>
+<span class="changed"> 149 </span>
+<span class="changed"> 150 JRT_BLOCK_ENTRY(void, JVMCIRuntime::new_instance_common(JavaThread* thread, Klass* klass, bool null_on_fail))</span>
+ 151   JRT_BLOCK;
+ 152   assert(klass-&gt;is_klass(), "not a class");
+ 153   Handle holder(THREAD, klass-&gt;klass_holder()); // keep the klass alive
+ 154   InstanceKlass* ik = InstanceKlass::cast(klass);
+<a name="2" id="anc2"></a><span class="new"> 155   {</span>
+<span class="new"> 156     RetryableAllocationMark ram(thread, null_on_fail);</span>
+ 157     ik-&gt;check_valid_for_instantiation(true, CHECK);
+<a name="3" id="anc3"></a><span class="new"> 158     oop obj;</span>
+<span class="new"> 159     if (null_on_fail) {</span>
+<span class="new"> 160       if (!ik-&gt;is_initialized()) {</span>
+<span class="new"> 161         // Cannot re-execute class initialization without side effects</span>
+<span class="new"> 162         // so return without attempting the initialization</span>
+<span class="new"> 163         return;</span>
+<span class="new"> 164       }</span>
+<span class="new"> 165     } else {</span>
+ 166       // make sure klass is initialized
+ 167       ik-&gt;initialize(CHECK);
+<a name="4" id="anc4"></a><span class="new"> 168     }</span>
+ 169     // allocate instance and return via TLS
+<a name="5" id="anc5"></a><span class="changed"> 170     obj = ik-&gt;allocate_instance(CHECK);</span>
+ 171     thread-&gt;set_vm_result(obj);
+<a name="6" id="anc6"></a><span class="new"> 172   }</span>
+ 173   JRT_BLOCK_END;
+ 174   SharedRuntime::on_slowpath_allocation_exit(thread);
+ 175 JRT_END
+ 176 
+<a name="7" id="anc7"></a><span class="changed"> 177 JRT_BLOCK_ENTRY(void, JVMCIRuntime::new_array_common(JavaThread* thread, Klass* array_klass, jint length, bool null_on_fail))</span>
+ 178   JRT_BLOCK;
+ 179   // Note: no handle for klass needed since they are not used
+ 180   //       anymore after new_objArray() and no GC can happen before.
+ 181   //       (This may have to change if this code changes!)
+ 182   assert(array_klass-&gt;is_klass(), "not a class");
+ 183   oop obj;
+ 184   if (array_klass-&gt;is_typeArray_klass()) {
+ 185     BasicType elt_type = TypeArrayKlass::cast(array_klass)-&gt;element_type();
+<a name="8" id="anc8"></a><span class="new"> 186     RetryableAllocationMark ram(thread, null_on_fail);</span>
+ 187     obj = oopFactory::new_typeArray(elt_type, length, CHECK);
+ 188   } else {
+ 189     Handle holder(THREAD, array_klass-&gt;klass_holder()); // keep the klass alive
+ 190     Klass* elem_klass = ObjArrayKlass::cast(array_klass)-&gt;element_klass();
+<a name="9" id="anc9"></a><span class="new"> 191     RetryableAllocationMark ram(thread, null_on_fail);</span>
+ 192     obj = oopFactory::new_objArray(elem_klass, length, CHECK);
+ 193   }
+ 194   thread-&gt;set_vm_result(obj);
+ 195   // This is pretty rare but this runtime patch is stressful to deoptimization
+ 196   // if we deoptimize here so force a deopt to stress the path.
+ 197   if (DeoptimizeALot) {
+ 198     static int deopts = 0;
+ 199     // Alternate between deoptimizing and raising an error (which will also cause a deopt)
+ 200     if (deopts++ % 2 == 0) {
+<a name="10" id="anc10"></a><span class="new"> 201       if (null_on_fail) {</span>
+<span class="new"> 202         return;</span>
+<span class="new"> 203       } else {</span>
+ 204         ResourceMark rm(THREAD);
+ 205         THROW(vmSymbols::java_lang_OutOfMemoryError());
+<a name="11" id="anc11"></a><span class="new"> 206       }</span>
+ 207     } else {
+ 208       deopt_caller();
+ 209     }
+ 210   }
+ 211   JRT_BLOCK_END;
+ 212   SharedRuntime::on_slowpath_allocation_exit(thread);
+ 213 JRT_END
+ 214 
+<a name="12" id="anc12"></a><span class="changed"> 215 JRT_ENTRY(void, JVMCIRuntime::new_multi_array_common(JavaThread* thread, Klass* klass, int rank, jint* dims, bool null_on_fail))</span>
+ 216   assert(klass-&gt;is_klass(), "not a class");
+ 217   assert(rank &gt;= 1, "rank must be nonzero");
+ 218   Handle holder(THREAD, klass-&gt;klass_holder()); // keep the klass alive
+<a name="13" id="anc13"></a><span class="new"> 219   RetryableAllocationMark ram(thread, null_on_fail);</span>
+ 220   oop obj = ArrayKlass::cast(klass)-&gt;multi_allocate(rank, dims, CHECK);
+ 221   thread-&gt;set_vm_result(obj);
+ 222 JRT_END
+ 223 
+<a name="14" id="anc14"></a><span class="changed"> 224 JRT_ENTRY(void, JVMCIRuntime::dynamic_new_array_common(JavaThread* thread, oopDesc* element_mirror, jint length, bool null_on_fail))</span>
+<span class="changed"> 225   RetryableAllocationMark ram(thread, null_on_fail);</span>
+ 226   oop obj = Reflection::reflect_new_array(element_mirror, length, CHECK);
+ 227   thread-&gt;set_vm_result(obj);
+ 228 JRT_END
+ 229 
+<a name="15" id="anc15"></a><span class="changed"> 230 JRT_ENTRY(void, JVMCIRuntime::dynamic_new_instance_common(JavaThread* thread, oopDesc* type_mirror, bool null_on_fail))</span>
+ 231   InstanceKlass* klass = InstanceKlass::cast(java_lang_Class::as_Klass(type_mirror));
+ 232 
+ 233   if (klass == NULL) {
+ 234     ResourceMark rm(THREAD);
+ 235     THROW(vmSymbols::java_lang_InstantiationException());
+ 236   }
+<a name="16" id="anc16"></a><span class="new"> 237   RetryableAllocationMark ram(thread, null_on_fail);</span>
+ 238 
+ 239   // Create new instance (the receiver)
+ 240   klass-&gt;check_valid_for_instantiation(false, CHECK);
+ 241 
+<a name="17" id="anc17"></a><span class="new"> 242   if (null_on_fail) {</span>
+<span class="new"> 243     if (!klass-&gt;is_initialized()) {</span>
+<span class="new"> 244       // Cannot re-execute class initialization without side effects</span>
+<span class="new"> 245       // so return without attempting the initialization</span>
+<span class="new"> 246       return;</span>
+<span class="new"> 247     }</span>
+<span class="new"> 248   } else {</span>
+ 249     // Make sure klass gets initialized
+ 250     klass-&gt;initialize(CHECK);
+<a name="18" id="anc18"></a><span class="new"> 251   }</span>
+ 252 
+ 253   oop obj = klass-&gt;allocate_instance(CHECK);
+ 254   thread-&gt;set_vm_result(obj);
+ 255 JRT_END
+ 256 
+ 257 extern void vm_exit(int code);
+ 258 
+ 259 // Enter this method from compiled code handler below. This is where we transition
+ 260 // to VM mode. This is done as a helper routine so that the method called directly
+ 261 // from compiled code does not have to transition to VM. This allows the entry
+ 262 // method to see if the nmethod that we have just looked up a handler for has
+ 263 // been deoptimized while we were in the vm. This simplifies the assembly code
+ 264 // cpu directories.
+ 265 //
+ 266 // We are entering here from exception stub (via the entry method below)
+ 267 // If there is a compiled exception handler in this method, we will continue there;
+ 268 // otherwise we will unwind the stack and continue at the caller of top frame method
+ 269 // Note: we enter in Java using a special JRT wrapper. This wrapper allows us to
+ 270 // control the area where we can allow a safepoint. After we exit the safepoint area we can
+ 271 // check to see if the handler we are going to return is now in a nmethod that has
+ 272 // been deoptimized. If that is the case we return the deopt blob
+ 273 // unpack_with_exception entry instead. This makes life for the exception blob easier
+ 274 // because making that same check and diverting is painful from assembly language.
+ 275 JRT_ENTRY_NO_ASYNC(static address, exception_handler_for_pc_helper(JavaThread* thread, oopDesc* ex, address pc, CompiledMethod*&amp; cm))
+ 276   // Reset method handle flag.
+ 277   thread-&gt;set_is_method_handle_return(false);
+ 278 
+ 279   Handle exception(thread, ex);
+ 280   cm = CodeCache::find_compiled(pc);
+ 281   assert(cm != NULL, "this is not a compiled method");
+ 282   // Adjust the pc as needed/
+ 283   if (cm-&gt;is_deopt_pc(pc)) {
+ 284     RegisterMap map(thread, false);
+ 285     frame exception_frame = thread-&gt;last_frame().sender(&amp;map);
+ 286     // if the frame isn't deopted then pc must not correspond to the caller of last_frame
+ 287     assert(exception_frame.is_deoptimized_frame(), "must be deopted");
+ 288     pc = exception_frame.pc();
+ 289   }
+ 290 #ifdef ASSERT
+ 291   assert(exception.not_null(), "NULL exceptions should be handled by throw_exception");
+ 292   // Check that exception is a subclass of Throwable, otherwise we have a VerifyError
+ 293   if (!(exception-&gt;is_a(SystemDictionary::Throwable_klass()))) {
+ 294     if (ExitVMOnVerifyError) vm_exit(-1);
+ 295     ShouldNotReachHere();
+ 296   }
+ 297 #endif
+ 298 
+ 299   // Check the stack guard pages and reenable them if necessary and there is
+ 300   // enough space on the stack to do so.  Use fast exceptions only if the guard
+ 301   // pages are enabled.
+ 302   bool guard_pages_enabled = thread-&gt;stack_guards_enabled();
+ 303   if (!guard_pages_enabled) guard_pages_enabled = thread-&gt;reguard_stack();
+ 304 
+ 305   if (JvmtiExport::can_post_on_exceptions()) {
+ 306     // To ensure correct notification of exception catches and throws
+ 307     // we have to deoptimize here.  If we attempted to notify the
+ 308     // catches and throws during this exception lookup it's possible
+ 309     // we could deoptimize on the way out of the VM and end back in
+ 310     // the interpreter at the throw site.  This would result in double
+ 311     // notifications since the interpreter would also notify about
+ 312     // these same catches and throws as it unwound the frame.
+ 313 
+ 314     RegisterMap reg_map(thread);
+ 315     frame stub_frame = thread-&gt;last_frame();
+ 316     frame caller_frame = stub_frame.sender(&amp;reg_map);
+ 317 
+ 318     // We don't really want to deoptimize the nmethod itself since we
+ 319     // can actually continue in the exception handler ourselves but I
+ 320     // don't see an easy way to have the desired effect.
+ 321     Deoptimization::deoptimize_frame(thread, caller_frame.id(), Deoptimization::Reason_constraint);
+ 322     assert(caller_is_deopted(), "Must be deoptimized");
+ 323 
+ 324     return SharedRuntime::deopt_blob()-&gt;unpack_with_exception_in_tls();
+ 325   }
+ 326 
+ 327   // ExceptionCache is used only for exceptions at call sites and not for implicit exceptions
+ 328   if (guard_pages_enabled) {
+ 329     address fast_continuation = cm-&gt;handler_for_exception_and_pc(exception, pc);
+ 330     if (fast_continuation != NULL) {
+ 331       // Set flag if return address is a method handle call site.
+ 332       thread-&gt;set_is_method_handle_return(cm-&gt;is_method_handle_return(pc));
+ 333       return fast_continuation;
+ 334     }
+ 335   }
+ 336 
+ 337   // If the stack guard pages are enabled, check whether there is a handler in
+ 338   // the current method.  Otherwise (guard pages disabled), force an unwind and
+ 339   // skip the exception cache update (i.e., just leave continuation==NULL).
+ 340   address continuation = NULL;
+ 341   if (guard_pages_enabled) {
+ 342 
+ 343     // New exception handling mechanism can support inlined methods
+ 344     // with exception handlers since the mappings are from PC to PC
+ 345 
+ 346     // debugging support
+ 347     // tracing
+ 348     if (log_is_enabled(Info, exceptions)) {
+ 349       ResourceMark rm;
+ 350       stringStream tempst;
+ 351       assert(cm-&gt;method() != NULL, "Unexpected null method()");
+ 352       tempst.print("compiled method &lt;%s&gt;\n"
+ 353                    " at PC" INTPTR_FORMAT " for thread " INTPTR_FORMAT,
+ 354                    cm-&gt;method()-&gt;print_value_string(), p2i(pc), p2i(thread));
+ 355       Exceptions::log_exception(exception, tempst);
+ 356     }
+ 357     // for AbortVMOnException flag
+ 358     NOT_PRODUCT(Exceptions::debug_check_abort(exception));
+ 359 
+ 360     // Clear out the exception oop and pc since looking up an
+ 361     // exception handler can cause class loading, which might throw an
+ 362     // exception and those fields are expected to be clear during
+ 363     // normal bytecode execution.
+ 364     thread-&gt;clear_exception_oop_and_pc();
+ 365 
+ 366     bool recursive_exception = false;
+ 367     continuation = SharedRuntime::compute_compiled_exc_handler(cm, pc, exception, false, false, recursive_exception);
+ 368     // If an exception was thrown during exception dispatch, the exception oop may have changed
+ 369     thread-&gt;set_exception_oop(exception());
+ 370     thread-&gt;set_exception_pc(pc);
+ 371 
+ 372     // the exception cache is used only by non-implicit exceptions
+ 373     // Update the exception cache only when there didn't happen
+ 374     // another exception during the computation of the compiled
+ 375     // exception handler. Checking for exception oop equality is not
+ 376     // sufficient because some exceptions are pre-allocated and reused.
+ 377     if (continuation != NULL &amp;&amp; !recursive_exception &amp;&amp; !SharedRuntime::deopt_blob()-&gt;contains(continuation)) {
+ 378       cm-&gt;add_handler_for_exception_and_pc(exception, pc, continuation);
+ 379     }
+ 380   }
+ 381 
+ 382   // Set flag if return address is a method handle call site.
+ 383   thread-&gt;set_is_method_handle_return(cm-&gt;is_method_handle_return(pc));
+ 384 
+ 385   if (log_is_enabled(Info, exceptions)) {
+ 386     ResourceMark rm;
+ 387     log_info(exceptions)("Thread " PTR_FORMAT " continuing at PC " PTR_FORMAT
+ 388                          " for exception thrown at PC " PTR_FORMAT,
+ 389                          p2i(thread), p2i(continuation), p2i(pc));
+ 390   }
+ 391 
+ 392   return continuation;
+ 393 JRT_END
+ 394 
+ 395 // Enter this method from compiled code only if there is a Java exception handler
+ 396 // in the method handling the exception.
+ 397 // We are entering here from exception stub. We don't do a normal VM transition here.
+ 398 // We do it in a helper. This is so we can check to see if the nmethod we have just
+ 399 // searched for an exception handler has been deoptimized in the meantime.
+ 400 address JVMCIRuntime::exception_handler_for_pc(JavaThread* thread) {
+ 401   oop exception = thread-&gt;exception_oop();
+ 402   address pc = thread-&gt;exception_pc();
+ 403   // Still in Java mode
+ 404   DEBUG_ONLY(ResetNoHandleMark rnhm);
+ 405   CompiledMethod* cm = NULL;
+ 406   address continuation = NULL;
+ 407   {
+ 408     // Enter VM mode by calling the helper
+ 409     ResetNoHandleMark rnhm;
+ 410     continuation = exception_handler_for_pc_helper(thread, exception, pc, cm);
+ 411   }
+ 412   // Back in JAVA, use no oops DON'T safepoint
+ 413 
+ 414   // Now check to see if the compiled method we were called from is now deoptimized.
+ 415   // If so we must return to the deopt blob and deoptimize the nmethod
+ 416   if (cm != NULL &amp;&amp; caller_is_deopted()) {
+ 417     continuation = SharedRuntime::deopt_blob()-&gt;unpack_with_exception_in_tls();
+ 418   }
+ 419 
+ 420   assert(continuation != NULL, "no handler found");
+ 421   return continuation;
+ 422 }
+ 423 
+ 424 JRT_ENTRY_NO_ASYNC(void, JVMCIRuntime::monitorenter(JavaThread* thread, oopDesc* obj, BasicLock* lock))
+ 425   IF_TRACE_jvmci_3 {
+ 426     char type[O_BUFLEN];
+ 427     obj-&gt;klass()-&gt;name()-&gt;as_C_string(type, O_BUFLEN);
+ 428     markOop mark = obj-&gt;mark();
+ 429     TRACE_jvmci_3("%s: entered locking slow case with obj=" INTPTR_FORMAT ", type=%s, mark=" INTPTR_FORMAT ", lock=" INTPTR_FORMAT, thread-&gt;name(), p2i(obj), type, p2i(mark), p2i(lock));
+ 430     tty-&gt;flush();
+ 431   }
+ 432 #ifdef ASSERT
+ 433   if (PrintBiasedLockingStatistics) {
+ 434     Atomic::inc(BiasedLocking::slow_path_entry_count_addr());
+ 435   }
+ 436 #endif
+ 437   Handle h_obj(thread, obj);
+ 438   if (UseBiasedLocking) {
+ 439     // Retry fast entry if bias is revoked to avoid unnecessary inflation
+ 440     ObjectSynchronizer::fast_enter(h_obj, lock, true, CHECK);
+ 441   } else {
+ 442     if (JVMCIUseFastLocking) {
+ 443       // When using fast locking, the compiled code has already tried the fast case
+ 444       ObjectSynchronizer::slow_enter(h_obj, lock, THREAD);
+ 445     } else {
+ 446       ObjectSynchronizer::fast_enter(h_obj, lock, false, THREAD);
+ 447     }
+ 448   }
+ 449   TRACE_jvmci_3("%s: exiting locking slow with obj=" INTPTR_FORMAT, thread-&gt;name(), p2i(obj));
+ 450 JRT_END
+ 451 
+ 452 JRT_LEAF(void, JVMCIRuntime::monitorexit(JavaThread* thread, oopDesc* obj, BasicLock* lock))
+ 453   assert(thread == JavaThread::current(), "threads must correspond");
+ 454   assert(thread-&gt;last_Java_sp(), "last_Java_sp must be set");
+ 455   // monitorexit is non-blocking (leaf routine) =&gt; no exceptions can be thrown
+ 456   EXCEPTION_MARK;
+ 457 
+ 458 #ifdef DEBUG
+ 459   if (!oopDesc::is_oop(obj)) {
+ 460     ResetNoHandleMark rhm;
+ 461     nmethod* method = thread-&gt;last_frame().cb()-&gt;as_nmethod_or_null();
+ 462     if (method != NULL) {
+ 463       tty-&gt;print_cr("ERROR in monitorexit in method %s wrong obj " INTPTR_FORMAT, method-&gt;name(), p2i(obj));
+ 464     }
+ 465     thread-&gt;print_stack_on(tty);
+ 466     assert(false, "invalid lock object pointer dected");
+ 467   }
+ 468 #endif
+ 469 
+ 470   if (JVMCIUseFastLocking) {
+ 471     // When using fast locking, the compiled code has already tried the fast case
+ 472     ObjectSynchronizer::slow_exit(obj, lock, THREAD);
+ 473   } else {
+ 474     ObjectSynchronizer::fast_exit(obj, lock, THREAD);
+ 475   }
+ 476   IF_TRACE_jvmci_3 {
+ 477     char type[O_BUFLEN];
+ 478     obj-&gt;klass()-&gt;name()-&gt;as_C_string(type, O_BUFLEN);
+ 479     TRACE_jvmci_3("%s: exited locking slow case with obj=" INTPTR_FORMAT ", type=%s, mark=" INTPTR_FORMAT ", lock=" INTPTR_FORMAT, thread-&gt;name(), p2i(obj), type, p2i(obj-&gt;mark()), p2i(lock));
+ 480     tty-&gt;flush();
+ 481   }
+ 482 JRT_END
+ 483 
+ 484 // Object.notify() fast path, caller does slow path
+ 485 JRT_LEAF(jboolean, JVMCIRuntime::object_notify(JavaThread *thread, oopDesc* obj))
+ 486 
+ 487   // Very few notify/notifyAll operations find any threads on the waitset, so
+ 488   // the dominant fast-path is to simply return.
+ 489   // Relatedly, it's critical that notify/notifyAll be fast in order to
+ 490   // reduce lock hold times.
+ 491   if (!SafepointSynchronize::is_synchronizing()) {
+ 492     if (ObjectSynchronizer::quick_notify(obj, thread, false)) {
+ 493       return true;
+ 494     }
+ 495   }
+ 496   return false; // caller must perform slow path
+ 497 
+ 498 JRT_END
+ 499 
+ 500 // Object.notifyAll() fast path, caller does slow path
+ 501 JRT_LEAF(jboolean, JVMCIRuntime::object_notifyAll(JavaThread *thread, oopDesc* obj))
+ 502 
+ 503   if (!SafepointSynchronize::is_synchronizing() ) {
+ 504     if (ObjectSynchronizer::quick_notify(obj, thread, true)) {
+ 505       return true;
+ 506     }
+ 507   }
+ 508   return false; // caller must perform slow path
+ 509 
+ 510 JRT_END
+ 511 
+ 512 JRT_ENTRY(void, JVMCIRuntime::throw_and_post_jvmti_exception(JavaThread* thread, const char* exception, const char* message))
+ 513   TempNewSymbol symbol = SymbolTable::new_symbol(exception, CHECK);
+ 514   SharedRuntime::throw_and_post_jvmti_exception(thread, symbol, message);
+ 515 JRT_END
+ 516 
+ 517 JRT_ENTRY(void, JVMCIRuntime::throw_klass_external_name_exception(JavaThread* thread, const char* exception, Klass* klass))
+ 518   ResourceMark rm(thread);
+ 519   TempNewSymbol symbol = SymbolTable::new_symbol(exception, CHECK);
+ 520   SharedRuntime::throw_and_post_jvmti_exception(thread, symbol, klass-&gt;external_name());
+ 521 JRT_END
+ 522 
+ 523 JRT_ENTRY(void, JVMCIRuntime::throw_class_cast_exception(JavaThread* thread, const char* exception, Klass* caster_klass, Klass* target_klass))
+ 524   ResourceMark rm(thread);
+ 525   const char* message = SharedRuntime::generate_class_cast_message(caster_klass, target_klass);
+ 526   TempNewSymbol symbol = SymbolTable::new_symbol(exception, CHECK);
+ 527   SharedRuntime::throw_and_post_jvmti_exception(thread, symbol, message);
+ 528 JRT_END
+ 529 
+ 530 JRT_LEAF(void, JVMCIRuntime::log_object(JavaThread* thread, oopDesc* obj, bool as_string, bool newline))
+ 531   ttyLocker ttyl;
+ 532 
+ 533   if (obj == NULL) {
+ 534     tty-&gt;print("NULL");
+ 535   } else if (oopDesc::is_oop_or_null(obj, true) &amp;&amp; (!as_string || !java_lang_String::is_instance(obj))) {
+ 536     if (oopDesc::is_oop_or_null(obj, true)) {
+ 537       char buf[O_BUFLEN];
+ 538       tty-&gt;print("%s@" INTPTR_FORMAT, obj-&gt;klass()-&gt;name()-&gt;as_C_string(buf, O_BUFLEN), p2i(obj));
+ 539     } else {
+ 540       tty-&gt;print(INTPTR_FORMAT, p2i(obj));
+ 541     }
+ 542   } else {
+ 543     ResourceMark rm;
+ 544     assert(obj != NULL &amp;&amp; java_lang_String::is_instance(obj), "must be");
+ 545     char *buf = java_lang_String::as_utf8_string(obj);
+ 546     tty-&gt;print_raw(buf);
+ 547   }
+ 548   if (newline) {
+ 549     tty-&gt;cr();
+ 550   }
+ 551 JRT_END
+ 552 
+ 553 #if INCLUDE_G1GC
+ 554 
+ 555 JRT_LEAF(void, JVMCIRuntime::write_barrier_pre(JavaThread* thread, oopDesc* obj))
+ 556   G1ThreadLocalData::satb_mark_queue(thread).enqueue(obj);
+ 557 JRT_END
+ 558 
+ 559 JRT_LEAF(void, JVMCIRuntime::write_barrier_post(JavaThread* thread, void* card_addr))
+ 560   G1ThreadLocalData::dirty_card_queue(thread).enqueue(card_addr);
+ 561 JRT_END
+ 562 
+ 563 #endif // INCLUDE_G1GC
+ 564 
+ 565 JRT_LEAF(jboolean, JVMCIRuntime::validate_object(JavaThread* thread, oopDesc* parent, oopDesc* child))
+ 566   bool ret = true;
+ 567   if(!Universe::heap()-&gt;is_in_closed_subset(parent)) {
+ 568     tty-&gt;print_cr("Parent Object " INTPTR_FORMAT " not in heap", p2i(parent));
+ 569     parent-&gt;print();
+ 570     ret=false;
+ 571   }
+ 572   if(!Universe::heap()-&gt;is_in_closed_subset(child)) {
+ 573     tty-&gt;print_cr("Child Object " INTPTR_FORMAT " not in heap", p2i(child));
+ 574     child-&gt;print();
+ 575     ret=false;
+ 576   }
+ 577   return (jint)ret;
+ 578 JRT_END
+ 579 
+ 580 JRT_ENTRY(void, JVMCIRuntime::vm_error(JavaThread* thread, jlong where, jlong format, jlong value))
+ 581   ResourceMark rm;
+ 582   const char *error_msg = where == 0L ? "&lt;internal JVMCI error&gt;" : (char*) (address) where;
+ 583   char *detail_msg = NULL;
+ 584   if (format != 0L) {
+ 585     const char* buf = (char*) (address) format;
+ 586     size_t detail_msg_length = strlen(buf) * 2;
+ 587     detail_msg = (char *) NEW_RESOURCE_ARRAY(u_char, detail_msg_length);
+ 588     jio_snprintf(detail_msg, detail_msg_length, buf, value);
+ 589     report_vm_error(__FILE__, __LINE__, error_msg, "%s", detail_msg);
+ 590   } else {
+ 591     report_vm_error(__FILE__, __LINE__, error_msg);
+ 592   }
+ 593 JRT_END
+ 594 
+ 595 JRT_LEAF(oopDesc*, JVMCIRuntime::load_and_clear_exception(JavaThread* thread))
+ 596   oop exception = thread-&gt;exception_oop();
+ 597   assert(exception != NULL, "npe");
+ 598   thread-&gt;set_exception_oop(NULL);
+ 599   thread-&gt;set_exception_pc(0);
+ 600   return exception;
+ 601 JRT_END
+ 602 
+ 603 PRAGMA_DIAG_PUSH
+ 604 PRAGMA_FORMAT_NONLITERAL_IGNORED
+ 605 JRT_LEAF(void, JVMCIRuntime::log_printf(JavaThread* thread, const char* format, jlong v1, jlong v2, jlong v3))
+ 606   ResourceMark rm;
+ 607   tty-&gt;print(format, v1, v2, v3);
+ 608 JRT_END
+ 609 PRAGMA_DIAG_POP
+ 610 
+ 611 static void decipher(jlong v, bool ignoreZero) {
+ 612   if (v != 0 || !ignoreZero) {
+ 613     void* p = (void *)(address) v;
+ 614     CodeBlob* cb = CodeCache::find_blob(p);
+ 615     if (cb) {
+ 616       if (cb-&gt;is_nmethod()) {
+ 617         char buf[O_BUFLEN];
+ 618         tty-&gt;print("%s [" INTPTR_FORMAT "+" JLONG_FORMAT "]", cb-&gt;as_nmethod_or_null()-&gt;method()-&gt;name_and_sig_as_C_string(buf, O_BUFLEN), p2i(cb-&gt;code_begin()), (jlong)((address)v - cb-&gt;code_begin()));
+ 619         return;
+ 620       }
+ 621       cb-&gt;print_value_on(tty);
+ 622       return;
+ 623     }
+ 624     if (Universe::heap()-&gt;is_in(p)) {
+ 625       oop obj = oop(p);
+ 626       obj-&gt;print_value_on(tty);
+ 627       return;
+ 628     }
+ 629     tty-&gt;print(INTPTR_FORMAT " [long: " JLONG_FORMAT ", double %lf, char %c]",p2i((void *)v), (jlong)v, (jdouble)v, (char)v);
+ 630   }
+ 631 }
+ 632 
+ 633 PRAGMA_DIAG_PUSH
+ 634 PRAGMA_FORMAT_NONLITERAL_IGNORED
+ 635 JRT_LEAF(void, JVMCIRuntime::vm_message(jboolean vmError, jlong format, jlong v1, jlong v2, jlong v3))
+ 636   ResourceMark rm;
+ 637   const char *buf = (const char*) (address) format;
+ 638   if (vmError) {
+ 639     if (buf != NULL) {
+ 640       fatal(buf, v1, v2, v3);
+ 641     } else {
+ 642       fatal("&lt;anonymous error&gt;");
+ 643     }
+ 644   } else if (buf != NULL) {
+ 645     tty-&gt;print(buf, v1, v2, v3);
+ 646   } else {
+ 647     assert(v2 == 0, "v2 != 0");
+ 648     assert(v3 == 0, "v3 != 0");
+ 649     decipher(v1, false);
+ 650   }
+ 651 JRT_END
+ 652 PRAGMA_DIAG_POP
+ 653 
+ 654 JRT_LEAF(void, JVMCIRuntime::log_primitive(JavaThread* thread, jchar typeChar, jlong value, jboolean newline))
+ 655   union {
+ 656       jlong l;
+ 657       jdouble d;
+ 658       jfloat f;
+ 659   } uu;
+ 660   uu.l = value;
+ 661   switch (typeChar) {
+ 662     case 'Z': tty-&gt;print(value == 0 ? "false" : "true"); break;
+ 663     case 'B': tty-&gt;print("%d", (jbyte) value); break;
+ 664     case 'C': tty-&gt;print("%c", (jchar) value); break;
+ 665     case 'S': tty-&gt;print("%d", (jshort) value); break;
+ 666     case 'I': tty-&gt;print("%d", (jint) value); break;
+ 667     case 'F': tty-&gt;print("%f", uu.f); break;
+ 668     case 'J': tty-&gt;print(JLONG_FORMAT, value); break;
+ 669     case 'D': tty-&gt;print("%lf", uu.d); break;
+ 670     default: assert(false, "unknown typeChar"); break;
+ 671   }
+ 672   if (newline) {
+ 673     tty-&gt;cr();
+ 674   }
+ 675 JRT_END
+ 676 
+ 677 JRT_ENTRY(jint, JVMCIRuntime::identity_hash_code(JavaThread* thread, oopDesc* obj))
+ 678   return (jint) obj-&gt;identity_hash();
+ 679 JRT_END
+ 680 
+ 681 JRT_ENTRY(jboolean, JVMCIRuntime::thread_is_interrupted(JavaThread* thread, oopDesc* receiver, jboolean clear_interrupted))
+ 682   Handle receiverHandle(thread, receiver);
+ 683   // A nested ThreadsListHandle may require the Threads_lock which
+ 684   // requires thread_in_vm which is why this method cannot be JRT_LEAF.
+ 685   ThreadsListHandle tlh;
+ 686 
+ 687   JavaThread* receiverThread = java_lang_Thread::thread(receiverHandle());
+ 688   if (receiverThread == NULL || (EnableThreadSMRExtraValidityChecks &amp;&amp; !tlh.includes(receiverThread))) {
+ 689     // The other thread may exit during this process, which is ok so return false.
+ 690     return JNI_FALSE;
+ 691   } else {
+ 692     return (jint) Thread::is_interrupted(receiverThread, clear_interrupted != 0);
+ 693   }
+ 694 JRT_END
+ 695 
+ 696 JRT_ENTRY(int, JVMCIRuntime::test_deoptimize_call_int(JavaThread* thread, int value))
+ 697   deopt_caller();
+ 698   return value;
+ 699 JRT_END
+ 700 
+ 701 void JVMCIRuntime::force_initialization(TRAPS) {
+ 702   JVMCIRuntime::initialize_well_known_classes(CHECK);
+ 703 
+ 704   ResourceMark rm;
+ 705   TempNewSymbol getCompiler = SymbolTable::new_symbol("getCompiler", CHECK);
+ 706   TempNewSymbol sig = SymbolTable::new_symbol("()Ljdk/vm/ci/runtime/JVMCICompiler;", CHECK);
+ 707   Handle jvmciRuntime = JVMCIRuntime::get_HotSpotJVMCIRuntime(CHECK);
+ 708   JavaValue result(T_OBJECT);
+ 709   JavaCalls::call_virtual(&amp;result, jvmciRuntime, HotSpotJVMCIRuntime::klass(), getCompiler, sig, CHECK);
+ 710 }
+ 711 
+ 712 // private static JVMCIRuntime JVMCI.initializeRuntime()
+ 713 JVM_ENTRY(jobject, JVM_GetJVMCIRuntime(JNIEnv *env, jclass c))
+ 714   if (!EnableJVMCI) {
+ 715     THROW_MSG_NULL(vmSymbols::java_lang_InternalError(), "JVMCI is not enabled")
+ 716   }
+ 717   JVMCIRuntime::initialize_HotSpotJVMCIRuntime(CHECK_NULL);
+ 718   jobject ret = JVMCIRuntime::get_HotSpotJVMCIRuntime_jobject(CHECK_NULL);
+ 719   return ret;
+ 720 JVM_END
+ 721 
+ 722 Handle JVMCIRuntime::callStatic(const char* className, const char* methodName, const char* signature, JavaCallArguments* args, TRAPS) {
+ 723   TempNewSymbol name = SymbolTable::new_symbol(className, CHECK_(Handle()));
+ 724   Klass* klass = SystemDictionary::resolve_or_fail(name, true, CHECK_(Handle()));
+ 725   TempNewSymbol runtime = SymbolTable::new_symbol(methodName, CHECK_(Handle()));
+ 726   TempNewSymbol sig = SymbolTable::new_symbol(signature, CHECK_(Handle()));
+ 727   JavaValue result(T_OBJECT);
+ 728   if (args == NULL) {
+ 729     JavaCalls::call_static(&amp;result, klass, runtime, sig, CHECK_(Handle()));
+ 730   } else {
+ 731     JavaCalls::call_static(&amp;result, klass, runtime, sig, args, CHECK_(Handle()));
+ 732   }
+ 733   return Handle(THREAD, (oop)result.get_jobject());
+ 734 }
+ 735 
+ 736 Handle JVMCIRuntime::get_HotSpotJVMCIRuntime(TRAPS) {
+ 737   initialize_JVMCI(CHECK_(Handle()));
+ 738   return Handle(THREAD, JNIHandles::resolve_non_null(_HotSpotJVMCIRuntime_instance));
+ 739 }
+ 740 
+ 741 void JVMCIRuntime::initialize_HotSpotJVMCIRuntime(TRAPS) {
+ 742   guarantee(!_HotSpotJVMCIRuntime_initialized, "cannot reinitialize HotSpotJVMCIRuntime");
+ 743   JVMCIRuntime::initialize_well_known_classes(CHECK);
+ 744   // This should only be called in the context of the JVMCI class being initialized
+ 745   InstanceKlass* klass = SystemDictionary::JVMCI_klass();
+ 746   guarantee(klass-&gt;is_being_initialized() &amp;&amp; klass-&gt;is_reentrant_initialization(THREAD),
+ 747          "HotSpotJVMCIRuntime initialization should only be triggered through JVMCI initialization");
+ 748 
+ 749   Handle result = callStatic("jdk/vm/ci/hotspot/HotSpotJVMCIRuntime",
+ 750                              "runtime",
+ 751                              "()Ljdk/vm/ci/hotspot/HotSpotJVMCIRuntime;", NULL, CHECK);
+ 752   int adjustment = HotSpotJVMCIRuntime::compilationLevelAdjustment(result);
+ 753   assert(adjustment &gt;= JVMCIRuntime::none &amp;&amp;
+ 754          adjustment &lt;= JVMCIRuntime::by_full_signature,
+ 755          "compilation level adjustment out of bounds");
+ 756   _comp_level_adjustment = (CompLevelAdjustment) adjustment;
+ 757   _HotSpotJVMCIRuntime_initialized = true;
+ 758   _HotSpotJVMCIRuntime_instance = JNIHandles::make_global(result);
+ 759 }
+ 760 
+ 761 void JVMCIRuntime::initialize_JVMCI(TRAPS) {
+ 762   if (JNIHandles::resolve(_HotSpotJVMCIRuntime_instance) == NULL) {
+ 763     callStatic("jdk/vm/ci/runtime/JVMCI",
+ 764                "getRuntime",
+ 765                "()Ljdk/vm/ci/runtime/JVMCIRuntime;", NULL, CHECK);
+ 766   }
+ 767   assert(_HotSpotJVMCIRuntime_initialized == true, "what?");
+ 768 }
+ 769 
+ 770 bool JVMCIRuntime::can_initialize_JVMCI() {
+ 771   // Initializing JVMCI requires the module system to be initialized past phase 3.
+ 772   // The JVMCI API itself isn't available until phase 2 and ServiceLoader (which
+ 773   // JVMCI initialization requires) isn't usable until after phase 3. Testing
+ 774   // whether the system loader is initialized satisfies all these invariants.
+ 775   if (SystemDictionary::java_system_loader() == NULL) {
+ 776     return false;
+ 777   }
+ 778   assert(Universe::is_module_initialized(), "must be");
+ 779   return true;
+ 780 }
+ 781 
+ 782 void JVMCIRuntime::initialize_well_known_classes(TRAPS) {
+ 783   if (JVMCIRuntime::_well_known_classes_initialized == false) {
+ 784     guarantee(can_initialize_JVMCI(), "VM is not yet sufficiently booted to initialize JVMCI");
+ 785     SystemDictionary::WKID scan = SystemDictionary::FIRST_JVMCI_WKID;
+ 786     SystemDictionary::resolve_wk_klasses_through(SystemDictionary::LAST_JVMCI_WKID, scan, CHECK);
+ 787     JVMCIJavaClasses::compute_offsets(CHECK);
+ 788     JVMCIRuntime::_well_known_classes_initialized = true;
+ 789   }
+ 790 }
+ 791 
+ 792 void JVMCIRuntime::metadata_do(void f(Metadata*)) {
+ 793   // For simplicity, the existence of HotSpotJVMCIMetaAccessContext in
+ 794   // the SystemDictionary well known classes should ensure the other
+ 795   // classes have already been loaded, so make sure their order in the
+ 796   // table enforces that.
+ 797   assert(SystemDictionary::WK_KLASS_ENUM_NAME(jdk_vm_ci_hotspot_HotSpotResolvedJavaMethodImpl) &lt;
+ 798          SystemDictionary::WK_KLASS_ENUM_NAME(jdk_vm_ci_hotspot_HotSpotJVMCIMetaAccessContext), "must be loaded earlier");
+ 799   assert(SystemDictionary::WK_KLASS_ENUM_NAME(jdk_vm_ci_hotspot_HotSpotConstantPool) &lt;
+ 800          SystemDictionary::WK_KLASS_ENUM_NAME(jdk_vm_ci_hotspot_HotSpotJVMCIMetaAccessContext), "must be loaded earlier");
+ 801   assert(SystemDictionary::WK_KLASS_ENUM_NAME(jdk_vm_ci_hotspot_HotSpotResolvedObjectTypeImpl) &lt;
+ 802          SystemDictionary::WK_KLASS_ENUM_NAME(jdk_vm_ci_hotspot_HotSpotJVMCIMetaAccessContext), "must be loaded earlier");
+ 803 
+ 804   if (HotSpotJVMCIMetaAccessContext::klass() == NULL ||
+ 805       !HotSpotJVMCIMetaAccessContext::klass()-&gt;is_linked()) {
+ 806     // Nothing could be registered yet
+ 807     return;
+ 808   }
+ 809 
+ 810   // WeakReference&lt;HotSpotJVMCIMetaAccessContext&gt;[]
+ 811   objArrayOop allContexts = HotSpotJVMCIMetaAccessContext::allContexts();
+ 812   if (allContexts == NULL) {
+ 813     return;
+ 814   }
+ 815 
+ 816   // These must be loaded at this point but the linking state doesn't matter.
+ 817   assert(SystemDictionary::HotSpotResolvedJavaMethodImpl_klass() != NULL, "must be loaded");
+ 818   assert(SystemDictionary::HotSpotConstantPool_klass() != NULL, "must be loaded");
+ 819   assert(SystemDictionary::HotSpotResolvedObjectTypeImpl_klass() != NULL, "must be loaded");
+ 820 
+ 821   for (int i = 0; i &lt; allContexts-&gt;length(); i++) {
+ 822     oop ref = allContexts-&gt;obj_at(i);
+ 823     if (ref != NULL) {
+ 824       oop referent = java_lang_ref_Reference::referent(ref);
+ 825       if (referent != NULL) {
+ 826         // Chunked Object[] with last element pointing to next chunk
+ 827         objArrayOop metadataRoots = HotSpotJVMCIMetaAccessContext::metadataRoots(referent);
+ 828         while (metadataRoots != NULL) {
+ 829           for (int typeIndex = 0; typeIndex &lt; metadataRoots-&gt;length() - 1; typeIndex++) {
+ 830             oop reference = metadataRoots-&gt;obj_at(typeIndex);
+ 831             if (reference == NULL) {
+ 832               continue;
+ 833             }
+ 834             oop metadataRoot = java_lang_ref_Reference::referent(reference);
+ 835             if (metadataRoot == NULL) {
+ 836               continue;
+ 837             }
+ 838             if (metadataRoot-&gt;is_a(SystemDictionary::HotSpotResolvedJavaMethodImpl_klass())) {
+ 839               Method* method = CompilerToVM::asMethod(metadataRoot);
+ 840               f(method);
+ 841             } else if (metadataRoot-&gt;is_a(SystemDictionary::HotSpotConstantPool_klass())) {
+ 842               ConstantPool* constantPool = CompilerToVM::asConstantPool(metadataRoot);
+ 843               f(constantPool);
+ 844             } else if (metadataRoot-&gt;is_a(SystemDictionary::HotSpotResolvedObjectTypeImpl_klass())) {
+ 845               Klass* klass = CompilerToVM::asKlass(metadataRoot);
+ 846               f(klass);
+ 847             } else {
+ 848               metadataRoot-&gt;print();
+ 849               ShouldNotReachHere();
+ 850             }
+ 851           }
+ 852           metadataRoots = (objArrayOop)metadataRoots-&gt;obj_at(metadataRoots-&gt;length() - 1);
+ 853           assert(metadataRoots == NULL || metadataRoots-&gt;is_objArray(), "wrong type");
+ 854         }
+ 855       }
+ 856     }
+ 857   }
+ 858 }
+ 859 
+ 860 // private static void CompilerToVM.registerNatives()
+ 861 JVM_ENTRY(void, JVM_RegisterJVMCINatives(JNIEnv *env, jclass c2vmClass))
+ 862   if (!EnableJVMCI) {
+ 863     THROW_MSG(vmSymbols::java_lang_InternalError(), "JVMCI is not enabled");
+ 864   }
+ 865 
+ 866 #ifdef _LP64
+ 867 #ifndef SPARC
+ 868   uintptr_t heap_end = (uintptr_t) Universe::heap()-&gt;reserved_region().end();
+ 869   uintptr_t allocation_end = heap_end + ((uintptr_t)16) * 1024 * 1024 * 1024;
+ 870   guarantee(heap_end &lt; allocation_end, "heap end too close to end of address space (might lead to erroneous TLAB allocations)");
+ 871 #endif // !SPARC
+ 872 #else
+ 873   fatal("check TLAB allocation code for address space conflicts");
+ 874 #endif // _LP64
+ 875 
+ 876   JVMCIRuntime::initialize_well_known_classes(CHECK);
+ 877 
+ 878   {
+ 879     ThreadToNativeFromVM trans(thread);
+ 880     env-&gt;RegisterNatives(c2vmClass, CompilerToVM::methods, CompilerToVM::methods_count());
+ 881   }
+ 882 JVM_END
+ 883 
+ 884 void JVMCIRuntime::shutdown(TRAPS) {
+ 885   if (_HotSpotJVMCIRuntime_instance != NULL) {
+ 886     _shutdown_called = true;
+ 887     HandleMark hm(THREAD);
+ 888     Handle receiver = get_HotSpotJVMCIRuntime(CHECK);
+ 889     JavaValue result(T_VOID);
+ 890     JavaCallArguments args;
+ 891     args.push_oop(receiver);
+ 892     JavaCalls::call_special(&amp;result, receiver-&gt;klass(), vmSymbols::shutdown_method_name(), vmSymbols::void_method_signature(), &amp;args, CHECK);
+ 893   }
+ 894 }
+ 895 
+ 896 CompLevel JVMCIRuntime::adjust_comp_level_inner(const methodHandle&amp; method, bool is_osr, CompLevel level, JavaThread* thread) {
+ 897   JVMCICompiler* compiler = JVMCICompiler::instance(false, thread);
+ 898   if (compiler != NULL &amp;&amp; compiler-&gt;is_bootstrapping()) {
+ 899     return level;
+ 900   }
+ 901   if (!is_HotSpotJVMCIRuntime_initialized() || _comp_level_adjustment == JVMCIRuntime::none) {
+ 902     // JVMCI cannot participate in compilation scheduling until
+ 903     // JVMCI is initialized and indicates it wants to participate.
+ 904     return level;
+ 905   }
+ 906 
+ 907 #define CHECK_RETURN THREAD); \
+ 908   if (HAS_PENDING_EXCEPTION) { \
+ 909     Handle exception(THREAD, PENDING_EXCEPTION); \
+ 910     CLEAR_PENDING_EXCEPTION; \
+ 911   \
+ 912     if (exception-&gt;is_a(SystemDictionary::ThreadDeath_klass())) { \
+ 913       /* In the special case of ThreadDeath, we need to reset the */ \
+ 914       /* pending async exception so that it is propagated.        */ \
+ 915       thread-&gt;set_pending_async_exception(exception()); \
+ 916       return level; \
+ 917     } \
+ 918     tty-&gt;print("Uncaught exception while adjusting compilation level: "); \
+ 919     java_lang_Throwable::print(exception(), tty); \
+ 920     tty-&gt;cr(); \
+ 921     java_lang_Throwable::print_stack_trace(exception, tty); \
+ 922     if (HAS_PENDING_EXCEPTION) { \
+ 923       CLEAR_PENDING_EXCEPTION; \
+ 924     } \
+ 925     return level; \
+ 926   } \
+ 927   (void)(0
+ 928 
+ 929 
+ 930   Thread* THREAD = thread;
+ 931   HandleMark hm;
+ 932   Handle receiver = JVMCIRuntime::get_HotSpotJVMCIRuntime(CHECK_RETURN);
+ 933   Handle name;
+ 934   Handle sig;
+ 935   if (_comp_level_adjustment == JVMCIRuntime::by_full_signature) {
+ 936     name = java_lang_String::create_from_symbol(method-&gt;name(), CHECK_RETURN);
+ 937     sig = java_lang_String::create_from_symbol(method-&gt;signature(), CHECK_RETURN);
+ 938   } else {
+ 939     name = Handle();
+ 940     sig = Handle();
+ 941   }
+ 942 
+ 943   JavaValue result(T_INT);
+ 944   JavaCallArguments args;
+ 945   args.push_oop(receiver);
+ 946   args.push_oop(Handle(THREAD, method-&gt;method_holder()-&gt;java_mirror()));
+ 947   args.push_oop(name);
+ 948   args.push_oop(sig);
+ 949   args.push_int(is_osr);
+ 950   args.push_int(level);
+ 951   JavaCalls::call_special(&amp;result, receiver-&gt;klass(), vmSymbols::adjustCompilationLevel_name(),
+ 952                           vmSymbols::adjustCompilationLevel_signature(), &amp;args, CHECK_RETURN);
+ 953 
+ 954   int comp_level = result.get_jint();
+ 955   if (comp_level &lt; CompLevel_none || comp_level &gt; CompLevel_full_optimization) {
+ 956     assert(false, "compilation level out of bounds");
+ 957     return level;
+ 958   }
+ 959   return (CompLevel) comp_level;
+ 960 #undef CHECK_RETURN
+ 961 }
+ 962 
+ 963 void JVMCIRuntime::bootstrap_finished(TRAPS) {
+ 964   HandleMark hm(THREAD);
+ 965   Handle receiver = get_HotSpotJVMCIRuntime(CHECK);
+ 966   JavaValue result(T_VOID);
+ 967   JavaCallArguments args;
+ 968   args.push_oop(receiver);
+ 969   JavaCalls::call_special(&amp;result, receiver-&gt;klass(), vmSymbols::bootstrapFinished_method_name(), vmSymbols::void_method_signature(), &amp;args, CHECK);
+ 970 }
+<a name="19" id="anc19"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="19" type="hidden" /></form></body></html>

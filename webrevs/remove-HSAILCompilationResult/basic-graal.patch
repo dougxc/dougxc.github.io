@@ -1,0 +1,518 @@
+--- old/graal/com.oracle.graal.compiler.hsail.test.infra/src/com/oracle/graal/compiler/hsail/test/infra/GraalKernelTester.java	2014-01-27 16:21:35.580703090 +0100
++++ new/graal/com.oracle.graal.compiler.hsail.test.infra/src/com/oracle/graal/compiler/hsail/test/infra/GraalKernelTester.java	2014-01-27 16:21:35.524703090 +0100
+@@ -27,33 +27,46 @@
+  * This class extends KernelTester and provides a base class
+  * for which the HSAIL code comes from the Graal compiler.
+  */
++import static com.oracle.graal.hotspot.HotSpotGraalRuntime.*;
+ import static com.oracle.graal.phases.GraalOptions.*;
+ 
+ import java.io.*;
+ import java.lang.reflect.*;
+ 
++import org.junit.*;
++
+ import com.oracle.graal.api.code.*;
++import com.oracle.graal.api.meta.*;
++import com.oracle.graal.compiler.target.*;
+ import com.oracle.graal.debug.*;
+ import com.oracle.graal.graph.*;
+ import com.oracle.graal.hotspot.hsail.*;
+ import com.oracle.graal.hotspot.meta.*;
++import com.oracle.graal.hsail.*;
+ import com.oracle.graal.options.*;
+-
+-import com.oracle.graal.phases.GraalOptions;
+-import static com.oracle.graal.options.OptionValue.OverrideScope;
++import com.oracle.graal.options.OptionValue.OverrideScope;
++import com.oracle.graal.phases.*;
+ 
+ public abstract class GraalKernelTester extends KernelTester {
+ 
+-    HSAILCompilationResult hsailCompResult;
++    private static HSAILHotSpotBackend getHSAILBackend() {
++        Backend backend = runtime().getBackend(HSAIL.class);
++        Assume.assumeTrue(backend instanceof HSAILHotSpotBackend);
++        return (HSAILHotSpotBackend) backend;
++    }
++
++    ExternalCompilationResult hsailCode;
+     private boolean showHsailSource = false;
+     private boolean saveInFile = false;
+ 
+     @Override
+     public String getCompiledHSAILSource(Method method) {
+-        if (hsailCompResult == null) {
+-            hsailCompResult = HSAILCompilationResult.getHSAILCompilationResult(method);
++        if (hsailCode == null) {
++            HSAILHotSpotBackend backend = getHSAILBackend();
++            ResolvedJavaMethod javaMethod = backend.getProviders().getMetaAccess().lookupJavaMethod(method);
++            hsailCode = backend.compileKernel(javaMethod, false);
+         }
+-        String hsailSource = hsailCompResult.getHSAILCode();
++        String hsailSource = hsailCode.getCodeString();
+         if (showHsailSource) {
+             logger.severe(hsailSource);
+         }
+@@ -86,8 +99,8 @@
+ 
+     @Override
+     protected void dispatchKernelOkra(int range, Object... args) {
+-        HSAILCompilationResult hcr = HSAILCompilationResult.getHSAILCompilationResult(testMethod);
+-        HotSpotNmethod code = (HotSpotNmethod) hcr.getInstalledCode();
++        HSAILHotSpotBackend backend = getHSAILBackend();
++        HotSpotNmethod code = backend.compileAndInstallKernel(testMethod);
+ 
+         if (code != null) {
+             try {
+--- old/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/BasicHSAILTest.java	2014-01-27 16:21:35.788703090 +0100
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/BasicHSAILTest.java	2014-01-27 16:21:35.728703090 +0100
+@@ -22,14 +22,17 @@
+  */
+ package com.oracle.graal.compiler.hsail.test;
+ 
++import java.lang.reflect.*;
++
+ import org.junit.*;
+ 
++import com.oracle.graal.api.code.*;
++import com.oracle.graal.compiler.target.*;
+ import com.oracle.graal.compiler.test.*;
+ import com.oracle.graal.debug.*;
+ import com.oracle.graal.debug.Debug.Scope;
+ import com.oracle.graal.hotspot.hsail.*;
+ import com.oracle.graal.hsail.*;
+-import com.oracle.graal.nodes.*;
+ 
+ /**
+  * Test class for small Java methods compiled to HSAIL kernels.
+@@ -332,11 +335,18 @@
+         out[gid] = val;
+     }
+ 
++    @Override
++    protected HSAILHotSpotBackend getBackend() {
++        Backend backend = super.getBackend();
++        Assume.assumeTrue(backend instanceof HSAILHotSpotBackend);
++        return (HSAILHotSpotBackend) backend;
++    }
++
+     private void test(final String snippet) {
+         try (Scope s = Debug.scope("HSAILCodeGen")) {
+-            StructuredGraph graph = parse(snippet);
+-            HSAILCompilationResult compResult = HSAILCompilationResult.getHSAILCompilationResult(graph);
+-            Debug.log("HSAIL code generated for %s:%n%s", snippet, compResult.getHSAILCode());
++            Method method = getMethod(snippet);
++            ExternalCompilationResult hsailCode = getBackend().compileKernel(getMetaAccess().lookupJavaMethod(method), false);
++            Debug.log("HSAIL code generated for %s:%n%s", snippet, hsailCode.getCodeString());
+         } catch (Throwable e) {
+             throw Debug.handle(e);
+         }
+--- old/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/ForEachToGraal.java	2014-01-27 16:21:35.992703090 +0100
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/ForEachToGraal.java	2014-01-27 16:21:35.936703090 +0100
+@@ -23,10 +23,24 @@
+ 
+ package com.oracle.graal.hotspot.hsail;
+ 
++import static com.oracle.graal.hotspot.HotSpotGraalRuntime.*;
++
++import java.lang.reflect.*;
++import java.util.*;
++
+ import com.oracle.graal.api.code.*;
++import com.oracle.graal.api.meta.*;
+ import com.oracle.graal.compiler.hsail.*;
++import com.oracle.graal.compiler.target.*;
+ import com.oracle.graal.debug.*;
++import com.oracle.graal.graph.iterators.*;
+ import com.oracle.graal.hotspot.meta.*;
++import com.oracle.graal.hsail.*;
++import com.oracle.graal.java.*;
++import com.oracle.graal.nodes.*;
++import com.oracle.graal.nodes.java.*;
++import com.oracle.graal.phases.*;
++import com.oracle.graal.phases.util.*;
+ 
+ /**
+  * Implements compile and dispatch of Java code containing lambda constructs. Currently only used by
+@@ -34,18 +48,53 @@
+  */
+ public class ForEachToGraal implements CompileAndDispatch {
+ 
+-    private static HSAILCompilationResult getCompiledLambda(Class consumerClass) {
+-        return HSAILCompilationResult.getCompiledLambda(consumerClass);
++    private static HSAILHotSpotBackend getHSAILBackend() {
++        Backend backend = runtime().getBackend(HSAIL.class);
++        return (HSAILHotSpotBackend) backend;
++    }
++
++    /**
++     * Gets a compiled and installed kernel for the lambda called by the {@code accept(int value)}
++     * method in a class implementing {@code java.util.function.IntConsumer}.
++     * 
++     * @param intConsumerClass a class implementing {@code java.util.function.IntConsumer}
++     * @return a {@link HotSpotNmethod} handle to the compiled and installed kernel
++     */
++    private static HotSpotNmethod getCompiledLambda(Class intConsumerClass) {
++        Method acceptMethod = null;
++        for (Method m : intConsumerClass.getMethods()) {
++            if (m.getName().equals("accept") && Arrays.equals(new Class[]{int.class}, m.getParameterTypes())) {
++                assert acceptMethod == null : "found more than one implementation of accept(int) in " + intConsumerClass;
++                acceptMethod = m;
++            }
++        }
++
++        HSAILHotSpotBackend backend = getHSAILBackend();
++        Providers providers = backend.getProviders();
++        StructuredGraph graph = new StructuredGraph(((HotSpotMetaAccessProvider) providers.getMetaAccess()).lookupJavaMethod(acceptMethod));
++        new GraphBuilderPhase.Instance(providers.getMetaAccess(), GraphBuilderConfiguration.getDefault(), OptimisticOptimizations.ALL).apply(graph);
++        NodeIterable<MethodCallTargetNode> calls = graph.getNodes(MethodCallTargetNode.class);
++        assert calls.count() == 1;
++        ResolvedJavaMethod lambdaMethod = calls.first().targetMethod();
++        assert lambdaMethod.getName().startsWith("lambda$");
++        Debug.log("target ... " + lambdaMethod);
++
++        if (lambdaMethod == null) {
++            Debug.log("Did not find call in accept()");
++            return null;
++        }
++
++        ExternalCompilationResult hsailCode = backend.compileKernel(lambdaMethod, true);
++        return backend.installKernel(lambdaMethod, hsailCode);
+     }
+ 
+-    // Implementations of the CompileAndDispatch interface.
+     @Override
+     public Object createKernel(Class<?> consumerClass) {
+         try {
+             return getCompiledLambda(consumerClass);
+         } catch (Throwable e) {
+-            // Note: Graal throws Errors. We want to revert to regular Java in these cases.
+-            Debug.log("WARNING:Graal compilation failed.");
++            // If Graal compilation throws an exception, we want to revert to regular Java
++            Debug.log("WARNING: Graal compilation failed");
+             e.printStackTrace();
+             return null;
+         }
+@@ -53,16 +102,14 @@
+ 
+     @Override
+     public boolean dispatchKernel(Object kernel, int jobSize, Object[] args) {
+-        // kernel is an HSAILCompilationResult
+-        HotSpotNmethod code = (HotSpotNmethod) ((HSAILCompilationResult) kernel).getInstalledCode();
+-
++        HotSpotNmethod code = (HotSpotNmethod) kernel;
+         if (code != null) {
+             try {
+                 // No return value from HSAIL kernels
+                 code.executeParallel(jobSize, 0, 0, args);
+                 return true;
+             } catch (InvalidInstalledCodeException iice) {
+-                Debug.log("WARNING:Invalid installed code at exec time." + iice);
++                Debug.log("WARNING: Invalid installed code at exec time." + iice);
+                 iice.printStackTrace();
+                 return false;
+             }
+--- old/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotBackend.java	2014-01-27 16:21:36.196703090 +0100
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotBackend.java	2014-01-27 16:21:36.140703090 +0100
+@@ -23,25 +23,34 @@
+ package com.oracle.graal.hotspot.hsail;
+ 
+ import static com.oracle.graal.api.code.CallingConvention.Type.*;
++import static com.oracle.graal.api.code.CodeUtil.*;
+ import static com.oracle.graal.api.code.ValueUtil.*;
++import static com.oracle.graal.compiler.GraalCompiler.*;
+ 
+ import java.lang.reflect.*;
+ import java.util.*;
+ 
+ import com.oracle.graal.api.code.*;
++import com.oracle.graal.api.code.CallingConvention.Type;
+ import com.oracle.graal.api.meta.*;
+ import com.oracle.graal.asm.*;
+ import com.oracle.graal.asm.hsail.*;
+ import com.oracle.graal.compiler.gen.*;
+ import com.oracle.graal.debug.*;
++import com.oracle.graal.debug.Debug.Scope;
++import com.oracle.graal.graph.*;
+ import com.oracle.graal.hotspot.*;
+ import com.oracle.graal.hotspot.meta.*;
+ import com.oracle.graal.hsail.*;
++import com.oracle.graal.java.*;
+ import com.oracle.graal.lir.*;
+ import com.oracle.graal.lir.asm.*;
+ import com.oracle.graal.lir.hsail.*;
+ import com.oracle.graal.nodes.*;
+-import com.oracle.graal.nodes.spi.Replacements;
++import com.oracle.graal.nodes.spi.*;
++import com.oracle.graal.phases.*;
++import com.oracle.graal.phases.common.*;
++import com.oracle.graal.phases.tiers.*;
+ import com.oracle.graal.replacements.hsail.*;
+ 
+ /**
+@@ -85,6 +94,60 @@
+     }
+ 
+     /**
++     * Compiles and installs a given method to a GPU binary.
++     */
++    public HotSpotNmethod compileAndInstallKernel(Method method) {
++        ResolvedJavaMethod javaMethod = getProviders().getMetaAccess().lookupJavaMethod(method);
++        return installKernel(javaMethod, compileKernel(javaMethod, true));
++    }
++
++    /**
++     * Compiles a given method to HSAIL code.
++     * 
++     * @param makeBinary specifies whether a GPU binary should also be generated for the HSAIL code.
++     *            If true, the returned value is guaranteed to have a non-zero
++     *            {@linkplain ExternalCompilationResult#getEntryPoint() entry point}.
++     * @return the HSAIL code compiled from {@code method}'s bytecode
++     */
++    public ExternalCompilationResult compileKernel(ResolvedJavaMethod method, boolean makeBinary) {
++        StructuredGraph graph = new StructuredGraph(method);
++        HotSpotProviders providers = getProviders();
++        new GraphBuilderPhase.Instance(providers.getMetaAccess(), GraphBuilderConfiguration.getEagerDefault(), OptimisticOptimizations.ALL).apply(graph);
++        PhaseSuite<HighTierContext> graphBuilderSuite = providers.getSuites().getDefaultGraphBuilderSuite();
++        graphBuilderSuite.appendPhase(new NonNullParametersPhase());
++        CallingConvention cc = getCallingConvention(providers.getCodeCache(), Type.JavaCallee, graph.method(), false);
++        Suites suites = providers.getSuites().getDefaultSuites();
++        ExternalCompilationResult hsailCode = compileGraph(graph, cc, method, providers, this, this.getTarget(), null, graphBuilderSuite, OptimisticOptimizations.NONE, getProfilingInfo(graph),
++                        new SpeculationLog(), suites, true, new ExternalCompilationResult(), CompilationResultBuilderFactory.Default);
++
++        if (makeBinary) {
++            try (Scope ds = Debug.scope("GeneratingKernelBinary")) {
++                long kernel = getRuntime().getCompilerToGPU().generateKernel(hsailCode.getTargetCode(), method.getName());
++                if (kernel == 0) {
++                    throw new GraalInternalError("Failed to compile HSAIL kernel");
++                }
++                hsailCode.setEntryPoint(kernel);
++            } catch (Throwable e) {
++                throw Debug.handle(e);
++            }
++        }
++        return hsailCode;
++    }
++
++    /**
++     * Installs the {@linkplain ExternalCompilationResult#getEntryPoint() GPU binary} associated
++     * with some given HSAIL code in the code cache and returns a {@link HotSpotNmethod} handle to
++     * the installed code.
++     * 
++     * @param hsailCode HSAIL compilation result for which a GPU binary has been generated
++     * @return a handle to the binary as installed in the HotSpot code cache
++     */
++    public final HotSpotNmethod installKernel(ResolvedJavaMethod method, ExternalCompilationResult hsailCode) {
++        assert hsailCode.getEntryPoint() != 0L;
++        return getProviders().getCodeCache().addExternalMethod(method, hsailCode);
++    }
++
++    /**
+      * Use the HSAIL register set when the compilation target is HSAIL.
+      */
+     @Override
+--- old/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotBackendFactory.java	2014-01-27 16:21:36.400703090 +0100
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotBackendFactory.java	2014-01-27 16:21:36.344703090 +0100
+@@ -28,6 +28,7 @@
+ import com.oracle.graal.hotspot.*;
+ import com.oracle.graal.hotspot.meta.*;
+ import com.oracle.graal.hsail.*;
++import com.oracle.graal.java.*;
+ import com.oracle.graal.nodes.spi.*;
+ import com.oracle.graal.phases.tiers.*;
+ import com.oracle.graal.phases.util.*;
+@@ -51,7 +52,7 @@
+         Providers p = new Providers(metaAccess, codeCache, constantReflection, foreignCalls, lowerer, null);
+         Replacements replacements = new HSAILHotSpotReplacementsImpl(p, assumptions, codeCache.getTarget(), host.getReplacements());
+         HotSpotDisassemblerProvider disassembler = host.getDisassembler();
+-        SuitesProvider suites = host.getSuites();
++        SuitesProvider suites = new DefaultSuitesProvider();
+         HotSpotProviders providers = new HotSpotProviders(metaAccess, codeCache, constantReflection, foreignCalls, lowerer, replacements, disassembler, suites, registers);
+ 
+         return new HSAILHotSpotBackend(runtime, providers);
+--- old/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILCompilationResult.java	2014-01-27 16:21:36.600703087 +0100
++++ /dev/null	2014-01-27 08:53:31.578901000 +0100
+@@ -1,182 +0,0 @@
+-/*
+- * Copyright (c) 2009, 2012, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-
+-package com.oracle.graal.hotspot.hsail;
+-
+-import static com.oracle.graal.compiler.GraalCompiler.*;
+-import static com.oracle.graal.hotspot.HotSpotGraalRuntime.*;
+-
+-import java.lang.reflect.*;
+-
+-import com.oracle.graal.api.code.*;
+-import com.oracle.graal.api.code.CallingConvention.Type;
+-import com.oracle.graal.api.meta.*;
+-import com.oracle.graal.api.runtime.*;
+-import com.oracle.graal.debug.*;
+-import com.oracle.graal.graph.*;
+-import com.oracle.graal.graph.iterators.*;
+-import com.oracle.graal.hotspot.*;
+-import com.oracle.graal.hotspot.bridge.*;
+-import com.oracle.graal.hotspot.meta.*;
+-import com.oracle.graal.hsail.*;
+-import com.oracle.graal.java.*;
+-import com.oracle.graal.lir.asm.*;
+-import com.oracle.graal.nodes.*;
+-import com.oracle.graal.nodes.java.*;
+-import com.oracle.graal.phases.*;
+-import com.oracle.graal.phases.common.*;
+-import com.oracle.graal.phases.tiers.*;
+-import com.oracle.graal.phases.util.*;
+-import com.oracle.graal.runtime.*;
+-
+-/**
+- * Class that represents a HSAIL compilation result. Includes the compiled HSAIL code.
+- */
+-public class HSAILCompilationResult extends ExternalCompilationResult {
+-
+-    private static final long serialVersionUID = -4178700465275724625L;
+-
+-    private static CompilerToGPU toGPU = HotSpotGraalRuntime.runtime().getCompilerToGPU();
+-    private static boolean validDevice = toGPU.deviceInit();
+-
+-    // The installedCode is the executable representation of the kernel in the code cache
+-    private InstalledCode installedCode;
+-
+-    public void setInstalledCode(InstalledCode newCode) {
+-        installedCode = newCode;
+-    }
+-
+-    public InstalledCode getInstalledCode() {
+-        return installedCode;
+-    }
+-
+-    static final HSAILHotSpotBackend backend;
+-    static {
+-        // Look for installed HSAIL backend
+-        RuntimeProvider runtime = Graal.getRequiredCapability(RuntimeProvider.class);
+-        HSAILHotSpotBackend b = (HSAILHotSpotBackend) runtime.getBackend(HSAIL.class);
+-        if (b == null) {
+-            // Fall back to a new instance
+-            b = new HSAILHotSpotBackendFactory().createBackend(runtime(), runtime().getHostBackend());
+-            b.completeInitialization();
+-        }
+-        backend = b;
+-    }
+-
+-    public static HSAILCompilationResult getHSAILCompilationResult(Method meth) {
+-        HotSpotMetaAccessProvider metaAccess = backend.getProviders().getMetaAccess();
+-        ResolvedJavaMethod javaMethod = metaAccess.lookupJavaMethod(meth);
+-        return getHSAILCompilationResult(javaMethod);
+-    }
+-
+-    public static HSAILCompilationResult getHSAILCompilationResult(ResolvedJavaMethod javaMethod) {
+-        HotSpotMetaAccessProvider metaAccess = backend.getProviders().getMetaAccess();
+-        StructuredGraph graph = new StructuredGraph(javaMethod);
+-        new GraphBuilderPhase.Instance(metaAccess, GraphBuilderConfiguration.getEagerDefault(), OptimisticOptimizations.ALL).apply(graph);
+-        return getHSAILCompilationResult(graph);
+-    }
+-
+-    public static HSAILCompilationResult getCompiledLambda(Class consumerClass) {
+-        /**
+-         * Find the accept() method in the IntConsumer, then use Graal API to find the target lambda
+-         * that accept will call.
+-         */
+-        Method[] icMethods = consumerClass.getMethods();
+-        Method acceptMethod = null;
+-        for (Method m : icMethods) {
+-            if (m.getName().equals("accept") && acceptMethod == null) {
+-                acceptMethod = m;
+-                break;
+-            }
+-        }
+-
+-        Providers providers = backend.getProviders();
+-        HotSpotMetaAccessProvider metaAccess = (HotSpotMetaAccessProvider) providers.getMetaAccess();
+-        ResolvedJavaMethod rm = metaAccess.lookupJavaMethod(acceptMethod);
+-        StructuredGraph graph = new StructuredGraph(rm);
+-        new GraphBuilderPhase.Instance(providers.getMetaAccess(), GraphBuilderConfiguration.getDefault(), OptimisticOptimizations.ALL).apply(graph);
+-        NodeIterable<Node> nin = graph.getNodes();
+-        ResolvedJavaMethod lambdaMethod = null;
+-        for (Node n : nin) {
+-            if (n instanceof MethodCallTargetNode) {
+-                lambdaMethod = ((MethodCallTargetNode) n).targetMethod();
+-                Debug.log("target ... " + lambdaMethod);
+-                break;
+-            }
+-        }
+-        if (lambdaMethod == null) {
+-            // Did not find call in Consumer.accept.
+-            Debug.log("Should not Reach here, did not find call in accept()");
+-            return null;
+-        }
+-        // Now that we have the target lambda, compile it.
+-        HSAILCompilationResult hsailCompResult = HSAILCompilationResult.getHSAILCompilationResult(lambdaMethod);
+-        return hsailCompResult;
+-    }
+-
+-    public static HSAILCompilationResult getHSAILCompilationResult(StructuredGraph graph) {
+-        Debug.dump(graph, "Graph");
+-        Providers providers = backend.getProviders();
+-        TargetDescription target = providers.getCodeCache().getTarget();
+-        PhaseSuite<HighTierContext> graphBuilderSuite = backend.getSuites().getDefaultGraphBuilderSuite().copy();
+-        graphBuilderSuite.appendPhase(new NonNullParametersPhase());
+-        CallingConvention cc = CodeUtil.getCallingConvention(providers.getCodeCache(), Type.JavaCallee, graph.method(), false);
+-        SuitesProvider suitesProvider = backend.getSuites();
+-        try {
+-            HSAILCompilationResult compResult = compileGraph(graph, cc, graph.method(), providers, backend, target, null, graphBuilderSuite, OptimisticOptimizations.NONE, getProfilingInfo(graph),
+-                            new SpeculationLog(), suitesProvider.getDefaultSuites(), true, new HSAILCompilationResult(), CompilationResultBuilderFactory.Default);
+-            if ((validDevice) && (compResult.getTargetCode() != null)) {
+-                long kernel = toGPU.generateKernel(compResult.getTargetCode(), graph.method().getName());
+-
+-                if (kernel == 0) {
+-                    throw new GraalInternalError("Failed to compile kernel.");
+-                }
+-
+-                ((ExternalCompilationResult) compResult).setEntryPoint(kernel);
+-                HotSpotResolvedJavaMethod compiledMethod = (HotSpotResolvedJavaMethod) graph.method();
+-                InstalledCode installedCode = ((HotSpotCodeCacheProvider) providers.getCodeCache()).addExternalMethod(compiledMethod, compResult);
+-                compResult.setInstalledCode(installedCode);
+-            }
+-            return compResult;
+-        } catch (InvalidInstalledCodeException e) {
+-            e.printStackTrace();
+-            return null;
+-        } catch (GraalInternalError e) {
+-            String partialCode = backend.getPartialCodeString();
+-            if (partialCode != null && !partialCode.equals("")) {
+-                Debug.log("-------------------\nPartial Code Generation:\n--------------------");
+-                Debug.log(partialCode);
+-                Debug.log("-------------------\nEnd of Partial Code Generation\n--------------------");
+-            }
+-            throw e;
+-        }
+-    }
+-
+-    protected HSAILCompilationResult() {
+-    }
+-
+-    public String getHSAILCode() {
+-        return new String(getTargetCode(), 0, getTargetCodeSize());
+-    }
+-
+-}

@@ -1,0 +1,680 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2013, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package com.oracle.graal.lir.hsail;
+  24 
+  25 import static com.oracle.graal.api.code.ValueUtil.*;
+  26 import static com.oracle.graal.lir.LIRInstruction.OperandFlag.*;
+  27 
+  28 import com.oracle.graal.api.code.*;
+  29 import com.oracle.graal.api.meta.*;
+  30 import com.oracle.graal.asm.hsail.*;
+  31 import com.oracle.graal.debug.*;
+  32 import com.oracle.graal.graph.*;
+  33 import com.oracle.graal.lir.*;
+  34 import com.oracle.graal.lir.StandardOp.MoveOp;
+  35 import com.oracle.graal.lir.asm.*;
+  36 
+  37 /**
+  38  * Implementation of move instructions.
+  39  */
+  40 public class HSAILMove {
+  41 
+  42     // Stack size in bytes (used to keep track of spilling).
+  43     static int maxDatatypeSize;
+  44     // Maximum stack offset used by a store operation.
+  45     static long maxStackOffset = 0;
+  46 
+  47     public static long upperBoundStackSize() {
+  48         return maxStackOffset + maxDatatypeSize;
+  49     }
+  50 
+  51     private abstract static class AbstractMoveOp extends HSAILLIRInstruction implements MoveOp {
+  52 
+  53         private Kind moveKind;
+  54 
+  55         public AbstractMoveOp(Kind moveKind) {
+  56             this.moveKind = moveKind;
+  57         }
+  58 
+  59         @Override
+  60         public void emitCode(CompilationResultBuilder crb, HSAILAssembler masm) {
+  61             move(moveKind, crb, masm, getResult(), getInput());
+  62         }
+  63     }
+  64 
+  65     @Opcode("MOVE")
+  66     public static class SpillMoveOp extends AbstractMoveOp {
+  67 
+  68         @Def({REG, STACK}) protected AllocatableValue result;
+  69         @Use({REG, STACK, CONST}) protected Value input;
+  70 
+  71         public SpillMoveOp(Kind moveKind, AllocatableValue result, Value input) {
+  72             super(moveKind);
+  73             this.result = result;
+  74             this.input = input;
+  75         }
+  76 
+  77         @Override
+  78         public Value getInput() {
+  79             return input;
+  80         }
+  81 
+  82         @Override
+  83         public AllocatableValue getResult() {
+  84             return result;
+  85         }
+  86     }
+  87 
+  88     @Opcode("MOVE")
+  89     public static class MoveToRegOp extends AbstractMoveOp {
+  90 
+  91         @Def({REG, HINT}) protected AllocatableValue result;
+  92         @Use({REG, STACK, CONST}) protected Value input;
+  93 
+  94         public MoveToRegOp(Kind moveKind, AllocatableValue result, Value input) {
+  95             super(moveKind);
+  96             this.result = result;
+  97             this.input = input;
+<a name="1" id="anc1"></a>
+
+
+
+
+
+
+  98         }
+  99 
+ 100         @Override
+ 101         public Value getInput() {
+ 102             return input;
+ 103         }
+ 104 
+ 105         @Override
+ 106         public AllocatableValue getResult() {
+ 107             return result;
+ 108         }
+ 109     }
+ 110 
+ 111     @Opcode("MOVE")
+ 112     public static class MoveFromRegOp extends AbstractMoveOp {
+ 113 
+ 114         @Def({REG, STACK}) protected AllocatableValue result;
+ 115         @Use({REG, CONST, HINT}) protected Value input;
+ 116 
+ 117         public MoveFromRegOp(Kind moveKind, AllocatableValue result, Value input) {
+ 118             super(moveKind);
+ 119             this.result = result;
+ 120             this.input = input;
+ 121         }
+ 122 
+ 123         @Override
+ 124         public Value getInput() {
+ 125             return input;
+ 126         }
+ 127 
+ 128         @Override
+ 129         public AllocatableValue getResult() {
+ 130             return result;
+ 131         }
+ 132     }
+ 133 
+ 134     public abstract static class MemOp extends HSAILLIRInstruction {
+ 135 
+ 136         protected final Kind kind;
+ 137         @Use({COMPOSITE}) protected HSAILAddressValue address;
+ 138         @State protected LIRFrameState state;
+ 139 
+ 140         public MemOp(Kind kind, HSAILAddressValue address, LIRFrameState state) {
+ 141             this.kind = kind;
+ 142             this.address = address;
+ 143             this.state = state;
+ 144         }
+ 145 
+ 146         protected abstract void emitMemAccess(HSAILAssembler masm);
+ 147 
+ 148         @Override
+ 149         public void emitCode(CompilationResultBuilder crb, HSAILAssembler masm) {
+ 150             if (state != null) {
+ 151                 // crb.recordImplicitException(masm.position(), state);
+ 152                 throw new InternalError("NYI");
+ 153             }
+ 154             emitMemAccess(masm);
+ 155         }
+ 156     }
+ 157 
+ 158     public static class MembarOp extends HSAILLIRInstruction {
+ 159 
+ 160         private final int barriers;
+ 161 
+ 162         public MembarOp(final int barriers) {
+ 163             this.barriers = barriers;
+ 164         }
+ 165 
+ 166         @Override
+ 167         public void emitCode(CompilationResultBuilder crb, HSAILAssembler masm) {
+ 168             masm.emitMembar(barriers);
+ 169         }
+ 170     }
+ 171 
+ 172     public static class LoadOp extends MemOp {
+ 173 
+ 174         @Def({REG}) protected AllocatableValue result;
+ 175 
+ 176         public LoadOp(Kind kind, AllocatableValue result, HSAILAddressValue address, LIRFrameState state) {
+ 177             super(kind, address, state);
+ 178             this.result = result;
+ 179         }
+ 180 
+ 181         @Override
+ 182         public void emitMemAccess(HSAILAssembler masm) {
+ 183             HSAILAddress addr = address.toAddress();
+ 184             masm.emitLoad(kind, result, addr);
+ 185         }
+ 186     }
+ 187 
+ 188     public static class StoreOp extends MemOp {
+ 189 
+ 190         @Use({REG}) protected AllocatableValue input;
+ 191 
+ 192         public StoreOp(Kind kind, HSAILAddressValue address, AllocatableValue input, LIRFrameState state) {
+ 193             super(kind, address, state);
+ 194             this.input = input;
+ 195         }
+ 196 
+ 197         @Override
+ 198         public void emitMemAccess(HSAILAssembler masm) {
+ 199             assert isRegister(input);
+ 200             HSAILAddress addr = address.toAddress();
+ 201             masm.emitStore(kind, input, addr);
+ 202         }
+ 203     }
+ 204 
+ 205     public static class StoreConstantOp extends MemOp {
+ 206 
+ 207         protected final Constant input;
+ 208 
+ 209         public StoreConstantOp(Kind kind, HSAILAddressValue address, Constant input, LIRFrameState state) {
+ 210             super(kind, address, state);
+ 211             this.input = input;
+ 212         }
+ 213 
+ 214         @Override
+ 215         public void emitMemAccess(HSAILAssembler masm) {
+ 216             switch (kind) {
+ 217                 case Boolean:
+ 218                 case Byte:
+ 219                     masm.emitStoreImmediate(kind, input.asLong() &amp; 0xFF, address.toAddress());
+ 220                     break;
+ 221                 case Char:
+ 222                 case Short:
+ 223                     masm.emitStoreImmediate(kind, input.asLong() &amp; 0xFFFF, address.toAddress());
+ 224                     break;
+ 225                 case Int:
+ 226                 case Long:
+ 227                     masm.emitStoreImmediate(kind, input.asLong(), address.toAddress());
+ 228                     break;
+ 229                 case Float:
+ 230                     masm.emitStoreImmediate(input.asFloat(), address.toAddress());
+ 231                     break;
+ 232                 case Double:
+ 233                     masm.emitStoreImmediate(input.asDouble(), address.toAddress());
+ 234                     break;
+ 235                 case Object:
+ 236                     if (input.isNull()) {
+ 237                         masm.emitStoreImmediate(kind, 0L, address.toAddress());
+ 238                     } else {
+ 239                         throw GraalInternalError.shouldNotReachHere("Cannot store 64-bit constants to object ref");
+ 240                     }
+ 241                     break;
+ 242                 default:
+ 243                     throw GraalInternalError.shouldNotReachHere();
+ 244             }
+ 245         }
+ 246     }
+ 247 
+ 248     public static class LoadCompressedPointer extends LoadOp {
+ 249 
+ 250         private final long base;
+ 251         private final int shift;
+ 252         private final int alignment;
+ 253         @Temp({REG}) private AllocatableValue scratch;
+ 254 
+ 255         public LoadCompressedPointer(Kind kind, AllocatableValue result, AllocatableValue scratch, HSAILAddressValue address, LIRFrameState state, long base, int shift, int alignment) {
+ 256             super(kind, result, address, state);
+ 257             this.base = base;
+ 258             this.shift = shift;
+ 259             this.alignment = alignment;
+ 260             this.scratch = scratch;
+ 261             assert kind == Kind.Object || kind == Kind.Long;
+ 262         }
+ 263 
+ 264         @Override
+ 265         public void emitMemAccess(HSAILAssembler masm) {
+ 266             // we will do a 32 bit load, zero extending into a 64 bit register
+ 267             masm.emitLoad(result, address.toAddress(), "u32");
+ 268             boolean testForNull = (kind == Kind.Object);
+ 269             decodePointer(masm, result, base, shift, alignment, testForNull);
+ 270         }
+ 271     }
+ 272 
+ 273     public static class StoreCompressedPointer extends HSAILLIRInstruction {
+ 274 
+ 275         protected final Kind kind;
+ 276         private final long base;
+ 277         private final int shift;
+ 278         private final int alignment;
+ 279         @Temp({REG}) private AllocatableValue scratch;
+ 280         @Alive({REG}) protected AllocatableValue input;
+ 281         @Alive({COMPOSITE}) protected HSAILAddressValue address;
+ 282         @State protected LIRFrameState state;
+ 283 
+ 284         public StoreCompressedPointer(Kind kind, HSAILAddressValue address, AllocatableValue input, AllocatableValue scratch, LIRFrameState state, long base, int shift, int alignment) {
+ 285             this.base = base;
+ 286             this.shift = shift;
+ 287             this.alignment = alignment;
+ 288             this.scratch = scratch;
+ 289             this.kind = kind;
+ 290             this.address = address;
+ 291             this.state = state;
+ 292             this.input = input;
+ 293             assert kind == Kind.Object || kind == Kind.Long;
+ 294         }
+ 295 
+ 296         @Override
+ 297         public void emitCode(CompilationResultBuilder crb, HSAILAssembler masm) {
+ 298             masm.emitMov(kind, scratch, input);
+ 299             boolean testForNull = (kind == Kind.Object);
+ 300             encodePointer(masm, scratch, base, shift, alignment, testForNull);
+ 301             if (state != null) {
+ 302                 throw new InternalError("NYI");
+ 303                 // crb.recordImplicitException(masm.position(), state);
+ 304             }
+ 305             masm.emitStore(scratch, address.toAddress(), "u32");
+ 306         }
+ 307     }
+ 308 
+ 309     public static class CompressPointer extends HSAILLIRInstruction {
+ 310 
+ 311         private final long base;
+ 312         private final int shift;
+ 313         private final int alignment;
+ 314         private final boolean nonNull;
+ 315 
+ 316         @Def({REG}) protected AllocatableValue result;
+ 317         @Temp({REG, HINT}) protected AllocatableValue scratch;
+ 318         @Use({REG}) protected AllocatableValue input;
+ 319 
+ 320         public CompressPointer(AllocatableValue result, AllocatableValue scratch, AllocatableValue input, long base, int shift, int alignment, boolean nonNull) {
+ 321             this.result = result;
+ 322             this.scratch = scratch;
+ 323             this.input = input;
+ 324             this.base = base;
+ 325             this.shift = shift;
+ 326             this.alignment = alignment;
+ 327             this.nonNull = nonNull;
+ 328         }
+ 329 
+ 330         @Override
+ 331         public void emitCode(CompilationResultBuilder crb, HSAILAssembler masm) {
+ 332             masm.emitMov(Kind.Long, scratch, input);
+ 333             boolean testForNull = !nonNull;
+ 334             encodePointer(masm, scratch, base, shift, alignment, testForNull);
+ 335             masm.emitConvert(result, scratch, "u32", "u64");
+ 336         }
+ 337     }
+ 338 
+ 339     public static class UncompressPointer extends HSAILLIRInstruction {
+ 340 
+ 341         private final long base;
+ 342         private final int shift;
+ 343         private final int alignment;
+ 344         private final boolean nonNull;
+ 345 
+ 346         @Def({REG, HINT}) protected AllocatableValue result;
+ 347         @Use({REG}) protected AllocatableValue input;
+ 348 
+ 349         public UncompressPointer(AllocatableValue result, AllocatableValue input, long base, int shift, int alignment, boolean nonNull) {
+ 350             this.result = result;
+ 351             this.input = input;
+ 352             this.base = base;
+ 353             this.shift = shift;
+ 354             this.alignment = alignment;
+ 355             this.nonNull = nonNull;
+ 356         }
+ 357 
+ 358         @Override
+ 359         public void emitCode(CompilationResultBuilder crb, HSAILAssembler masm) {
+ 360             masm.emitConvert(result, input, "u64", "u32");
+ 361             boolean testForNull = !nonNull;
+ 362             decodePointer(masm, result, base, shift, alignment, testForNull);
+ 363         }
+ 364     }
+ 365 
+ 366     private static void encodePointer(HSAILAssembler masm, Value scratch, long base, int shift, int alignment, boolean testForNull) {
+ 367         if (base == 0 &amp;&amp; shift == 0) {
+ 368             return;
+ 369         }
+ 370         if (shift != 0) {
+ 371             assert alignment == shift : "Encode algorithm is wrong";
+ 372         }
+ 373         masm.emitCompressedOopEncode(scratch, base, shift, testForNull);
+ 374     }
+ 375 
+ 376     private static void decodePointer(HSAILAssembler masm, Value result, long base, int shift, int alignment, boolean testForNull) {
+ 377         if (base == 0 &amp;&amp; shift == 0) {
+ 378             return;
+ 379         }
+ 380         if (shift != 0) {
+ 381             assert alignment == shift : "Decode algorithm is wrong";
+ 382         }
+ 383         masm.emitCompressedOopDecode(result, base, shift, testForNull);
+ 384     }
+ 385 
+ 386     public static class LeaOp extends HSAILLIRInstruction {
+ 387 
+ 388         @Def({REG}) protected AllocatableValue result;
+ 389         @Use({COMPOSITE, UNINITIALIZED}) protected HSAILAddressValue address;
+ 390 
+ 391         public LeaOp(AllocatableValue result, HSAILAddressValue address) {
+ 392             this.result = result;
+ 393             this.address = address;
+ 394         }
+ 395 
+ 396         @Override
+ 397         public void emitCode(CompilationResultBuilder crb, HSAILAssembler masm) {
+ 398             throw new InternalError("NYI");
+ 399         }
+ 400     }
+ 401 
+ 402     public static class StackLeaOp extends HSAILLIRInstruction {
+ 403 
+ 404         @Def({REG}) protected AllocatableValue result;
+ 405         @Use({STACK, UNINITIALIZED}) protected StackSlot slot;
+ 406 
+ 407         public StackLeaOp(AllocatableValue result, StackSlot slot) {
+ 408             this.result = result;
+ 409             this.slot = slot;
+ 410         }
+ 411 
+ 412         @Override
+ 413         public void emitCode(CompilationResultBuilder crb, HSAILAssembler masm) {
+ 414             throw new InternalError("NYI");
+ 415         }
+ 416     }
+ 417 
+ 418     @Opcode("CAS")
+ 419     public static class CompareAndSwapOp extends HSAILLIRInstruction {
+ 420 
+ 421         private final Kind accessKind;
+ 422 
+ 423         @Def protected AllocatableValue result;
+ 424         @Use({COMPOSITE}) protected HSAILAddressValue address;
+ 425         @Use protected AllocatableValue cmpValue;
+ 426         @Use protected AllocatableValue newValue;
+ 427 
+ 428         public CompareAndSwapOp(Kind accessKind, AllocatableValue result, HSAILAddressValue address, AllocatableValue cmpValue, AllocatableValue newValue) {
+ 429             this.accessKind = accessKind;
+ 430             this.result = result;
+ 431             this.address = address;
+ 432             this.cmpValue = cmpValue;
+ 433             this.newValue = newValue;
+ 434         }
+ 435 
+ 436         @Override
+ 437         public void emitCode(CompilationResultBuilder crb, HSAILAssembler masm) {
+ 438             masm.emitAtomicCas(accessKind, result, address.toAddress(), cmpValue, newValue);
+ 439         }
+ 440     }
+ 441 
+ 442     public static class NullCheckOp extends HSAILLIRInstruction {
+ 443 
+ 444         @Use protected Value input;
+ 445         @State protected LIRFrameState state;
+ 446 
+ 447         public NullCheckOp(Variable input, LIRFrameState state) {
+ 448             this.input = input;
+ 449             this.state = state;
+ 450         }
+ 451 
+ 452         @Override
+ 453         public void emitCode(CompilationResultBuilder crb, HSAILAssembler masm) {
+ 454             Debug.log("NullCheckOp unimplemented");
+ 455         }
+ 456     }
+ 457 
+ 458     @SuppressWarnings("unused")
+ 459     public static void move(Kind kind, CompilationResultBuilder crb, HSAILAssembler masm, Value result, Value input) {
+ 460         if (isRegister(input)) {
+ 461             if (isRegister(result)) {
+ 462                 masm.emitMov(kind, result, input);
+ 463             } else if (isStackSlot(result)) {
+ 464                 masm.emitSpillStore(kind, input, result);
+ 465             } else {
+ 466                 throw GraalInternalError.shouldNotReachHere();
+ 467             }
+ 468         } else if (isStackSlot(input)) {
+ 469             if (isRegister(result)) {
+ 470                 masm.emitSpillLoad(kind, result, input);
+ 471             } else {
+ 472                 throw GraalInternalError.shouldNotReachHere();
+ 473             }
+ 474         } else if (isConstant(input)) {
+ 475             if (isRegister(result)) {
+ 476                 masm.emitMov(kind, result, input);
+ 477             } else {
+ 478                 throw GraalInternalError.shouldNotReachHere();
+ 479             }
+ 480         } else {
+ 481             throw GraalInternalError.shouldNotReachHere();
+ 482         }
+ 483     }
+<a name="2" id="anc2"></a>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 484 }
+<a name="3" id="anc3"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="3" type="hidden" /></form></body></html>

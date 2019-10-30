@@ -1,0 +1,501 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../../../../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2014, 2014, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package jdk.vm.ci.code;
+  24 
+  25 import static jdk.vm.ci.meta.MetaUtil.identityHashCodeString;
+  26 
+  27 import java.nio.ByteBuffer;
+  28 import java.util.ArrayList;
+  29 import java.util.Iterator;
+  30 import java.util.Objects;
+  31 import java.util.function.Consumer;
+  32 
+  33 import jdk.vm.ci.code.CompilationResult.DataPatch;
+  34 import jdk.vm.ci.code.CompilationResult.DataSectionReference;
+  35 import jdk.vm.ci.code.DataSection.Data;
+  36 import jdk.vm.ci.meta.SerializableConstant;
+  37 
+  38 public final class DataSection implements Iterable&lt;Data&gt; {
+  39 
+  40     @FunctionalInterface
+  41     public interface DataBuilder {
+  42 
+  43         void emit(ByteBuffer buffer, Consumer&lt;DataPatch&gt; patch);
+  44 
+  45         static DataBuilder raw(byte[] data) {
+  46             return (buffer, patch) -&gt; buffer.put(data);
+  47         }
+  48 
+  49         static DataBuilder serializable(SerializableConstant c) {
+  50             return (buffer, patch) -&gt; c.serialize(buffer);
+  51         }
+  52 
+  53         static DataBuilder zero(int size) {
+  54             switch (size) {
+  55                 case 1:
+  56                     return (buffer, patch) -&gt; buffer.put((byte) 0);
+  57                 case 2:
+  58                     return (buffer, patch) -&gt; buffer.putShort((short) 0);
+  59                 case 4:
+  60                     return (buffer, patch) -&gt; buffer.putInt(0);
+  61                 case 8:
+  62                     return (buffer, patch) -&gt; buffer.putLong(0L);
+  63                 default:
+  64                     return (buffer, patch) -&gt; {
+  65                         int rest = size;
+  66                         while (rest &gt; 8) {
+  67                             buffer.putLong(0L);
+  68                             rest -= 8;
+  69                         }
+  70                         while (rest &gt; 0) {
+  71                             buffer.put((byte) 0);
+  72                             rest--;
+  73                         }
+  74                     };
+  75             }
+  76         }
+  77     }
+  78 
+  79     public static final class Data {
+  80 
+  81         private int alignment;
+  82         private final int size;
+  83         private final DataBuilder builder;
+  84 
+  85         private DataSectionReference ref;
+  86 
+  87         public Data(int alignment, int size, DataBuilder builder) {
+  88             this.alignment = alignment;
+  89             this.size = size;
+  90             this.builder = builder;
+  91 
+  92             // initialized in DataSection.insertData(Data)
+  93             ref = null;
+  94         }
+  95 
+  96         public void updateAlignment(int newAlignment) {
+  97             if (newAlignment == alignment) {
+  98                 return;
+  99             }
+ 100             alignment = lcm(alignment, newAlignment);
+ 101         }
+ 102 
+ 103         public int getAlignment() {
+ 104             return alignment;
+ 105         }
+ 106 
+ 107         public int getSize() {
+ 108             return size;
+ 109         }
+ 110 
+ 111         public DataBuilder getBuilder() {
+ 112             return builder;
+ 113         }
+ 114 
+ 115         @Override
+ 116         public int hashCode() {
+ 117             // Data instances should not be used as hash map keys
+ 118             throw new UnsupportedOperationException("hashCode");
+ 119         }
+ 120 
+ 121         @Override
+ 122         public String toString() {
+ 123             return identityHashCodeString(this);
+ 124         }
+ 125 
+ 126         @Override
+ 127         public boolean equals(Object obj) {
+ 128             assert ref != null;
+ 129             if (obj == this) {
+ 130                 return true;
+ 131             }
+ 132             if (obj instanceof Data) {
+ 133                 Data that = (Data) obj;
+ 134                 if (this.alignment == that.alignment &amp;&amp; this.size == that.size &amp;&amp; this.ref.equals(that.ref)) {
+ 135                     return true;
+ 136                 }
+ 137             }
+ 138             return false;
+ 139         }
+ 140     }
+ 141 
+ 142     private final ArrayList&lt;Data&gt; dataItems = new ArrayList&lt;&gt;();
+ 143 
+<a name="1" id="anc1"></a><span class="changed"> 144     private boolean closed;</span>
+ 145     private int sectionAlignment;
+ 146     private int sectionSize;
+ 147 
+ 148     @Override
+ 149     public int hashCode() {
+ 150         // DataSection instances should not be used as hash map keys
+ 151         throw new UnsupportedOperationException("hashCode");
+ 152     }
+ 153 
+ 154     @Override
+ 155     public String toString() {
+ 156         return identityHashCodeString(this);
+ 157     }
+ 158 
+ 159     @Override
+ 160     public boolean equals(Object obj) {
+ 161         if (this == obj) {
+ 162             return true;
+ 163         }
+ 164         if (obj instanceof DataSection) {
+ 165             DataSection that = (DataSection) obj;
+<a name="2" id="anc2"></a><span class="changed"> 166             if (this.closed == that.closed &amp;&amp; this.sectionAlignment == that.sectionAlignment &amp;&amp; this.sectionSize == that.sectionSize &amp;&amp; Objects.equals(this.dataItems, that.dataItems)) {</span>
+ 167                 return true;
+ 168             }
+ 169         }
+ 170         return false;
+ 171     }
+ 172 
+ 173     /**
+<a name="3" id="anc3"></a><span class="changed"> 174      * Inserts a {@link Data} item into the data section. If the item is already in the data</span>
+<span class="changed"> 175      * section, the same {@link DataSectionReference} is returned.</span>
+ 176      *
+ 177      * @param data the {@link Data} item to be inserted
+ 178      * @return a unique {@link DataSectionReference} identifying the {@link Data} item
+ 179      */
+ 180     public DataSectionReference insertData(Data data) {
+<a name="4" id="anc4"></a><span class="changed"> 181         checkOpen();</span>
+ 182         synchronized (data) {
+ 183             if (data.ref == null) {
+ 184                 data.ref = new DataSectionReference();
+ 185                 dataItems.add(data);
+ 186             }
+ 187             return data.ref;
+ 188         }
+ 189     }
+ 190 
+ 191     /**
+ 192      * Transfers all {@link Data} from the provided other {@link DataSection} to this
+ 193      * {@link DataSection}, and empties the other section.
+ 194      */
+ 195     public void addAll(DataSection other) {
+<a name="5" id="anc5"></a><span class="changed"> 196         checkOpen();</span>
+<span class="changed"> 197         other.checkOpen();</span>
+ 198 
+ 199         for (Data data : other.dataItems) {
+ 200             assert data.ref != null;
+ 201             dataItems.add(data);
+ 202         }
+ 203         other.dataItems.clear();
+ 204     }
+ 205 
+ 206     /**
+<a name="6" id="anc6"></a><span class="changed"> 207      * Determines if this object has been {@link #close() closed}.</span>
+
+ 208      */
+<a name="7" id="anc7"></a><span class="changed"> 209     public boolean closed() {</span>
+<span class="changed"> 210         return closed;</span>
+<span class="changed"> 211     }</span>
+<span class="changed"> 212 </span>
+<span class="changed"> 213     /**</span>
+<span class="changed"> 214      * Computes the layout of the data section and closes this object to further updates.</span>
+<span class="changed"> 215      *</span>
+<span class="changed"> 216      * This must be called exactly once.</span>
+<span class="changed"> 217      */</span>
+<span class="changed"> 218     void close() {</span>
+<span class="changed"> 219         checkOpen();</span>
+<span class="changed"> 220         closed = true;</span>
+ 221 
+ 222         // simple heuristic: put items with larger alignment requirement first
+ 223         dataItems.sort((a, b) -&gt; a.alignment - b.alignment);
+ 224 
+ 225         int position = 0;
+ 226         int alignment = 1;
+ 227         for (Data d : dataItems) {
+ 228             alignment = lcm(alignment, d.alignment);
+ 229             position = align(position, d.alignment);
+ 230 
+ 231             d.ref.setOffset(position);
+ 232             position += d.size;
+ 233         }
+ 234 
+ 235         sectionAlignment = alignment;
+ 236         sectionSize = position;
+ 237     }
+ 238 
+<a name="8" id="anc8"></a>
+
+
+
+ 239     /**
+<a name="9" id="anc9"></a><span class="changed"> 240      * Gets the size of the data section.</span>
+<span class="changed"> 241      *</span>
+<span class="changed"> 242      * This must only be called once this object has been {@linkplain #closed() closed}.</span>
+ 243      */
+ 244     public int getSectionSize() {
+<a name="10" id="anc10"></a><span class="changed"> 245         checkClosed();</span>
+ 246         return sectionSize;
+ 247     }
+ 248 
+ 249     /**
+<a name="11" id="anc11"></a><span class="changed"> 250      * Gets the minimum alignment requirement of the data section.</span>
+<span class="changed"> 251      *</span>
+<span class="changed"> 252      * This must only be called once this object has been {@linkplain #closed() closed}.</span>
+ 253      */
+ 254     public int getSectionAlignment() {
+<a name="12" id="anc12"></a><span class="changed"> 255         checkClosed();</span>
+ 256         return sectionAlignment;
+ 257     }
+ 258 
+ 259     /**
+<a name="13" id="anc13"></a><span class="changed"> 260      * Builds the data section into a given buffer.</span>
+<span class="changed"> 261      *</span>
+<span class="changed"> 262      * This must only be called once this object has been {@linkplain #closed() closed}.</span>
+ 263      *
+<a name="14" id="anc14"></a><span class="changed"> 264      * @param buffer the {@link ByteBuffer} where the data section should be built. The buffer must</span>
+ 265      *            hold at least {@link #getSectionSize()} bytes.
+<a name="15" id="anc15"></a><span class="changed"> 266      * @param patch a {@link Consumer} to receive {@link DataPatch data patches} for relocations in</span>
+<span class="changed"> 267      *            the data section</span>
+ 268      */
+ 269     public void buildDataSection(ByteBuffer buffer, Consumer&lt;DataPatch&gt; patch) {
+<a name="16" id="anc16"></a><span class="changed"> 270         checkClosed();</span>
+ 271         for (Data d : dataItems) {
+ 272             buffer.position(d.ref.getOffset());
+ 273             d.builder.emit(buffer, patch);
+ 274         }
+ 275     }
+ 276 
+ 277     public Data findData(DataSectionReference ref) {
+ 278         for (Data d : dataItems) {
+ 279             if (d.ref == ref) {
+ 280                 return d;
+ 281             }
+ 282         }
+ 283         return null;
+ 284     }
+ 285 
+ 286     public Iterator&lt;Data&gt; iterator() {
+ 287         return dataItems.iterator();
+ 288     }
+ 289 
+ 290     public static int lcm(int x, int y) {
+ 291         if (x == 0) {
+ 292             return y;
+ 293         } else if (y == 0) {
+ 294             return x;
+ 295         }
+ 296 
+ 297         int a = Math.max(x, y);
+ 298         int b = Math.min(x, y);
+ 299         while (b &gt; 0) {
+ 300             int tmp = a % b;
+ 301             a = b;
+ 302             b = tmp;
+ 303         }
+ 304 
+ 305         int gcd = a;
+ 306         return x * y / gcd;
+ 307     }
+ 308 
+ 309     private static int align(int position, int alignment) {
+ 310         return ((position + alignment - 1) / alignment) * alignment;
+ 311     }
+ 312 
+<a name="17" id="anc17"></a><span class="new"> 313     private void checkClosed() {</span>
+<span class="new"> 314         if (!closed) {</span>
+<span class="new"> 315             throw new IllegalStateException();</span>
+<span class="new"> 316         }</span>
+<span class="new"> 317     }</span>
+<span class="new"> 318 </span>
+<span class="new"> 319     private void checkOpen() {</span>
+<span class="new"> 320         if (closed) {</span>
+<span class="new"> 321             throw new IllegalStateException();</span>
+<span class="new"> 322         }</span>
+<span class="new"> 323     }</span>
+<span class="new"> 324 </span>
+ 325     public void clear() {
+<a name="18" id="anc18"></a><span class="changed"> 326         checkOpen();</span>
+ 327         this.dataItems.clear();
+ 328         this.sectionAlignment = 0;
+ 329         this.sectionSize = 0;
+ 330     }
+ 331 }
+<a name="19" id="anc19"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="19" type="hidden" /></form></body></html>

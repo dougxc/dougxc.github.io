@@ -1,0 +1,703 @@
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java	2016-05-10 14:10:35.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java	2016-05-10 14:10:35.000000000 +0200
+@@ -42,6 +42,7 @@
+ import jdk.vm.ci.code.CompiledCode;
+ import jdk.vm.ci.code.InstalledCode;
+ import jdk.vm.ci.common.JVMCIError;
++import jdk.vm.ci.hotspot.services.HotSpotJVMCICompilerFactory;
+ import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
+ import jdk.vm.ci.inittimer.InitTimer;
+ import jdk.vm.ci.inittimer.SuppressFBWarnings;
+@@ -52,6 +53,7 @@
+ import jdk.vm.ci.runtime.JVMCI;
+ import jdk.vm.ci.runtime.JVMCIBackend;
+ import jdk.vm.ci.runtime.JVMCICompiler;
++import jdk.vm.ci.runtime.services.JVMCICompilerFactory;
+ import jdk.vm.ci.services.Services;
+ import jdk.internal.misc.VM;
+ 
+@@ -204,13 +206,25 @@
+     protected final HotSpotVMConfig config;
+     private final JVMCIBackend hostBackend;
+ 
++    private final JVMCICompilerFactory compilerFactory;
++    private final HotSpotJVMCICompilerFactory hsCompilerFactory;
+     private volatile JVMCICompiler compiler;
+     protected final JVMCIMetaAccessContext metaAccessContext;
+ 
++    /**
++     * Stores the result of {@link HotSpotJVMCICompilerFactory#getCompilationLevelAdjustment} so
++     * that it can be read from the VM.
++     */
++    @SuppressWarnings("unused") private final int compilationLevelAdjustment;
++
+     private final Map<Class<? extends Architecture>, JVMCIBackend> backends = new HashMap<>();
+ 
+     private final Iterable<HotSpotVMEventListener> vmEventListeners;
+ 
++    /**
++     * Stores the result of {@link HotSpotJVMCICompilerFactory#getTrivialPrefixes()} so that it can
++     * be read from the VM.
++     */
+     @SuppressWarnings("unused") private final String[] trivialPrefixes;
+ 
+     @SuppressWarnings("try")
+@@ -259,7 +273,16 @@
+             printConfig(config, compilerToVm);
+         }
+ 
+-        trivialPrefixes = HotSpotJVMCICompilerConfig.getCompilerFactory().getTrivialPrefixes();
++        compilerFactory = HotSpotJVMCICompilerConfig.getCompilerFactory();
++        if (compilerFactory instanceof HotSpotJVMCICompilerFactory) {
++            hsCompilerFactory = (HotSpotJVMCICompilerFactory) compilerFactory;
++            trivialPrefixes = hsCompilerFactory.getTrivialPrefixes();
++            compilationLevelAdjustment = hsCompilerFactory.getCompilationLevelAdjustment(config);
++        } else {
++            hsCompilerFactory = null;
++            trivialPrefixes = null;
++            compilationLevelAdjustment = 0;
++        }
+     }
+ 
+     private JVMCIBackend registerBackend(JVMCIBackend backend) {
+@@ -289,7 +312,7 @@
+         if (compiler == null) {
+             synchronized (this) {
+                 if (compiler == null) {
+-                    compiler = HotSpotJVMCICompilerConfig.getCompilerFactory().createCompiler(this);
++                    compiler = compilerFactory.createCompiler(this);
+                 }
+             }
+         }
+@@ -332,6 +355,14 @@
+      * Called from the VM.
+      */
+     @SuppressWarnings({"unused"})
++    private int adjustCompilationLevel(Class<?> declaringClass, String name, String signature, boolean isOsr, int level) {
++        return hsCompilerFactory.adjustCompilationLevel(config, declaringClass, name, signature, isOsr, level);
++    }
++
++    /**
++     * Called from the VM.
++     */
++    @SuppressWarnings({"unused"})
+     private CompilationRequestResult compileMethod(HotSpotResolvedJavaMethod method, int entryBCI, long jvmciEnv, int id) {
+         CompilationRequestResult result = getCompiler().compileMethod(new HotSpotCompilationRequest(method, entryBCI, jvmciEnv, id));
+         assert result != null : "compileMethod must always return something";
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java	2016-05-10 14:10:35.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java	2016-05-10 14:10:35.000000000 +0200
+@@ -1256,8 +1256,16 @@
+     @HotSpotVMField(name = "nmethod::_verified_entry_point", type = "address", get = HotSpotVMField.Type.OFFSET) @Stable public int nmethodEntryOffset;
+     @HotSpotVMField(name = "nmethod::_comp_level", type = "int", get = HotSpotVMField.Type.OFFSET) @Stable public int nmethodCompLevelOffset;
+ 
++    @HotSpotVMConstant(name = "CompLevel_none") @Stable public int compilationLevelNone;
++    @HotSpotVMConstant(name = "CompLevel_simple") @Stable public int compilationLevelSimple;
++    @HotSpotVMConstant(name = "CompLevel_limited_profile") @Stable public int compilationLevelLimitedProfile;
++    @HotSpotVMConstant(name = "CompLevel_full_profile") @Stable public int compilationLevelFullProfile;
+     @HotSpotVMConstant(name = "CompLevel_full_optimization") @Stable public int compilationLevelFullOptimization;
+ 
++    @HotSpotVMConstant(name = "JVMCIRuntime::none") @Stable public int compLevelAdjustmentNone;
++    @HotSpotVMConstant(name = "JVMCIRuntime::by_holder") @Stable public int compLevelAdjustmentByHolder;
++    @HotSpotVMConstant(name = "JVMCIRuntime::by_full_signature") @Stable public int compLevelAdjustmentByFullSignature;
++
+     @HotSpotVMConstant(name = "InvocationEntryBci") @Stable public int invocationEntryBci;
+ 
+     @HotSpotVMField(name = "JVMCIEnv::_task", type = "CompileTask*", get = HotSpotVMField.Type.OFFSET) @Stable public int jvmciEnvTaskOffset;
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/services/JVMCICompilerFactory.java	2016-05-10 14:10:35.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/services/JVMCICompilerFactory.java	2016-05-10 14:10:35.000000000 +0200
+@@ -70,17 +70,4 @@
+      * Create a new instance of a {@link JVMCICompiler}.
+      */
+     public abstract JVMCICompiler createCompiler(JVMCIRuntime runtime);
+-
+-    /**
+-     * In a tiered system it might be advantageous for startup to keep the JVMCI compiler from
+-     * compiling itself so provide a hook to request that certain packages are compiled only by an
+-     * optimizing first tier. The prefixes should class or package names using / as the separator,
+-     * i.e. jdk/vm/ci for instance.
+-     *
+-     * @return 0 or more Strings identifying packages that should by compiled by the first tier only
+-     *         or null if no redirection to C1 should be performed.
+-     */
+-    public String[] getTrivialPrefixes() {
+-        return null;
+-    }
+ }
+--- old/src/share/vm/jvmci/jvmciCompiler.cpp	2016-05-10 14:10:36.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciCompiler.cpp	2016-05-10 14:10:36.000000000 +0200
+@@ -189,6 +189,15 @@
+   }
+ }
+ 
++CompLevel JVMCIRuntime::adjust_comp_level(methodHandle method, bool is_osr, CompLevel level, JavaThread* thread) {
++  if (!thread->adjusting_comp_level()) {
++    thread->set_adjusting_comp_level(true);
++    level = adjust_comp_level_inner(method, is_osr, level, thread);
++    thread->set_adjusting_comp_level(false);
++  }
++  return level;
++}
++
+ /**
+  * Aborts the VM due to an unexpected exception.
+  */
+--- old/src/share/vm/jvmci/jvmciCompiler.hpp	2016-05-10 14:10:36.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciCompiler.hpp	2016-05-10 14:10:36.000000000 +0200
+@@ -68,8 +68,14 @@
+   // Initialization
+   virtual void initialize();
+ 
++  /**
++   * Initialize the compile queue with the methods in java.lang.Object and
++   * then wait until the queue is empty.
++   */
+   void bootstrap();
+ 
++  bool is_bootstrapping() const { return _bootstrapping; }
++
+   // Compilation entry point for methods
+   virtual void compile_method(ciEnv* env, ciMethod* target, int entry_bci, DirectiveSet* directive);
+ 
+--- old/src/share/vm/jvmci/jvmciJavaClasses.hpp	2016-05-10 14:10:36.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciJavaClasses.hpp	2016-05-10 14:10:36.000000000 +0200
+@@ -33,7 +33,7 @@
+   static void compute_offsets(TRAPS);
+ };
+ 
+-/* This macro defines the structure of the CompilationResult - classes.
++/* This macro defines the structure of the JVMCI classes accessed from VM code.
+  * It will generate classes with accessors similar to javaClasses.hpp, but with specializations for oops, Handles and jni handles.
+  *
+  * The public interface of these classes will look like this:
+@@ -219,7 +219,7 @@
+     boolean_field(HotSpotObjectConstantImpl, compressed)                                                                                                       \
+   end_class                                                                                                                                                    \
+   start_class(HotSpotMetaspaceConstantImpl)                                                                                                                    \
+-    oop_field(HotSpotMetaspaceConstantImpl, metaspaceObject, "Ljdk/vm/ci/hotspot/MetaspaceWrapperObject;")                                            \
++    oop_field(HotSpotMetaspaceConstantImpl, metaspaceObject, "Ljdk/vm/ci/hotspot/MetaspaceWrapperObject;")                                                     \
+     boolean_field(HotSpotMetaspaceConstantImpl, compressed)                                                                                                    \
+   end_class                                                                                                                                                    \
+   start_class(HotSpotSentinelConstant)                                                                                                                         \
+@@ -279,24 +279,25 @@
+     objArrayOop_field(HotSpotStackFrameReference, locals, "[Ljava/lang/Object;")                                                                               \
+     typeArrayOop_field(HotSpotStackFrameReference, localIsVirtual, "[Z")                                                                                       \
+   end_class                                                                                                                                                    \
+-  start_class(HotSpotMetaData) \
+-    typeArrayOop_field(HotSpotMetaData, pcDescBytes, "[B") \
+-    typeArrayOop_field(HotSpotMetaData, scopesDescBytes, "[B") \
+-    typeArrayOop_field(HotSpotMetaData, relocBytes, "[B") \
+-    typeArrayOop_field(HotSpotMetaData, exceptionBytes, "[B") \
+-    typeArrayOop_field(HotSpotMetaData, oopMaps, "[B") \
+-    objArrayOop_field(HotSpotMetaData, metadata, "[Ljava/lang/String;") \
+-  end_class \
+-  start_class(HotSpotOopMap) \
+-    int_field(HotSpotOopMap, offset) \
+-    int_field(HotSpotOopMap, count) \
+-    typeArrayOop_field(HotSpotOopMap, data, "[B") \
++  start_class(HotSpotMetaData)                                                                                                                                 \
++    typeArrayOop_field(HotSpotMetaData, pcDescBytes, "[B")                                                                                                     \
++    typeArrayOop_field(HotSpotMetaData, scopesDescBytes, "[B")                                                                                                 \
++    typeArrayOop_field(HotSpotMetaData, relocBytes, "[B")                                                                                                      \
++    typeArrayOop_field(HotSpotMetaData, exceptionBytes, "[B")                                                                                                  \
++    typeArrayOop_field(HotSpotMetaData, oopMaps, "[B")                                                                                                         \
++    objArrayOop_field(HotSpotMetaData, metadata, "[Ljava/lang/String;")                                                                                        \
++  end_class                                                                                                                                                    \
++  start_class(HotSpotOopMap)                                                                                                                                   \
++    int_field(HotSpotOopMap, offset)                                                                                                                           \
++    int_field(HotSpotOopMap, count)                                                                                                                            \
++    typeArrayOop_field(HotSpotOopMap, data, "[B")                                                                                                              \
+   end_class                                                                                                                                                    \
+   start_class(HotSpotConstantPool)                                                                                                                             \
+     long_field(HotSpotConstantPool, metaspaceConstantPool)                                                                                                     \
+   end_class                                                                                                                                                    \
+   start_class(HotSpotJVMCIRuntime)                                                                                                                             \
+     objArrayOop_field(HotSpotJVMCIRuntime, trivialPrefixes, "[Ljava/lang/String;")                                                                             \
++	  int_field(HotSpotJVMCIRuntime, compilationLevelAdjustment)                                                                                                 \
+   end_class                                                                                                                                                    \
+   /* end*/
+ 
+@@ -309,7 +310,7 @@
+         assert(obj->is_a(SystemDictionary::name##_klass()), "wrong class, " #name " expected, found %s", obj->klass()->external_name());                       \
+         assert(offset != 0, "must be valid offset");                                                                                                           \
+     }                                                                                                                                                          \
+-    static void compute_offsets(TRAPS);                                                                                                                             \
++    static void compute_offsets(TRAPS);                                                                                                                        \
+   public:                                                                                                                                                      \
+     static InstanceKlass* klass() { return SystemDictionary::name##_klass(); }
+ 
+--- old/src/share/vm/jvmci/jvmciRuntime.cpp	2016-05-10 14:10:37.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciRuntime.cpp	2016-05-10 14:10:36.000000000 +0200
+@@ -54,6 +54,7 @@
+ bool JVMCIRuntime::_well_known_classes_initialized = false;
+ int JVMCIRuntime::_trivial_prefixes_count = 0;
+ char** JVMCIRuntime::_trivial_prefixes = NULL;
++JVMCIRuntime::CompLevelAdjustment JVMCIRuntime::_comp_level_adjustment = JVMCIRuntime::none;
+ bool JVMCIRuntime::_shutdown_called = false;
+ 
+ BasicType JVMCIRuntime::kindToBasicType(Handle kind, TRAPS) {
+@@ -666,6 +667,11 @@
+       _trivial_prefixes = prefixes;
+       _trivial_prefixes_count = trivial_prefixes->length();
+     }
++    int adjustment = HotSpotJVMCIRuntime::compilationLevelAdjustment(result);
++    assert(adjustment >= JVMCIRuntime::none &&
++           adjustment <= JVMCIRuntime::by_full_signature,
++           "compilation level adjustment out of bounds");
++    _comp_level_adjustment = (CompLevelAdjustment) adjustment;
+     _HotSpotJVMCIRuntime_initialized = true;
+     _HotSpotJVMCIRuntime_instance = JNIHandles::make_global(result());
+   }
+@@ -803,6 +809,64 @@
+   }
+ }
+ 
++CompLevel JVMCIRuntime::adjust_comp_level_inner(methodHandle method, bool is_osr, CompLevel level, JavaThread* thread) {
++  JVMCICompiler* compiler = JVMCICompiler::instance(thread);
++  if (compiler != NULL && compiler->is_bootstrapping()) {
++    return level;
++  }
++  if (!is_HotSpotJVMCIRuntime_initialized() || !_comp_level_adjustment) {
++    // JVMCI cannot participate in compilation scheduling until
++    // JVMCI is initialized and indicates it wants to participate.
++    return level;
++  }
++
++#define CHECK_RETURN THREAD); \
++if (HAS_PENDING_EXCEPTION) { \
++  Handle exception(THREAD, PENDING_EXCEPTION); \
++  CLEAR_PENDING_EXCEPTION; \
++\
++  java_lang_Throwable::java_printStackTrace(exception, THREAD); \
++  if (HAS_PENDING_EXCEPTION) { \
++    CLEAR_PENDING_EXCEPTION; \
++  } \
++  return level; \
++} \
++(void)(0
++
++
++  Thread* THREAD = thread;
++  HandleMark hm;
++  Handle receiver = JVMCIRuntime::get_HotSpotJVMCIRuntime(CHECK_RETURN);
++  Handle name;
++  Handle sig;
++  if (_comp_level_adjustment == JVMCIRuntime::by_full_signature) {
++    name = java_lang_String::create_from_symbol(method->name(), CHECK_RETURN);
++    sig = java_lang_String::create_from_symbol(method->signature(), CHECK_RETURN);
++  } else {
++    name = Handle();
++    sig = Handle();
++  }
++
++  JavaValue result(T_INT);
++  JavaCallArguments args;
++  args.push_oop(receiver);
++  args.push_oop(method->method_holder()->java_mirror());
++  args.push_oop(name());
++  args.push_oop(sig());
++  args.push_int(is_osr);
++  args.push_int(level);
++  JavaCalls::call_special(&result, receiver->klass(), vmSymbols::adjustCompilationLevel_name(),
++                          vmSymbols::adjustCompilationLevel_signature(), &args, CHECK_RETURN);
++
++  int comp_level = result.get_jint();
++  if (comp_level < CompLevel_none || comp_level > CompLevel_full_optimization) {
++    assert(false, "compilation level out of bounds");
++    return level;
++  }
++  return (CompLevel) comp_level;
++#undef CHECK_RETURN
++}
++
+ bool JVMCIRuntime::treat_as_trivial(Method* method) {
+   if (_HotSpotJVMCIRuntime_initialized) {
+     for (int i = 0; i < _trivial_prefixes_count; i++) {
+--- old/src/share/vm/jvmci/jvmciRuntime.hpp	2016-05-10 14:10:37.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciRuntime.hpp	2016-05-10 14:10:37.000000000 +0200
+@@ -66,6 +66,16 @@
+ };
+ 
+ class JVMCIRuntime: public AllStatic {
++ public:
++  // Constants describing whether JVMCI wants to be able to adjust the compilation
++  // level selected for a method by the VM compilation policy and if so, based on
++  // what information about the method being schedule for compilation.
++  enum CompLevelAdjustment {
++     none = 0,             // no adjustment
++     by_holder = 1,        // adjust based on declaring class of method
++     by_full_signature = 2 // adjust based on declaring class, name and signature of method
++  };
++
+  private:
+   static jobject _HotSpotJVMCIRuntime_instance;
+   static bool _HotSpotJVMCIRuntime_initialized;
+@@ -74,14 +84,11 @@
+   static int _trivial_prefixes_count;
+   static char** _trivial_prefixes;
+ 
++  static CompLevelAdjustment _comp_level_adjustment;
++
+   static bool _shutdown_called;
+ 
+-  /**
+-   * Instantiates a service object, calls its default constructor and returns it.
+-   *
+-   * @param name the name of a class implementing jdk.vm.ci.service.Service
+-   */
+-  static Handle create_Service(const char* name, TRAPS);
++  static CompLevel adjust_comp_level_inner(methodHandle method, bool is_osr, CompLevel level, JavaThread* thread);
+ 
+  public:
+   static bool is_HotSpotJVMCIRuntime_initialized() {
+@@ -126,6 +133,18 @@
+ 
+   static bool treat_as_trivial(Method* method);
+ 
++  /**
++   * Lets JVMCI modify the compilation level currently selected for a method by
++   * the VM compilation policy.
++   *
++   * @param method the method being scheduled for compilation
++   * @param is_osr specifies if the compilation is an OSR compilation
++   * @param level the compilation level currently selected by the VM compilation policy
++   * @param thread the current thread
++   * @return the compilation level to use for the compilation
++   */
++  static CompLevel adjust_comp_level(methodHandle method, bool is_osr, CompLevel level, JavaThread* thread);
++
+   static BasicType kindToBasicType(Handle kind, TRAPS);
+ 
+   // The following routines are all called from compiled JVMCI code
+--- old/src/share/vm/jvmci/vmStructs_jvmci.cpp	2016-05-10 14:10:37.000000000 +0200
++++ new/src/share/vm/jvmci/vmStructs_jvmci.cpp	2016-05-10 14:10:37.000000000 +0200
+@@ -308,6 +308,10 @@
+   declare_preprocessor_constant("FIELDINFO_TAG_SIZE", FIELDINFO_TAG_SIZE) \
+   declare_preprocessor_constant("STACK_BIAS", STACK_BIAS)                 \
+                                                                           \
++  declare_constant(CompLevel_none)                                        \
++  declare_constant(CompLevel_simple)                                      \
++  declare_constant(CompLevel_limited_profile)                             \
++  declare_constant(CompLevel_full_profile)                                \
+   declare_constant(CompLevel_full_optimization)                           \
+   declare_constant(HeapWordSize)                                          \
+   declare_constant(InvocationEntryBci)                                    \
+@@ -464,6 +468,9 @@
+   declare_constant(JVMCIEnv::dependencies_invalid)                        \
+   declare_constant(JVMCIEnv::cache_full)                                  \
+   declare_constant(JVMCIEnv::code_too_large)                              \
++  declare_constant(JVMCIRuntime::none)                                    \
++  declare_constant(JVMCIRuntime::by_holder)                               \
++  declare_constant(JVMCIRuntime::by_full_signature)                       \
+                                                                           \
+   declare_constant(Klass::_lh_neutral_value)                              \
+   declare_constant(Klass::_lh_instance_slow_path_bit)                     \
+--- old/src/share/vm/jvmci/vmSymbols_jvmci.hpp	2016-05-10 14:10:37.000000000 +0200
++++ new/src/share/vm/jvmci/vmSymbols_jvmci.hpp	2016-05-10 14:10:37.000000000 +0200
+@@ -89,6 +89,8 @@
+   template(jdk_vm_ci_code_site_Site,                              "jdk/vm/ci/code/site/Site")                              \
+   template(jdk_vm_ci_code_site_InfopointReason,                   "jdk/vm/ci/code/site/InfopointReason")                   \
+   template(jdk_vm_ci_common_JVMCIError,                           "jdk/vm/ci/common/JVMCIError")                           \
++  template(adjustCompilationLevel_name,                           "adjustCompilationLevel")                                \
++  template(adjustCompilationLevel_signature,                      "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;ZI)I") \
+   template(compileMethod_name,                                    "compileMethod")                                         \
+   template(compileMethod_signature,                               "(Ljdk/vm/ci/hotspot/HotSpotResolvedJavaMethod;IJI)Ljdk/vm/ci/code/CompilationRequestResult;") \
+   template(fromMetaspace_name,                                    "fromMetaspace")                                         \
+--- old/src/share/vm/runtime/advancedThresholdPolicy.cpp	2016-05-10 14:10:38.000000000 +0200
++++ new/src/share/vm/runtime/advancedThresholdPolicy.cpp	2016-05-10 14:10:38.000000000 +0200
+@@ -27,6 +27,9 @@
+ #include "compiler/compileTask.hpp"
+ #include "runtime/advancedThresholdPolicy.hpp"
+ #include "runtime/simpleThresholdPolicy.inline.hpp"
++#if INCLUDE_JVMCI
++#include "jvmci/jvmciRuntime.hpp"
++#endif
+ 
+ #ifdef TIERED
+ // Print an event.
+@@ -453,7 +456,7 @@
+ }
+ 
+ // Determine if a method should be compiled with a normal entry point at a different level.
+-CompLevel AdvancedThresholdPolicy::call_event(Method* method, CompLevel cur_level) {
++CompLevel AdvancedThresholdPolicy::call_event(Method* method, CompLevel cur_level, JavaThread * thread) {
+   CompLevel osr_level = MIN2((CompLevel) method->highest_osr_comp_level(),
+                              common(&AdvancedThresholdPolicy::loop_predicate, method, cur_level, true));
+   CompLevel next_level = common(&AdvancedThresholdPolicy::call_predicate, method, cur_level);
+@@ -470,11 +473,16 @@
+   } else {
+     next_level = MAX2(osr_level, next_level);
+   }
++#if INCLUDE_JVMCI
++  if (UseJVMCICompiler) {
++    next_level = JVMCIRuntime::adjust_comp_level(method, false, next_level, thread);
++  }
++#endif
+   return next_level;
+ }
+ 
+ // Determine if we should do an OSR compilation of a given method.
+-CompLevel AdvancedThresholdPolicy::loop_event(Method* method, CompLevel cur_level) {
++CompLevel AdvancedThresholdPolicy::loop_event(Method* method, CompLevel cur_level, JavaThread * thread) {
+   CompLevel next_level = common(&AdvancedThresholdPolicy::loop_predicate, method, cur_level, true);
+   if (cur_level == CompLevel_none) {
+     // If there is a live OSR method that means that we deopted to the interpreter
+@@ -484,6 +492,11 @@
+       return osr_level;
+     }
+   }
++#if INCLUDE_JVMCI
++  if (UseJVMCICompiler) {
++    next_level = JVMCIRuntime::adjust_comp_level(method, true, next_level, thread);
++  }
++#endif
+   return next_level;
+ }
+ 
+@@ -501,7 +514,7 @@
+     create_mdo(mh, thread);
+   }
+   if (is_compilation_enabled() && !CompileBroker::compilation_is_in_queue(mh)) {
+-    CompLevel next_level = call_event(mh(), level);
++    CompLevel next_level = call_event(mh(), level, thread);
+     if (next_level != level) {
+       compile(mh, InvocationEntryBci, next_level, thread);
+     }
+@@ -521,7 +534,7 @@
+   }
+ 
+   if (is_compilation_enabled()) {
+-    CompLevel next_osr_level = loop_event(imh(), level);
++    CompLevel next_osr_level = loop_event(imh(), level, thread);
+     CompLevel max_osr_level = (CompLevel)imh->highest_osr_comp_level();
+     // At the very least compile the OSR version
+     if (!CompileBroker::compilation_is_in_queue(imh) && (next_osr_level != level)) {
+@@ -534,7 +547,7 @@
+     if (mh() != imh()) { // If there is an enclosing method
+       guarantee(nm != NULL, "Should have nmethod here");
+       cur_level = comp_level(mh());
+-      next_level = call_event(mh(), cur_level);
++      next_level = call_event(mh(), cur_level, thread);
+ 
+       if (max_osr_level == CompLevel_full_optimization) {
+         // The inlinee OSRed to full opt, we need to modify the enclosing method to avoid deopts
+@@ -569,7 +582,7 @@
+       }
+     } else {
+       cur_level = comp_level(imh());
+-      next_level = call_event(imh(), cur_level);
++      next_level = call_event(imh(), cur_level, thread);
+       if (!CompileBroker::compilation_is_in_queue(imh) && (next_level != cur_level)) {
+         compile(imh, InvocationEntryBci, next_level, thread);
+       }
+--- old/src/share/vm/runtime/advancedThresholdPolicy.hpp	2016-05-10 14:10:38.000000000 +0200
++++ new/src/share/vm/runtime/advancedThresholdPolicy.hpp	2016-05-10 14:10:38.000000000 +0200
+@@ -174,10 +174,10 @@
+   // Transition functions.
+   // call_event determines if a method should be compiled at a different
+   // level with a regular invocation entry.
+-  CompLevel call_event(Method* method, CompLevel cur_level);
++  CompLevel call_event(Method* method, CompLevel cur_level, JavaThread * thread);
+   // loop_event checks if a method should be OSR compiled at a different
+   // level.
+-  CompLevel loop_event(Method* method, CompLevel cur_level);
++  CompLevel loop_event(Method* method, CompLevel cur_level, JavaThread * thread);
+   // Has a method been long around?
+   // We don't remove old methods from the compile queue even if they have
+   // very low activity (see select_task()).
+--- old/src/share/vm/runtime/simpleThresholdPolicy.cpp	2016-05-10 14:10:38.000000000 +0200
++++ new/src/share/vm/runtime/simpleThresholdPolicy.cpp	2016-05-10 14:10:38.000000000 +0200
+@@ -29,6 +29,9 @@
+ #include "runtime/simpleThresholdPolicy.hpp"
+ #include "runtime/simpleThresholdPolicy.inline.hpp"
+ #include "code/scopeDesc.hpp"
++#if INCLUDE_JVMCI
++#include "jvmci/jvmciRuntime.hpp"
++#endif
+ 
+ 
+ void SimpleThresholdPolicy::print_counters(const char* prefix, methodHandle mh) {
+@@ -354,7 +357,7 @@
+ }
+ 
+ // Determine if a method should be compiled with a normal entry point at a different level.
+-CompLevel SimpleThresholdPolicy::call_event(Method* method,  CompLevel cur_level) {
++CompLevel SimpleThresholdPolicy::call_event(Method* method,  CompLevel cur_level, JavaThread* thread) {
+   CompLevel osr_level = MIN2((CompLevel) method->highest_osr_comp_level(),
+                              common(&SimpleThresholdPolicy::loop_predicate, method, cur_level));
+   CompLevel next_level = common(&SimpleThresholdPolicy::call_predicate, method, cur_level);
+@@ -371,12 +374,16 @@
+   } else {
+     next_level = MAX2(osr_level, next_level);
+   }
+-
++#if INCLUDE_JVMCI
++  if (UseJVMCICompiler) {
++    next_level = JVMCIRuntime::adjust_comp_level(method, false, next_level, thread);
++  }
++#endif
+   return next_level;
+ }
+ 
+ // Determine if we should do an OSR compilation of a given method.
+-CompLevel SimpleThresholdPolicy::loop_event(Method* method, CompLevel cur_level) {
++CompLevel SimpleThresholdPolicy::loop_event(Method* method, CompLevel cur_level, JavaThread* thread) {
+   CompLevel next_level = common(&SimpleThresholdPolicy::loop_predicate, method, cur_level);
+   if (cur_level == CompLevel_none) {
+     // If there is a live OSR method that means that we deopted to the interpreter
+@@ -386,6 +393,11 @@
+       return osr_level;
+     }
+   }
++#if INCLUDE_JVMCI
++  if (UseJVMCICompiler) {
++    next_level = JVMCIRuntime::adjust_comp_level(method, true, next_level, thread);
++  }
++#endif
+   return next_level;
+ }
+ 
+@@ -394,7 +406,7 @@
+ void SimpleThresholdPolicy::method_invocation_event(const methodHandle& mh, const methodHandle& imh,
+                                               CompLevel level, CompiledMethod* nm, JavaThread* thread) {
+   if (is_compilation_enabled() && !CompileBroker::compilation_is_in_queue(mh)) {
+-    CompLevel next_level = call_event(mh(), level);
++    CompLevel next_level = call_event(mh(), level, thread);
+     if (next_level != level) {
+       compile(mh, InvocationEntryBci, next_level, thread);
+     }
+@@ -410,8 +422,8 @@
+     // Use loop event as an opportunity to also check there's been
+     // enough calls.
+     CompLevel cur_level = comp_level(mh());
+-    CompLevel next_level = call_event(mh(), cur_level);
+-    CompLevel next_osr_level = loop_event(mh(), level);
++    CompLevel next_level = call_event(mh(), cur_level, thread);
++    CompLevel next_osr_level = loop_event(mh(), level, thread);
+ 
+     next_level = MAX2(next_level,
+                       next_osr_level < CompLevel_full_optimization ? next_osr_level : cur_level);
+--- old/src/share/vm/runtime/simpleThresholdPolicy.hpp	2016-05-10 14:10:39.000000000 +0200
++++ new/src/share/vm/runtime/simpleThresholdPolicy.hpp	2016-05-10 14:10:38.000000000 +0200
+@@ -51,10 +51,10 @@
+   // Transition functions.
+   // call_event determines if a method should be compiled at a different
+   // level with a regular invocation entry.
+-  CompLevel call_event(Method* method, CompLevel cur_level);
++  CompLevel call_event(Method* method, CompLevel cur_level, JavaThread* thread);
+   // loop_event checks if a method should be OSR compiled at a different
+   // level.
+-  CompLevel loop_event(Method* method, CompLevel cur_level);
++  CompLevel loop_event(Method* method, CompLevel cur_level, JavaThread* thread);
+   void print_counters(const char* prefix, methodHandle mh);
+ protected:
+   int c1_count() const     { return _c1_count; }
+--- old/src/share/vm/runtime/thread.cpp	2016-05-10 14:10:39.000000000 +0200
++++ new/src/share/vm/runtime/thread.cpp	2016-05-10 14:10:39.000000000 +0200
+@@ -1449,6 +1449,7 @@
+   _pending_deoptimization = -1;
+   _pending_failed_speculation = NULL;
+   _pending_transfer_to_interpreter = false;
++  _adjusting_comp_level = false;
+   _jvmci._alternate_call_target = NULL;
+   assert(_jvmci._implicit_exception_pc == NULL, "must be");
+   if (JVMCICounterSize > 0) {
+--- old/src/share/vm/runtime/thread.hpp	2016-05-10 14:10:39.000000000 +0200
++++ new/src/share/vm/runtime/thread.hpp	2016-05-10 14:10:39.000000000 +0200
+@@ -928,6 +928,9 @@
+   // Specifies if the DeoptReason for the last uncommon trap was Reason_transfer_to_interpreter
+   bool      _pending_transfer_to_interpreter;
+ 
++  // Guard for re-entrant call to JVMCIRuntime::adjust_comp_level
++  bool      _adjusting_comp_level;
++
+   // An object that JVMCI compiled code can use to further describe and
+   // uniquely identify the  speculative optimization guarded by the uncommon trap
+   oop       _pending_failed_speculation;
+@@ -1316,6 +1319,8 @@
+ #if INCLUDE_JVMCI
+   int  pending_deoptimization() const             { return _pending_deoptimization; }
+   oop  pending_failed_speculation() const         { return _pending_failed_speculation; }
++  bool adjusting_comp_level() const               { return _adjusting_comp_level; }
++  void set_adjusting_comp_level(bool b)           { _adjusting_comp_level = b; }
+   bool has_pending_monitorenter() const           { return _pending_monitorenter; }
+   void set_pending_monitorenter(bool b)           { _pending_monitorenter = b; }
+   void set_pending_deoptimization(int reason)     { _pending_deoptimization = reason; }
+--- /dev/null	2016-05-10 14:10:40.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/HotSpotJVMCICompilerFactory.java	2016-05-10 14:10:39.000000000 +0200
+@@ -0,0 +1,76 @@
++/*
++ * Copyright (c) 2016, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package jdk.vm.ci.hotspot.services;
++
++import jdk.vm.ci.hotspot.HotSpotVMConfig;
++import jdk.vm.ci.runtime.services.JVMCICompilerFactory;
++
++/**
++ * HotSpot extensions to {@link JVMCICompilerFactory}.
++ */
++public abstract class HotSpotJVMCICompilerFactory extends JVMCICompilerFactory {
++
++    /**
++     * Gets 0 or more prefixes identifying classes that should by compiled by C1 in simple mode
++     * (i.e., {@code CompLevel_simple}) when HotSpot is running with tiered compilation. The
++     * prefixes should be class or package names using "/" as the separator, e.g. "jdk/vm/ci".
++     *
++     * @return 0 or more Strings identifying packages that should by compiled by the first tier only
++     *         or null if no redirection to C1 should be performed.
++     */
++    public String[] getTrivialPrefixes() {
++        return null;
++    }
++
++    /**
++     * Determines if this object may want to adjust the compilation level for a method that is being
++     * scheduled by the VM for compilation. The legal return values and their meanings are:
++     * <ul>
++     * <li>0 - no adjustment</li>
++     * <li>1 - adjust based on declaring class of method</li>
++     * <li>2 - adjust based on declaring class, name and signature of method</li>
++     * </ul>
++     */
++    public int getCompilationLevelAdjustment(HotSpotVMConfig config) {
++        return config.compLevelAdjustmentNone;
++    }
++
++    /**
++     * Potentially modifies the compilation level currently selected by the VM compilation policy
++     * for a method.
++     *
++     * @param config object for reading HotSpot {@code CompLevel} enum values
++     * @param declaringClass the class in which the method is declared
++     * @param name the name of the method or {@code null} depending on the value that was returned
++     *            by {@link #getCompilationLevelAdjustment(HotSpotVMConfig)}
++     * @param signature the signature of the method or {@code null} depending on the value that was
++     *            returned by {@link #getCompilationLevelAdjustment(HotSpotVMConfig)}
++     * @param isOsr specifies if the compilation being scheduled in an OSR compilation
++     * @param level the compilation level currently selected by the VM compilation policy
++     * @return the compilation level to use for the compilation being scheduled (must be a valid
++     *         {@code CompLevel} enum value)
++     */
++    public int adjustCompilationLevel(HotSpotVMConfig config, Class<?> declaringClass, String name, String signature, boolean isOsr, int level) {
++        throw new InternalError("Should not reach here");
++    }
++}

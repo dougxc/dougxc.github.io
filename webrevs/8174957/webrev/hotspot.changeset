@@ -1,0 +1,123 @@
+# HG changeset patch
+# User Doug Simon <doug.simon@oracle.com>
+# Date 1487153685 -3600
+#      Wed Feb 15 11:14:45 2017 +0100
+# Node ID 37038fe4740ece66b008545987e72ab14a91e357
+# Parent  636271c3697a6f3b7edb5d80a9caf4768cf23a6b
+8174957: [JVMCI] jaotc is broken in Xcomp mode
+
+diff --git a/src/jdk.aot/share/classes/jdk.tools.jaotc/src/jdk/tools/jaotc/DataBuilder.java b/src/jdk.aot/share/classes/jdk.tools.jaotc/src/jdk/tools/jaotc/DataBuilder.java
+--- a/src/jdk.aot/share/classes/jdk.tools.jaotc/src/jdk/tools/jaotc/DataBuilder.java
++++ b/src/jdk.aot/share/classes/jdk.tools.jaotc/src/jdk/tools/jaotc/DataBuilder.java
+@@ -70,8 +70,8 @@
+      */
+     private void fillVMAddresses(HotSpotVMConfigStore config) {
+         for (VMField vmField : config.getFields().values()) {
+-            if (vmField.value != null) {
+-                final long address = vmField.value;
++            if (vmField.value != null && vmField.value instanceof Long) {
++                final long address = (Long) vmField.value;
+                 String value = vmField.name;
+                 /*
+                  * Some fields don't contain addresses but integer values. At least don't add zero
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotCodeCacheProvider.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotCodeCacheProvider.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotCodeCacheProvider.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotCodeCacheProvider.java
+@@ -76,7 +76,7 @@
+             HotSpotVMConfigStore store = runtime.getConfigStore();
+             for (Map.Entry<String, VMField> e : store.getFields().entrySet()) {
+                 VMField field = e.getValue();
+-                if (field.isStatic() && field.value != null && field.value == address) {
++                if (field.isStatic() && field.value != null && field.value instanceof Long && ((Long) field.value) == address) {
+                     return e.getValue() + ":0x" + Long.toHexString(address);
+                 }
+             }
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java
+@@ -497,7 +497,7 @@
+             if (!field.isStatic()) {
+                 printConfigLine(vm, "[vmconfig:instance field] %s %s {offset=%d[0x%x]}%n", field.type, field.name, field.offset, field.offset);
+             } else {
+-                String value = field.value == null ? "null" : String.format("%d[0x%x]", field.value, field.value);
++                String value = field.value == null ? "null" : field.value instanceof Boolean ? field.value.toString() : String.format("%d[0x%x]", field.value, field.value);
+                 printConfigLine(vm, "[vmconfig:static field] %s %s = %s {address=0x%x}%n", field.type, field.name, value, field.address);
+             }
+         }
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/VMField.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/VMField.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/VMField.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/VMField.java
+@@ -38,22 +38,22 @@
+     public final String type;
+ 
+     /**
+-     * If represented field is non-static, this is its offset within the containing structure.
++     * If the represented field is non-static, this is its offset within the containing structure.
+      */
+     public final long offset;
+ 
+     /**
+-     * If represented field is static, this is its address. Otherwise, this field is 0.
++     * If the represented field is static, this is its address. Otherwise, this is 0.
+      */
+     public final long address;
+ 
+     /**
+-     * Value of the field represented as a boxed long; only valid for non-oop static fields. This
+-     * value is only captured once, during JVMCI initialization. If {@link #type} cannot be
+-     * meaningfully (e.g., a struct) or safely (e.g., an oop) expressed as a boxed long, this is
+-     * {@code null}.
++     * Value of the field represented as a boxed boolean if its C++ type is bool otherwise as a
++     * boxed long; only valid for non-oop static fields. This value is only captured once, during
++     * JVMCI initialization. If {@link #type} cannot be meaningfully (e.g., a struct) or safely
++     * (e.g., an oop) expressed as a boxed object, this is {@code null}.
+      */
+-    public final Long value;
++    public final Object value;
+ 
+     /**
+      * Determines if the represented field is static.
+diff --git a/src/share/vm/jvmci/jvmciJavaClasses.hpp b/src/share/vm/jvmci/jvmciJavaClasses.hpp
+--- a/src/share/vm/jvmci/jvmciJavaClasses.hpp
++++ b/src/share/vm/jvmci/jvmciJavaClasses.hpp
+@@ -117,7 +117,7 @@
+     oop_field(VMField, type, "Ljava/lang/String;")                                                                                                             \
+     long_field(VMField, offset)                                                                                                                                \
+     long_field(VMField, address)                                                                                                                               \
+-    oop_field(VMField, value, "Ljava/lang/Long;")                                                                                                              \
++    oop_field(VMField, value, "Ljava/lang/Object;")                                                                                                            \
+   end_class                                                                                                                                                    \
+   start_class(VMFlag)                                                                                                                                          \
+     oop_field(VMFlag, name, "Ljava/lang/String;")                                                                                                              \
+diff --git a/test/compiler/jvmci/compilerToVM/ReadConfigurationTest.java b/test/compiler/jvmci/compilerToVM/ReadConfigurationTest.java
+--- a/test/compiler/jvmci/compilerToVM/ReadConfigurationTest.java
++++ b/test/compiler/jvmci/compilerToVM/ReadConfigurationTest.java
+@@ -38,6 +38,7 @@
+ package compiler.jvmci.compilerToVM;
+ 
+ import jdk.test.lib.Asserts;
++import jdk.vm.ci.hotspot.VMField;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
+ import jdk.vm.ci.hotspot.HotSpotVMConfigAccess;
+ import jdk.vm.ci.hotspot.HotSpotVMConfigStore;
+@@ -49,10 +50,19 @@
+     }
+ 
+     private void runTest() {
+-        TestHotSpotVMConfig config = new TestHotSpotVMConfig(HotSpotJVMCIRuntime.runtime().getConfigStore());
++        HotSpotVMConfigStore store = HotSpotJVMCIRuntime.runtime().getConfigStore();
++        TestHotSpotVMConfig config = new TestHotSpotVMConfig(store);
+         Asserts.assertNE(config.codeCacheHighBound, 0L, "Got null address");
+         Asserts.assertNE(config.stubRoutineJintArrayCopy, 0L, "Got null address");
+ 
++        for (VMField field : store.getFields().values()) {
++                Object value = field.value;
++                if (value != null) {
++                    Asserts.assertTrue(value instanceof Long || value instanceof Boolean,
++                        "Got unexpected value type for VM field " + field.name + ": " + value.getClass());
++                }
++        }
++
+         for (VMIntrinsicMethod m : config.getStore().getIntrinsics()) {
+             Asserts.assertNotNull(m);
+             Asserts.assertNotNull(m.declaringClass);

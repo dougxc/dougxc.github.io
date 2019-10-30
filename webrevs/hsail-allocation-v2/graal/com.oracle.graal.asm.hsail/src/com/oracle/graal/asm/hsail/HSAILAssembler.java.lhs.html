@@ -1,0 +1,772 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2009, 2012, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package com.oracle.graal.asm.hsail;
+  24 
+  25 import static com.oracle.graal.api.code.MemoryBarriers.*;
+  26 import static com.oracle.graal.api.code.ValueUtil.*;
+  27 
+  28 import com.oracle.graal.api.code.*;
+  29 import com.oracle.graal.api.meta.*;
+  30 import com.oracle.graal.graph.*;
+  31 import com.oracle.graal.hsail.*;
+  32 
+  33 /**
+  34  * This class contains routines to emit HSAIL assembly code.
+  35  */
+  36 public abstract class HSAILAssembler extends AbstractHSAILAssembler {
+  37 
+  38     /**
+  39      * Stack size in bytes (used to keep track of spilling).
+  40      */
+  41     private int maxDataTypeSize;
+  42 
+  43     /**
+  44      * Maximum stack offset used by a store operation.
+  45      */
+  46     private long maxStackOffset = 0;
+  47 
+  48     public long upperBoundStackSize() {
+  49         return maxStackOffset + maxDataTypeSize;
+  50     }
+  51 
+  52     public HSAILAssembler(TargetDescription target) {
+  53         super(target);
+  54     }
+  55 
+  56     @Override
+  57     public HSAILAddress makeAddress(Register base, int displacement) {
+  58         return new HSAILAddress(base, displacement);
+  59     }
+  60 
+  61     @Override
+  62     public HSAILAddress getPlaceholder() {
+  63         return null;
+  64     }
+  65 
+  66     @Override
+  67     public final void ensureUniquePC() {
+  68         throw GraalInternalError.unimplemented();
+  69     }
+  70 
+  71     public final void undefined(String str) {
+  72         emitString("undefined operation " + str);
+  73     }
+  74 
+  75     public final void exit() {
+  76         emitString("ret;" + "");
+  77     }
+  78 
+  79     /**
+  80      * Moves an Object into a register.
+  81      *
+  82      * Because Object references become stale after Garbage collection (GC) the technique used here
+  83      * is to load a JNI global reference to that Object into the register. These JNI global
+  84      * references get updated by the GC whenever the GC moves an Object.
+  85      *
+  86      * @param a the destination register
+  87      * @param src the Object Constant being moved
+  88      */
+  89     public abstract void mov(Register a, Constant src);
+  90 
+  91     public final void emitMov(Kind kind, Value dst, Value src) {
+  92         if (isRegister(dst) &amp;&amp; isConstant(src) &amp;&amp; kind.getStackKind() == Kind.Object) {
+  93             mov(asRegister(dst), asConstant(src));
+  94         } else {
+  95             String argtype = getArgTypeFromKind(kind).substring(1);
+  96             emitString("mov_b" + argtype + " " + mapRegOrConstToString(dst) + ", " + mapRegOrConstToString(src) + ";");
+  97         }
+  98     }
+  99 
+ 100     private void emitAddrOp(String instr, Value reg, HSAILAddress addr) {
+ 101         String storeValue = null;
+ 102         if (reg instanceof RegisterValue) {
+ 103             storeValue = HSAIL.mapRegister(reg);
+ 104         } else if (reg instanceof Constant) {
+ 105             storeValue = ((Constant) reg).toValueString();
+ 106         }
+ 107         emitString(instr + " " + storeValue + ", " + mapAddress(addr) + ";");
+ 108     }
+ 109 
+ 110     /**
+ 111      * Emits a memory barrier instruction.
+ 112      *
+ 113      * @param barriers the kind of barrier to emit
+ 114      */
+ 115     public final void emitMembar(int barriers) {
+ 116         if (barriers == 0) {
+ 117             emitString("// no barrier before volatile read");
+ 118         } else if (barriers == JMM_POST_VOLATILE_READ) {
+ 119             emitString("sync; // barriers=" + MemoryBarriers.barriersString(barriers));
+ 120         } else if (barriers == JMM_PRE_VOLATILE_WRITE) {
+ 121             emitString("sync; // barriers=" + MemoryBarriers.barriersString(barriers));
+ 122         } else if (barriers == JMM_POST_VOLATILE_WRITE) {
+ 123             emitString("sync; // barriers=" + MemoryBarriers.barriersString(barriers));
+ 124         }
+ 125     }
+ 126 
+ 127     public final void emitLoad(Kind kind, Value dest, HSAILAddress addr) {
+ 128         emitLoad(dest, addr, getArgTypeFromKind(kind));
+ 129     }
+ 130 
+ 131     public final void emitLoad(Value dest, HSAILAddress addr, String argTypeStr) {
+ 132         emitAddrOp("ld_global_" + argTypeStr, dest, addr);
+ 133     }
+ 134 
+ 135     public final void emitLda(Value dest, HSAILAddress addr) {
+ 136         emitAddrOp("lda_global_u64", dest, addr);
+ 137     }
+ 138 
+ 139     public final void emitLoadKernelArg(Value dest, String kernArgName, String argTypeStr) {
+ 140         emitString("ld_kernarg_" + argTypeStr + " " + HSAIL.mapRegister(dest) + ", [" + kernArgName + "];");
+ 141     }
+ 142 
+ 143     public final void emitStore(Kind kind, Value src, HSAILAddress addr) {
+ 144         emitStore(src, addr, getArgTypeFromKind(kind));
+ 145     }
+ 146 
+ 147     public final void emitStore(Value dest, HSAILAddress addr, String argTypeStr) {
+ 148         emitAddrOp("st_global_" + argTypeStr, dest, addr);
+ 149     }
+ 150 
+ 151     private void storeImmediateImpl(String storeType, String value, HSAILAddress addr) {
+ 152         emitString("st_global_" + storeType + " " + value + ", " + mapAddress(addr) + ";");
+ 153     }
+ 154 
+ 155     public final void emitStoreImmediate(Kind kind, long src, HSAILAddress addr) {
+ 156         assert (kind != Kind.Float &amp;&amp; kind != Kind.Double);
+ 157         storeImmediateImpl(getArgTypeFromKind(kind), Long.toString(src), addr);
+ 158     }
+ 159 
+ 160     public final void emitStoreImmediate(float src, HSAILAddress addr) {
+ 161         storeImmediateImpl("f32", Float.toString(src), addr);
+ 162     }
+ 163 
+ 164     public final void emitStoreImmediate(double src, HSAILAddress addr) {
+ 165         storeImmediateImpl("f64", Double.toString(src), addr);
+ 166     }
+ 167 
+ 168     public final void emitSpillLoad(Kind kind, Value dest, Value src) {
+ 169         emitString("ld_spill_" + getArgTypeFromKind(kind) + " " + HSAIL.mapRegister(dest) + ", " + mapStackSlot(src, getArgSizeFromKind(kind)) + ";");
+ 170     }
+ 171 
+ 172     public final void emitStore(Value src, HSAILAddress addr) {
+ 173         emitString("st_global_" + getArgType(src) + " " + HSAIL.mapRegister(src) + ", " + mapAddress(addr) + ";");
+ 174     }
+ 175 
+ 176     public final void emitSpillStore(Kind kind, Value src, Value dest) {
+ 177         int sizestored = getArgSizeFromKind(kind);
+ 178         if (maxDataTypeSize &lt; sizestored) {
+ 179             maxDataTypeSize = sizestored;
+ 180         }
+ 181         int stackoffset = HSAIL.getStackOffset(dest);
+ 182         if (maxStackOffset &lt; stackoffset) {
+ 183             maxStackOffset = stackoffset;
+ 184         }
+ 185         emitString("st_spill_" + getArgTypeFromKind(kind) + " " + HSAIL.mapRegister(src) + ", " + mapStackSlot(dest, getArgSizeFromKind(kind)) + ";");
+ 186     }
+ 187 
+ 188     /**
+ 189      * The mapping to stack slots is always relative to the beginning of the spillseg.
+ 190      * HSAIL.getStackOffset returns the positive version of the originally negative offset. Then we
+ 191      * back up from that by the argSize in bytes. This ensures that slots of different size do not
+ 192      * overlap, even though we have converted from negative to positive offsets.
+ 193      */
+ 194     public static String mapStackSlot(Value reg, int argSize) {
+ 195         long offset = HSAIL.getStackOffset(reg);
+ 196         int argSizeBytes = argSize / 8;
+ 197         return "[%spillseg]" + "[" + (offset - argSizeBytes) + "]";
+ 198     }
+ 199 
+ 200     public void cbr(String target1) {
+ 201         emitString("cbr " + "$c0" + ", " + target1 + ";");
+ 202     }
+ 203 
+ 204     public int getArgSize(Value src) {
+ 205         return getArgSizeFromKind(src.getKind());
+ 206     }
+ 207 
+ 208     private static int getArgSizeFromKind(Kind kind) {
+ 209         switch (kind) {
+ 210             case Int:
+ 211             case Float:
+ 212                 return 32;
+ 213             case Double:
+ 214             case Long:
+ 215             case Object:
+ 216                 return 64;
+ 217             default:
+ 218                 throw GraalInternalError.shouldNotReachHere();
+ 219         }
+ 220     }
+ 221 
+ 222     private static String getArgType(Value src) {
+ 223         return getArgTypeFromKind(src.getKind());
+ 224     }
+ 225 
+ 226     private static String getArgTypeFromKind(Kind kind) {
+ 227         String prefix = "";
+ 228         switch (kind) {
+ 229             case Float:
+ 230                 prefix = "f32";
+ 231                 break;
+ 232             case Double:
+ 233                 prefix = "f64";
+ 234                 break;
+ 235             case Int:
+ 236                 prefix = "s32";
+ 237                 break;
+ 238             case Long:
+ 239                 prefix = "s64";
+ 240                 break;
+ 241             case Object:
+ 242                 prefix = "u64";
+ 243                 break;
+ 244             case Char:
+ 245                 prefix = "u16";
+ 246                 break;
+ 247             case Short:
+ 248                 prefix = "s16";
+ 249                 break;
+ 250             case Byte:
+ 251                 prefix = "s8";
+ 252                 break;
+ 253             default:
+ 254                 throw GraalInternalError.shouldNotReachHere();
+ 255         }
+ 256         return prefix;
+ 257     }
+ 258 
+ 259     public static final String getArgTypeForceUnsigned(Value src) {
+ 260         return getArgTypeForceUnsignedKind(src.getKind());
+ 261     }
+ 262 
+ 263     public static final String getArgTypeForceUnsignedKind(Kind kind) {
+ 264         switch (kind) {
+ 265             case Int:
+ 266                 return "u32";
+ 267             case Long:
+ 268             case Object:
+ 269                 return "u64";
+ 270             default:
+ 271                 throw GraalInternalError.shouldNotReachHere();
+ 272         }
+ 273     }
+ 274 
+ 275     public static final String getArgTypeBitwiseLogical(Value src) {
+ 276         String length = getArgType(src);
+ 277         String prefix = "_b" + (length.endsWith("64") ? "64" : "32");
+ 278         return prefix;
+ 279     }
+ 280 
+ 281     /**
+ 282      * Emits a compare instruction.
+ 283      *
+ 284      * @param src0 - the first source register
+ 285      * @param src1 - the second source register
+ 286      * @param condition - the compare condition i.e., eq, ne, lt, gt
+ 287      * @param unordered - flag specifying if this is an unordered compare. This only applies to
+ 288      *            float compares.
+ 289      * @param isUnsignedCompare - flag specifying if this is a compare of unsigned values.
+ 290      */
+ 291     public void emitCompare(Kind compareKind, Value src0, Value src1, String condition, boolean unordered, boolean isUnsignedCompare) {
+ 292         // Formulate the prefix of the instruction.
+ 293         // if unordered is true, it should be ignored unless the src type is f32 or f64
+ 294         String argType = getArgTypeFromKind(compareKind);
+ 295         String unorderedPrefix = (argType.startsWith("f") &amp;&amp; unordered ? "u" : "");
+ 296         String prefix = "cmp_" + condition + unorderedPrefix + "_b1_" + (isUnsignedCompare ? getArgTypeForceUnsigned(src1) : argType);
+ 297         // Generate a comment for debugging purposes
+ 298         String comment = (isConstant(src1) &amp;&amp; (src1.getKind() == Kind.Object) &amp;&amp; (asConstant(src1).isNull()) ? " // null test " : "");
+ 299         // Emit the instruction.
+ 300         emitString(prefix + " $c0, " + mapRegOrConstToString(src0) + ", " + mapRegOrConstToString(src1) + ";" + comment);
+ 301     }
+ 302 
+ 303     public void emitConvert(Value dest, Value src, String destType, String srcType) {
+ 304         String prefix = (destType.equals("f32") &amp;&amp; srcType.equals("f64")) ? "cvt_near_" : "cvt_";
+ 305         emitString(prefix + destType + "_" + srcType + " " + HSAIL.mapRegister(dest) + ", " + HSAIL.mapRegister(src) + ";");
+ 306     }
+ 307 
+ 308     public void emitConvert(Value dest, Value src, Kind destKind, Kind srcKind) {
+ 309         String destType = getArgTypeFromKind(destKind);
+ 310         String srcType = getArgTypeFromKind(srcKind);
+ 311         emitConvert(dest, src, destType, srcType);
+ 312     }
+ 313 
+ 314     /**
+ 315      * Emits a convert instruction that uses unsigned prefix, regardless of the type of dest and
+ 316      * src.
+ 317      *
+ 318      * @param dest the destination operand
+ 319      * @param src the source operand
+ 320      */
+ 321     public void emitConvertForceUnsigned(Value dest, Value src) {
+ 322         emitString("cvt_" + getArgTypeForceUnsigned(dest) + "_" + getArgTypeForceUnsigned(src) + " " + HSAIL.mapRegister(dest) + ", " + HSAIL.mapRegister(src) + ";");
+ 323     }
+ 324 
+ 325     public static String mapAddress(HSAILAddress addr) {
+ 326         return "[$d" + addr.getBase().encoding() + " + " + addr.getDisplacement() + "]";
+ 327     }
+ 328 
+ 329     private static String mapRegOrConstToString(Value src) {
+ 330         if (!isConstant(src)) {
+ 331             return HSAIL.mapRegister(src);
+ 332         } else {
+ 333             Constant consrc = asConstant(src);
+ 334             switch (src.getKind()) {
+ 335                 case Boolean:
+ 336                 case Int:
+ 337                     return Integer.toString(consrc.asInt());
+ 338                 case Float:
+ 339                     return Float.toString(consrc.asFloat()) + "f";
+ 340                 case Double:
+ 341                     return Double.toString(consrc.asDouble());
+ 342                 case Long:
+ 343                     return "0x" + Long.toHexString(consrc.asLong());
+ 344                 case Object:
+ 345                     if (consrc.isNull()) {
+ 346                         return "0";
+ 347                     } else {
+ 348                         throw GraalInternalError.shouldNotReachHere("unknown type: " + src);
+ 349                     }
+ 350                 default:
+ 351                     throw GraalInternalError.shouldNotReachHere("unknown type: " + src);
+ 352             }
+ 353         }
+ 354 
+ 355     }
+ 356 
+ 357     /**
+ 358      * Emits an instruction.
+ 359      *
+ 360      * @param mnemonic the instruction mnemonic
+ 361      * @param dest the destination operand
+ 362      * @param sources the source operands
+ 363      */
+ 364     public final void emit(String mnemonic, Value dest, Value... sources) {
+ 365         String prefix = getArgType(dest);
+ 366         emitTextFormattedInstruction(mnemonic + "_" + prefix, dest, sources);
+ 367     }
+ 368 
+ 369     /**
+ 370      * Emits an unsigned instruction.
+ 371      *
+ 372      * @param mnemonic the instruction mnemonic
+ 373      * @param dest the destination argument
+ 374      * @param sources the source arguments
+ 375      *
+ 376      */
+ 377     public final void emitForceUnsigned(String mnemonic, Value dest, Value... sources) {
+ 378         String prefix = getArgTypeForceUnsigned(dest);
+ 379         emitTextFormattedInstruction(mnemonic + "_" + prefix, dest, sources);
+ 380     }
+ 381 
+ 382     public final void emitForceUnsignedKind(String mnemonic, Kind kind, Value dest, Value... sources) {
+ 383         String prefix = getArgTypeForceUnsignedKind(kind);
+ 384         emitTextFormattedInstruction(mnemonic + "_" + prefix, dest, sources);
+ 385     }
+ 386 
+ 387     /**
+ 388      * Emits an instruction for a bitwise logical operation.
+ 389      *
+ 390      * @param mnemonic the instruction mnemonic
+ 391      * @param dest the destination
+ 392      * @param sources the source operands
+ 393      */
+ 394     public final void emitForceBitwise(String mnemonic, Value dest, Value... sources) {
+ 395         String prefix = getArgTypeBitwiseLogical(dest);
+ 396         emitTextFormattedInstruction(mnemonic + prefix, dest, sources);
+ 397     }
+ 398 
+ 399     /**
+ 400      * Central helper routine that emits a text formatted HSAIL instruction via call to
+ 401      * AbstractAssembler.emitString. All the emit routines in the assembler end up calling this one.
+ 402      *
+ 403      * @param instr the full instruction mnenomics including any prefixes
+ 404      * @param dest the destination operand
+ 405      * @param sources the source operand
+ 406      */
+ 407     private void emitTextFormattedInstruction(String instr, Value dest, Value... sources) {
+ 408         /**
+ 409          * Destination can't be a constant and no instruction has &gt; 3 source operands.
+ 410          */
+ 411         assert (!isConstant(dest) &amp;&amp; sources.length &lt;= 3);
+ 412         switch (sources.length) {
+ 413             case 3:
+ 414                 // Emit an instruction with three source operands.
+ 415                 emitString(String.format("%s %s, %s, %s, %s;", instr, HSAIL.mapRegister(dest), mapRegOrConstToString(sources[0]), mapRegOrConstToString(sources[1]), mapRegOrConstToString(sources[2])));
+ 416                 break;
+ 417             case 2:
+ 418                 // Emit an instruction with two source operands.
+ 419                 emitString(String.format("%s %s, %s, %s;", instr, HSAIL.mapRegister(dest), mapRegOrConstToString(sources[0]), mapRegOrConstToString(sources[1])));
+ 420                 break;
+ 421             case 1:
+ 422                 // Emit an instruction with one source operand.
+ 423                 emitString(String.format("%s %s, %s;", instr, HSAIL.mapRegister(dest), mapRegOrConstToString(sources[0])));
+ 424                 break;
+ 425             default:
+ 426                 // Emit an instruction with one source operand.
+ 427                 emitString(String.format("%s %s;", instr, HSAIL.mapRegister(dest)));
+ 428                 break;
+ 429         }
+ 430     }
+ 431 
+ 432     /**
+ 433      * Emits a conditional move instruction.
+ 434      *
+ 435      * @param dest the destination operand storing result of the move
+ 436      * @param trueReg the register that should be copied to dest if the condition is true
+ 437      * @param falseReg the register that should be copied to dest if the condition is false
+ 438      * @param width the width of the instruction (32 or 64 bits)
+ 439      */
+ 440     public final void emitConditionalMove(Value dest, Value trueReg, Value falseReg, int width) {
+ 441         assert (!isConstant(dest));
+ 442         String instr = (width == 32 ? "cmov_b32" : "cmov_b64");
+ 443         emitString(String.format("%s %s, %s%s, %s;", instr, HSAIL.mapRegister(dest), "$c0, ", mapRegOrConstToString(trueReg), mapRegOrConstToString(falseReg)));
+ 444     }
+ 445 
+ 446     /**
+ 447      * Emits code to build a 64-bit pointer from a compressed value and the associated base and
+ 448      * shift. The compressed value could represent either a normal oop or a klass ptr. If the
+ 449      * compressed value is 0, the uncompressed must also be 0. We only emit this if base and shift
+ 450      * are not both zero.
+ 451      *
+ 452      * @param result the register containing the compressed value on input and the uncompressed ptr
+ 453      *            on output
+ 454      * @param base the amount to be added to the compressed value
+ 455      * @param shift the number of bits to shift left the compressed value
+ 456      * @param testForNull true if the compressed value might be null
+ 457      */
+ 458     public void emitCompressedOopDecode(Value result, long base, int shift, boolean testForNull) {
+ 459         assert (base != 0 || shift != 0);
+ 460         assert (!isConstant(result));
+ 461         if (base == 0) {
+ 462             // we don't have to test for null if shl is the only operation
+ 463             emitForceUnsignedKind("shl", Kind.Long, result, result, Constant.forInt(shift));
+ 464         } else if (shift == 0) {
+ 465             // only use add if result is not starting as null (test only if testForNull is true)
+ 466             emitWithOptionalTestForNull(testForNull, "add", result, result, Constant.forLong(base));
+ 467         } else {
+ 468             // only use mad if result is not starting as null (test only if testForNull is true)
+ 469             emitWithOptionalTestForNull(testForNull, "mad", result, result, Constant.forInt(1 &lt;&lt; shift), Constant.forLong(base));
+ 470         }
+ 471     }
+ 472 
+ 473     /**
+ 474      * Emits code to build a compressed value from a full 64-bit pointer using the associated base
+ 475      * and shift. The compressed value could represent either a normal oop or a klass ptr. If the
+ 476      * ptr is 0, the compressed value must also be 0. We only emit this if base and shift are not
+ 477      * both zero.
+ 478      *
+ 479      * @param result the register containing the 64-bit pointer on input and the compressed value on
+ 480      *            output
+ 481      * @param base the amount to be subtracted from the 64-bit pointer
+ 482      * @param shift the number of bits to shift right the 64-bit pointer
+ 483      * @param testForNull true if the 64-bit pointer might be null
+ 484      */
+ 485     public void emitCompressedOopEncode(Value result, long base, int shift, boolean testForNull) {
+ 486         assert (base != 0 || shift != 0);
+ 487         assert (!isConstant(result));
+ 488         if (base != 0) {
+ 489             // only use sub if result is not starting as null (test only if testForNull is true)
+ 490             emitWithOptionalTestForNull(testForNull, "sub", result, result, Constant.forLong(base));
+ 491         }
+ 492         if (shift != 0) {
+ 493             // note that the shr can still be done even if the result is null
+ 494             emitForceUnsignedKind("shr", Kind.Long, result, result, Constant.forInt(shift));
+ 495         }
+ 496     }
+ 497 
+ 498     /**
+ 499      * Emits code for the requested mnemonic on the result and sources. In addition, if testForNull
+ 500      * is true, surrounds the instruction with code that will guarantee that if the result starts as
+ 501      * 0, it will remain 0.
+ 502      *
+ 503      * @param testForNull true if we want to add the code to check for and preserve null
+ 504      * @param mnemonic the instruction to be applied (without size prefix)
+ 505      * @param result the register which is both an input and the final output
+ 506      * @param sources the sources for the mnemonic instruction
+ 507      */
+ 508     private void emitWithOptionalTestForNull(boolean testForNull, String mnemonic, Value result, Value... sources) {
+ 509         if (testForNull) {
+ 510             emitCompare(Kind.Long, result, Constant.forLong(0), "eq", false, true);
+ 511         }
+ 512         emitForceUnsigned(mnemonic, result, sources);
+ 513         if (testForNull) {
+ 514             emitConditionalMove(result, Constant.forLong(0), result, 64);
+ 515         }
+ 516     }
+ 517 
+ 518     /**
+ 519      * Emits an atomic_cas_global instruction.
+ 520      *
+ 521      * @param result result operand that gets the original contents of the memory location
+ 522      * @param address the memory location
+ 523      * @param cmpValue the value that will be compared against the memory location
+ 524      * @param newValue the new value that will be written to the memory location if the cmpValue
+ 525      *            comparison matches
+ 526      */
+ 527     public void emitAtomicCas(Kind accessKind, AllocatableValue result, HSAILAddress address, Value cmpValue, Value newValue) {
+ 528         emitString(String.format("atomic_cas_global_b%d   %s, %s, %s, %s;", getArgSizeFromKind(accessKind), HSAIL.mapRegister(result), mapAddress(address), mapRegOrConstToString(cmpValue),
+ 529                         mapRegOrConstToString(newValue)));
+ 530     }
+ 531 
+ 532     /**
+ 533      * Emits an atomic_add_global instruction.
+ 534      *
+ 535      * @param result result operand that gets the original contents of the memory location
+ 536      * @param address the memory location
+<a name="1" id="anc1"></a><span class="changed"> 537      * @param deltaValue the amount to add</span>
+ 538      */
+<a name="2" id="anc2"></a><span class="changed"> 539     public void emitAtomicAdd(AllocatableValue result, HSAILAddress address, Value deltaValue) {</span>
+<span class="changed"> 540         emitString(String.format("atomic_add_global_u%d   %s, %s, %s;", getArgSize(result), HSAIL.mapRegister(result), mapAddress(address), mapRegOrConstToString(deltaValue)));</span>
+
+
+
+
+
+
+
+ 541     }
+ 542 
+ 543     /**
+ 544      * Emits a comment. Useful for debugging purposes.
+ 545      *
+ 546      * @param comment
+ 547      */
+ 548     public void emitComment(String comment) {
+ 549         emitString(comment);
+ 550     }
+ 551 
+ 552     public String getDeoptInfoName() {
+ 553         return "%_deoptInfo";
+ 554     }
+ 555 
+ 556     public String getDeoptLabelName() {
+ 557         return "@L_Deopt";
+ 558     }
+ 559 
+ 560     public void emitWorkItemAbsId(Value dest) {
+ 561         emitString(String.format("workitemabsid_u32 %s, 0;", HSAIL.mapRegister(dest)));
+ 562     }
+ 563 
+ 564     public void emitCuId(Value dest) {
+ 565         emitString(String.format("cuid_u32 %s;", HSAIL.mapRegister(dest)));
+ 566     }
+ 567 
+ 568     public void emitLaneId(Value dest) {
+ 569         emitString(String.format("laneid_u32 %s;", HSAIL.mapRegister(dest)));
+ 570     }
+ 571 
+ 572     public void emitWaveId(Value dest) {
+ 573         emitString(String.format("waveid_u32 %s;", HSAIL.mapRegister(dest)));
+ 574     }
+ 575 
+ 576     public void emitMaxWaveId(Value dest) {
+ 577         // emitString(String.format("maxwaveid_u32 %s;", HSAIL.mapRegister(dest)));
+ 578         int hardCodedMaxWaveId = 36;
+ 579         emitComment("// Hard-coded maxwaveid=" + hardCodedMaxWaveId + " until it works");
+ 580         emitMov(Kind.Int, dest, Constant.forInt(hardCodedMaxWaveId));
+ 581     }
+ 582 
+ 583     public void emitMultiplyByWavesize(Value dest) {
+ 584         String regName = HSAIL.mapRegister(dest);
+ 585         emitString(String.format("mul_u%d %s, %s, WAVESIZE;", getArgSize(dest), regName, regName));
+ 586     }
+ 587 
+ 588     public void emitGetWavesize(Value dest) {
+ 589         String regName = HSAIL.mapRegister(dest);
+ 590         emitString(String.format("mov_b%d %s, WAVESIZE;", getArgSize(dest), regName));
+ 591     }
+ 592 
+ 593     public void emitLoadAcquire(Value dest, HSAILAddress address) {
+ 594         emitString(String.format("ld_global_acq_u%d %s, %s;", getArgSize(dest), HSAIL.mapRegister(dest), mapAddress(address)));
+ 595     }
+ 596 
+ 597     public void emitStoreRelease(Value src, HSAILAddress address) {
+ 598         emitString(String.format("st_global_rel_u%d %s, %s;", getArgSize(src), HSAIL.mapRegister(src), mapAddress(address)));
+ 599     }
+ 600 }
+<a name="3" id="anc3"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="3" type="hidden" /></form></body></html>

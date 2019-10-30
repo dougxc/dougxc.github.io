@@ -1,0 +1,612 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #include "precompiled.hpp"
+  26 #include "classfile/javaClasses.hpp"
+  27 #include "gc/shared/allocTracer.hpp"
+  28 #include "gc/shared/collectedHeap.hpp"
+  29 #include "gc/shared/memAllocator.hpp"
+  30 #include "gc/shared/threadLocalAllocBuffer.inline.hpp"
+  31 #include "memory/universe.hpp"
+  32 #include "oops/arrayOop.hpp"
+  33 #include "oops/oop.inline.hpp"
+  34 #include "prims/jvmtiExport.hpp"
+  35 #include "runtime/sharedRuntime.hpp"
+  36 #include "runtime/handles.inline.hpp"
+  37 #include "runtime/thread.inline.hpp"
+  38 #include "services/lowMemoryDetector.hpp"
+  39 #include "utilities/align.hpp"
+  40 #include "utilities/copy.hpp"
+  41 
+  42 class MemAllocator::Allocation: StackObj {
+  43   friend class MemAllocator;
+  44 
+  45   const MemAllocator&amp; _allocator;
+  46   Thread*             _thread;
+  47   oop*                _obj_ptr;
+  48   bool                _overhead_limit_exceeded;
+  49   bool                _allocated_outside_tlab;
+  50   size_t              _allocated_tlab_size;
+  51   bool                _tlab_end_reset_for_sample;
+  52 
+  53   bool check_out_of_memory();
+  54   void verify_before();
+  55   void verify_after();
+  56   void notify_allocation();
+  57   void notify_allocation_jvmti_allocation_event();
+  58   void notify_allocation_jvmti_sampler();
+  59   void notify_allocation_low_memory_detector();
+  60   void notify_allocation_jfr_sampler();
+  61   void notify_allocation_dtrace_sampler();
+  62   void check_for_bad_heap_word_value() const;
+  63 #ifdef ASSERT
+  64   void check_for_valid_allocation_state() const;
+  65 #endif
+  66 
+  67   class PreserveObj;
+  68 
+  69 public:
+  70   Allocation(const MemAllocator&amp; allocator, oop* obj_ptr)
+  71     : _allocator(allocator),
+  72       _thread(Thread::current()),
+  73       _obj_ptr(obj_ptr),
+  74       _overhead_limit_exceeded(false),
+  75       _allocated_outside_tlab(false),
+  76       _allocated_tlab_size(0),
+  77       _tlab_end_reset_for_sample(false)
+  78   {
+  79     verify_before();
+  80   }
+  81 
+  82   ~Allocation() {
+  83     if (!check_out_of_memory()) {
+  84       verify_after();
+  85       notify_allocation();
+  86     }
+  87   }
+  88 
+  89   oop obj() const { return *_obj_ptr; }
+  90 };
+  91 
+  92 class MemAllocator::Allocation::PreserveObj: StackObj {
+  93   HandleMark _handle_mark;
+  94   Handle     _handle;
+  95   oop* const _obj_ptr;
+  96 
+  97 public:
+  98   PreserveObj(Thread* thread, oop* obj_ptr)
+  99     : _handle_mark(thread),
+ 100       _handle(thread, *obj_ptr),
+ 101       _obj_ptr(obj_ptr)
+ 102   {
+ 103     *obj_ptr = NULL;
+ 104   }
+ 105 
+ 106   ~PreserveObj() {
+ 107     *_obj_ptr = _handle();
+ 108   }
+ 109 
+ 110   oop operator()() const {
+ 111     return _handle();
+ 112   }
+ 113 };
+ 114 
+ 115 bool MemAllocator::Allocation::check_out_of_memory() {
+ 116   Thread* THREAD = _thread;
+ 117   assert(!HAS_PENDING_EXCEPTION, "Unexpected exception, will result in uninitialized storage");
+ 118 
+ 119   if (obj() != NULL) {
+ 120     return false;
+ 121   }
+ 122 
+<a name="1" id="anc1"></a><span class="changed"> 123   if (!_overhead_limit_exceeded) {</span>
+
+ 124     // -XX:+HeapDumpOnOutOfMemoryError and -XX:OnOutOfMemoryError support
+<a name="2" id="anc2"></a><span class="changed"> 125     report_java_out_of_memory("Java heap space");</span>
+ 126 
+ 127     if (JvmtiExport::should_post_resource_exhausted()) {
+ 128       JvmtiExport::post_resource_exhausted(
+ 129         JVMTI_RESOURCE_EXHAUSTED_OOM_ERROR | JVMTI_RESOURCE_EXHAUSTED_JAVA_HEAP,
+<a name="3" id="anc3"></a><span class="changed"> 130         "Java heap space");</span>
+ 131     }
+<a name="4" id="anc4"></a><span class="changed"> 132     THROW_OOP_(Universe::out_of_memory_error_java_heap(), true);</span>
+
+
+
+ 133   } else {
+<a name="5" id="anc5"></a><span class="changed"> 134     // -XX:+HeapDumpOnOutOfMemoryError and -XX:OnOutOfMemoryError support</span>
+<span class="changed"> 135     report_java_out_of_memory("GC overhead limit exceeded");</span>
+<span class="changed"> 136 </span>
+<span class="changed"> 137     if (JvmtiExport::should_post_resource_exhausted()) {</span>
+<span class="changed"> 138       JvmtiExport::post_resource_exhausted(</span>
+<span class="changed"> 139         JVMTI_RESOURCE_EXHAUSTED_OOM_ERROR | JVMTI_RESOURCE_EXHAUSTED_JAVA_HEAP,</span>
+<span class="changed"> 140         "GC overhead limit exceeded");</span>
+<span class="changed"> 141     }</span>
+<span class="changed"> 142 </span>
+<span class="changed"> 143     THROW_OOP_(Universe::out_of_memory_error_gc_overhead_limit(), true);</span>
+ 144   }
+ 145 }
+ 146 
+ 147 void MemAllocator::Allocation::verify_before() {
+ 148   // Clear unhandled oops for memory allocation.  Memory allocation might
+ 149   // not take out a lock if from tlab, so clear here.
+ 150   Thread* THREAD = _thread;
+ 151   CHECK_UNHANDLED_OOPS_ONLY(THREAD-&gt;clear_unhandled_oops();)
+ 152   assert(!HAS_PENDING_EXCEPTION, "Should not allocate with exception pending");
+ 153   debug_only(check_for_valid_allocation_state());
+ 154   assert(!Universe::heap()-&gt;is_gc_active(), "Allocation during gc not allowed");
+ 155 }
+ 156 
+ 157 void MemAllocator::Allocation::verify_after() {
+ 158   NOT_PRODUCT(check_for_bad_heap_word_value();)
+ 159 }
+ 160 
+ 161 void MemAllocator::Allocation::check_for_bad_heap_word_value() const {
+ 162   MemRegion obj_range = _allocator.obj_memory_range(obj());
+ 163   HeapWord* addr = obj_range.start();
+ 164   size_t size = obj_range.word_size();
+ 165   if (CheckMemoryInitialization &amp;&amp; ZapUnusedHeapArea) {
+ 166     for (size_t slot = 0; slot &lt; size; slot += 1) {
+ 167       assert((*(intptr_t*) (addr + slot)) != ((intptr_t) badHeapWordVal),
+ 168              "Found badHeapWordValue in post-allocation check");
+ 169     }
+ 170   }
+ 171 }
+ 172 
+ 173 #ifdef ASSERT
+ 174 void MemAllocator::Allocation::check_for_valid_allocation_state() const {
+ 175   // How to choose between a pending exception and a potential
+ 176   // OutOfMemoryError?  Don't allow pending exceptions.
+ 177   // This is a VM policy failure, so how do we exhaustively test it?
+ 178   assert(!_thread-&gt;has_pending_exception(),
+ 179          "shouldn't be allocating with pending exception");
+ 180   if (StrictSafepointChecks) {
+ 181     assert(_thread-&gt;allow_allocation(),
+ 182            "Allocation done by thread for which allocation is blocked "
+ 183            "by No_Allocation_Verifier!");
+ 184     // Allocation of an oop can always invoke a safepoint,
+ 185     // hence, the true argument
+ 186     _thread-&gt;check_for_valid_safepoint_state(true);
+ 187   }
+ 188 }
+ 189 #endif
+ 190 
+ 191 void MemAllocator::Allocation::notify_allocation_jvmti_sampler() {
+ 192   // support for JVMTI VMObjectAlloc event (no-op if not enabled)
+ 193   JvmtiExport::vm_object_alloc_event_collector(obj());
+ 194 
+ 195   if (!ThreadHeapSampler::enabled()) {
+ 196     // Sampling disabled
+ 197     return;
+ 198   }
+ 199 
+ 200   if (!_allocated_outside_tlab &amp;&amp; _allocated_tlab_size == 0 &amp;&amp; !_tlab_end_reset_for_sample) {
+ 201     // Sample if it's a non-TLAB allocation, or a TLAB allocation that either refills the TLAB
+ 202     // or expands it due to taking a sampler induced slow path.
+ 203     return;
+ 204   }
+ 205 
+ 206   assert(JavaThread::current()-&gt;heap_sampler().add_sampling_collector(),
+ 207          "Should never return false.");
+ 208 
+ 209   // Only check if the sampler could actually sample something in this path.
+ 210   assert(!JvmtiExport::should_post_sampled_object_alloc() ||
+ 211          !JvmtiSampledObjectAllocEventCollector::object_alloc_is_safe_to_sample() ||
+ 212          _thread-&gt;heap_sampler().sampling_collector_present(),
+ 213          "Sampling collector not present.");
+ 214 
+ 215   if (JvmtiExport::should_post_sampled_object_alloc()) {
+ 216     // If we want to be sampling, protect the allocated object with a Handle
+ 217     // before doing the callback. The callback is done in the destructor of
+ 218     // the JvmtiSampledObjectAllocEventCollector.
+ 219     PreserveObj obj_h(_thread, _obj_ptr);
+ 220     JvmtiSampledObjectAllocEventCollector collector;
+ 221     size_t size_in_bytes = _allocator._word_size * HeapWordSize;
+ 222     ThreadLocalAllocBuffer&amp; tlab = _thread-&gt;tlab();
+ 223     size_t bytes_since_last = _allocated_outside_tlab ? 0 : tlab.bytes_since_last_sample_point();
+ 224     _thread-&gt;heap_sampler().check_for_sampling(obj_h(), size_in_bytes, bytes_since_last);
+ 225   }
+ 226 
+ 227   assert(JavaThread::current()-&gt;heap_sampler().remove_sampling_collector(), "Should never return false.");
+ 228 
+ 229   if (_tlab_end_reset_for_sample || _allocated_tlab_size != 0) {
+ 230     _thread-&gt;tlab().set_sample_end();
+ 231   }
+ 232 }
+ 233 
+ 234 void MemAllocator::Allocation::notify_allocation_low_memory_detector() {
+ 235   // support low memory notifications (no-op if not enabled)
+ 236   LowMemoryDetector::detect_low_memory_for_collected_pools();
+ 237 }
+ 238 
+ 239 void MemAllocator::Allocation::notify_allocation_jfr_sampler() {
+ 240   HeapWord* mem = (HeapWord*)obj();
+ 241   size_t size_in_bytes = _allocator._word_size * HeapWordSize;
+ 242 
+ 243   if (_allocated_outside_tlab) {
+ 244     AllocTracer::send_allocation_outside_tlab(_allocator._klass, mem, size_in_bytes, _thread);
+ 245   } else if (_allocated_tlab_size != 0) {
+ 246     // TLAB was refilled
+ 247     AllocTracer::send_allocation_in_new_tlab(_allocator._klass, mem, _allocated_tlab_size * HeapWordSize,
+ 248                                              size_in_bytes, _thread);
+ 249   }
+ 250 }
+ 251 
+ 252 void MemAllocator::Allocation::notify_allocation_dtrace_sampler() {
+ 253   if (DTraceAllocProbes) {
+ 254     // support for Dtrace object alloc event (no-op most of the time)
+ 255     Klass* klass = _allocator._klass;
+ 256     size_t word_size = _allocator._word_size;
+ 257     if (klass != NULL &amp;&amp; klass-&gt;name() != NULL) {
+ 258       SharedRuntime::dtrace_object_alloc(obj(), (int)word_size);
+ 259     }
+ 260   }
+ 261 }
+ 262 
+ 263 void MemAllocator::Allocation::notify_allocation() {
+ 264   notify_allocation_low_memory_detector();
+ 265   notify_allocation_jfr_sampler();
+ 266   notify_allocation_dtrace_sampler();
+ 267   notify_allocation_jvmti_sampler();
+ 268 }
+ 269 
+ 270 HeapWord* MemAllocator::allocate_outside_tlab(Allocation&amp; allocation) const {
+ 271   allocation._allocated_outside_tlab = true;
+ 272   HeapWord* mem = _heap-&gt;mem_allocate(_word_size, &amp;allocation._overhead_limit_exceeded);
+ 273   if (mem == NULL) {
+ 274     return mem;
+ 275   }
+ 276 
+ 277   NOT_PRODUCT(_heap-&gt;check_for_non_bad_heap_word_value(mem, _word_size));
+ 278   size_t size_in_bytes = _word_size * HeapWordSize;
+ 279   _thread-&gt;incr_allocated_bytes(size_in_bytes);
+ 280 
+ 281   return mem;
+ 282 }
+ 283 
+ 284 HeapWord* MemAllocator::allocate_inside_tlab(Allocation&amp; allocation) const {
+ 285   assert(UseTLAB, "should use UseTLAB");
+ 286 
+ 287   // Try allocating from an existing TLAB.
+ 288   HeapWord* mem = _thread-&gt;tlab().allocate(_word_size);
+ 289   if (mem != NULL) {
+ 290     return mem;
+ 291   }
+ 292 
+ 293   // Try refilling the TLAB and allocating the object in it.
+ 294   return allocate_inside_tlab_slow(allocation);
+ 295 }
+ 296 
+ 297 HeapWord* MemAllocator::allocate_inside_tlab_slow(Allocation&amp; allocation) const {
+ 298   HeapWord* mem = NULL;
+ 299   ThreadLocalAllocBuffer&amp; tlab = _thread-&gt;tlab();
+ 300 
+ 301   if (ThreadHeapSampler::enabled()) {
+ 302     // Try to allocate the sampled object from TLAB, it is possible a sample
+ 303     // point was put and the TLAB still has space.
+ 304     tlab.set_back_allocation_end();
+ 305     mem = tlab.allocate(_word_size);
+ 306     if (mem != NULL) {
+ 307       allocation._tlab_end_reset_for_sample = true;
+ 308       return mem;
+ 309     }
+ 310   }
+ 311 
+ 312   // Retain tlab and allocate object in shared space if
+ 313   // the amount free in the tlab is too large to discard.
+ 314   if (tlab.free() &gt; tlab.refill_waste_limit()) {
+ 315     tlab.record_slow_allocation(_word_size);
+ 316     return NULL;
+ 317   }
+ 318 
+ 319   // Discard tlab and allocate a new one.
+ 320   // To minimize fragmentation, the last TLAB may be smaller than the rest.
+ 321   size_t new_tlab_size = tlab.compute_size(_word_size);
+ 322 
+ 323   tlab.retire_before_allocation();
+ 324 
+ 325   if (new_tlab_size == 0) {
+ 326     return NULL;
+ 327   }
+ 328 
+ 329   // Allocate a new TLAB requesting new_tlab_size. Any size
+ 330   // between minimal and new_tlab_size is accepted.
+ 331   size_t min_tlab_size = ThreadLocalAllocBuffer::compute_min_size(_word_size);
+ 332   mem = _heap-&gt;allocate_new_tlab(min_tlab_size, new_tlab_size, &amp;allocation._allocated_tlab_size);
+ 333   if (mem == NULL) {
+ 334     assert(allocation._allocated_tlab_size == 0,
+ 335            "Allocation failed, but actual size was updated. min: " SIZE_FORMAT
+ 336            ", desired: " SIZE_FORMAT ", actual: " SIZE_FORMAT,
+ 337            min_tlab_size, new_tlab_size, allocation._allocated_tlab_size);
+ 338     return NULL;
+ 339   }
+ 340   assert(allocation._allocated_tlab_size != 0, "Allocation succeeded but actual size not updated. mem at: "
+ 341          PTR_FORMAT " min: " SIZE_FORMAT ", desired: " SIZE_FORMAT,
+ 342          p2i(mem), min_tlab_size, new_tlab_size);
+ 343 
+ 344   if (ZeroTLAB) {
+ 345     // ..and clear it.
+ 346     Copy::zero_to_words(mem, allocation._allocated_tlab_size);
+ 347   } else {
+ 348     // ...and zap just allocated object.
+ 349 #ifdef ASSERT
+ 350     // Skip mangling the space corresponding to the object header to
+ 351     // ensure that the returned space is not considered parsable by
+ 352     // any concurrent GC thread.
+ 353     size_t hdr_size = oopDesc::header_size();
+ 354     Copy::fill_to_words(mem + hdr_size, allocation._allocated_tlab_size - hdr_size, badHeapWordVal);
+ 355 #endif // ASSERT
+ 356   }
+ 357 
+ 358   tlab.fill(mem, mem + _word_size, allocation._allocated_tlab_size);
+ 359   return mem;
+ 360 }
+ 361 
+ 362 HeapWord* MemAllocator::mem_allocate(Allocation&amp; allocation) const {
+ 363   if (UseTLAB) {
+ 364     HeapWord* result = allocate_inside_tlab(allocation);
+ 365     if (result != NULL) {
+ 366       return result;
+ 367     }
+ 368   }
+ 369 
+ 370   return allocate_outside_tlab(allocation);
+ 371 }
+ 372 
+ 373 oop MemAllocator::allocate() const {
+ 374   oop obj = NULL;
+ 375   {
+ 376     Allocation allocation(*this, &amp;obj);
+ 377     HeapWord* mem = mem_allocate(allocation);
+ 378     if (mem != NULL) {
+ 379       obj = initialize(mem);
+ 380     }
+ 381   }
+ 382   return obj;
+ 383 }
+ 384 
+ 385 void MemAllocator::mem_clear(HeapWord* mem) const {
+ 386   assert(mem != NULL, "cannot initialize NULL object");
+ 387   const size_t hs = oopDesc::header_size();
+ 388   assert(_word_size &gt;= hs, "unexpected object size");
+ 389   oopDesc::set_klass_gap(mem, 0);
+ 390   Copy::fill_to_aligned_words(mem + hs, _word_size - hs);
+ 391 }
+ 392 
+ 393 oop MemAllocator::finish(HeapWord* mem) const {
+ 394   assert(mem != NULL, "NULL object pointer");
+ 395   if (UseBiasedLocking) {
+ 396     oopDesc::set_mark_raw(mem, _klass-&gt;prototype_header());
+ 397   } else {
+ 398     // May be bootstrapping
+ 399     oopDesc::set_mark_raw(mem, markOopDesc::prototype());
+ 400   }
+ 401   // Need a release store to ensure array/class length, mark word, and
+ 402   // object zeroing are visible before setting the klass non-NULL, for
+ 403   // concurrent collectors.
+ 404   oopDesc::release_set_klass(mem, _klass);
+ 405   return oop(mem);
+ 406 }
+ 407 
+ 408 oop ObjAllocator::initialize(HeapWord* mem) const {
+ 409   mem_clear(mem);
+ 410   return finish(mem);
+ 411 }
+ 412 
+ 413 MemRegion ObjArrayAllocator::obj_memory_range(oop obj) const {
+ 414   if (_do_zero) {
+ 415     return MemAllocator::obj_memory_range(obj);
+ 416   }
+ 417   ArrayKlass* array_klass = ArrayKlass::cast(_klass);
+ 418   const size_t hs = arrayOopDesc::header_size(array_klass-&gt;element_type());
+ 419   return MemRegion(((HeapWord*)obj) + hs, _word_size - hs);
+ 420 }
+ 421 
+ 422 oop ObjArrayAllocator::initialize(HeapWord* mem) const {
+ 423   // Set array length before setting the _klass field because a
+ 424   // non-NULL klass field indicates that the object is parsable by
+ 425   // concurrent GC.
+ 426   assert(_length &gt;= 0, "length should be non-negative");
+ 427   if (_do_zero) {
+ 428     mem_clear(mem);
+ 429   }
+ 430   arrayOopDesc::set_length(mem, _length);
+ 431   return finish(mem);
+ 432 }
+ 433 
+ 434 oop ClassAllocator::initialize(HeapWord* mem) const {
+ 435   // Set oop_size field before setting the _klass field because a
+ 436   // non-NULL _klass field indicates that the object is parsable by
+ 437   // concurrent GC.
+ 438   assert(_word_size &gt; 0, "oop_size must be positive.");
+ 439   mem_clear(mem);
+ 440   java_lang_Class::set_oop_size(mem, (int)_word_size);
+ 441   return finish(mem);
+ 442 }
+<a name="6" id="anc6"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="6" type="hidden" /></form></body></html>

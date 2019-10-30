@@ -1,0 +1,593 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 1998, 2015, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #include "precompiled.hpp"
+  26 #include "compiler/compileTask.hpp"
+  27 #include "compiler/compileLog.hpp"
+  28 #include "compiler/compileBroker.hpp"
+  29 #include "compiler/compilerDirectives.hpp"
+  30 
+  31 CompileTask*  CompileTask::_task_free_list = NULL;
+  32 #ifdef ASSERT
+  33 int CompileTask::_num_allocated_tasks = 0;
+  34 #endif
+  35 
+  36 /**
+  37  * Allocate a CompileTask, from the free list if possible.
+  38  */
+  39 CompileTask* CompileTask::allocate() {
+  40   MutexLocker locker(CompileTaskAlloc_lock);
+  41   CompileTask* task = NULL;
+  42 
+  43   if (_task_free_list != NULL) {
+  44     task = _task_free_list;
+  45     _task_free_list = task-&gt;next();
+  46     task-&gt;set_next(NULL);
+  47   } else {
+  48     task = new CompileTask();
+  49     DEBUG_ONLY(_num_allocated_tasks++;)
+<a name="1" id="anc1"></a><span class="changed">  50     assert (WhiteBoxAPI || _num_allocated_tasks &lt; 10000, "Leaking compilation tasks?");</span>
+  51     task-&gt;set_next(NULL);
+  52     task-&gt;set_is_free(true);
+  53   }
+  54   assert(task-&gt;is_free(), "Task must be free.");
+  55   task-&gt;set_is_free(false);
+  56   return task;
+  57 }
+  58 
+  59 /**
+  60 * Add a task to the free list.
+  61 */
+  62 
+  63 void CompileTask::free(CompileTask* task) {
+  64  MutexLocker locker(CompileTaskAlloc_lock);
+  65  if (!task-&gt;is_free()) {
+  66    task-&gt;set_code(NULL);
+  67    assert(!task-&gt;lock()-&gt;is_locked(), "Should not be locked when freed");
+  68    JNIHandles::destroy_global(task-&gt;_method_holder);
+  69    JNIHandles::destroy_global(task-&gt;_hot_method_holder);
+  70 
+  71    task-&gt;set_is_free(true);
+  72    task-&gt;set_next(_task_free_list);
+  73    _task_free_list = task;
+  74  }
+  75 }
+  76 
+  77 
+  78 void CompileTask::initialize(int compile_id,
+  79                              const methodHandle&amp; method,
+  80                              int osr_bci,
+  81                              int comp_level,
+  82                              const methodHandle&amp; hot_method,
+  83                              int hot_count,
+  84                              const char* comment,
+  85                              bool is_blocking) {
+  86   assert(!_lock-&gt;is_locked(), "bad locking");
+  87 
+  88   _compile_id = compile_id;
+  89   _method = method();
+  90   _method_holder = JNIHandles::make_global(method-&gt;method_holder()-&gt;klass_holder());
+  91   _osr_bci = osr_bci;
+  92   _is_blocking = is_blocking;
+  93   _comp_level = comp_level;
+  94   _num_inlined_bytecodes = 0;
+  95 
+  96   _is_complete = false;
+  97   _is_success = false;
+  98   _code_handle = NULL;
+  99 
+ 100   _hot_method = NULL;
+ 101   _hot_method_holder = NULL;
+ 102   _hot_count = hot_count;
+ 103   _time_queued = 0;  // tidy
+ 104   _comment = comment;
+ 105   _failure_reason = NULL;
+ 106 
+ 107   if (LogCompilation) {
+ 108     _time_queued = os::elapsed_counter();
+ 109     if (hot_method.not_null()) {
+ 110       if (hot_method == method) {
+ 111         _hot_method = _method;
+ 112       } else {
+ 113         _hot_method = hot_method();
+ 114         // only add loader or mirror if different from _method_holder
+ 115         _hot_method_holder = JNIHandles::make_global(hot_method-&gt;method_holder()-&gt;klass_holder());
+ 116       }
+ 117     }
+ 118   }
+ 119 
+ 120   _next = NULL;
+ 121 }
+ 122 
+ 123 // ------------------------------------------------------------------
+ 124 // CompileTask::code/set_code
+ 125 //
+ 126 nmethod* CompileTask::code() const {
+ 127   if (_code_handle == NULL)  return NULL;
+ 128   return _code_handle-&gt;code();
+ 129 }
+ 130 
+ 131 void CompileTask::set_code(nmethod* nm) {
+ 132   if (_code_handle == NULL &amp;&amp; nm == NULL)  return;
+ 133   guarantee(_code_handle != NULL, "");
+ 134   _code_handle-&gt;set_code(nm);
+ 135   if (nm == NULL)  _code_handle = NULL;  // drop the handle also
+ 136 }
+ 137 
+ 138 void CompileTask::mark_on_stack() {
+ 139   // Mark these methods as something redefine classes cannot remove.
+ 140   _method-&gt;set_on_stack(true);
+ 141   if (_hot_method != NULL) {
+ 142     _hot_method-&gt;set_on_stack(true);
+ 143   }
+ 144 }
+ 145 
+ 146 // RedefineClasses support
+ 147 void CompileTask::metadata_do(void f(Metadata*)) {
+ 148   f(method());
+ 149   if (hot_method() != NULL &amp;&amp; hot_method() != method()) {
+ 150     f(hot_method());
+ 151   }
+ 152 }
+ 153 
+ 154 // ------------------------------------------------------------------
+ 155 // CompileTask::print_line_on_error
+ 156 //
+ 157 // This function is called by fatal error handler when the thread
+ 158 // causing troubles is a compiler thread.
+ 159 //
+ 160 // Do not grab any lock, do not allocate memory.
+ 161 //
+ 162 // Otherwise it's the same as CompileTask::print_line()
+ 163 //
+ 164 void CompileTask::print_line_on_error(outputStream* st, char* buf, int buflen) {
+ 165   // print compiler name
+ 166   st-&gt;print("%s:", CompileBroker::compiler_name(comp_level()));
+ 167   print(st);
+ 168 }
+ 169 
+ 170 // ------------------------------------------------------------------
+ 171 // CompileTask::print_tty
+ 172 void CompileTask::print_tty() {
+ 173   ttyLocker ttyl;  // keep the following output all in one block
+ 174   // print compiler name if requested
+ 175   if (CIPrintCompilerName) tty-&gt;print("%s:", CompileBroker::compiler_name(comp_level()));
+ 176     print(tty);
+ 177 }
+ 178 
+ 179 // ------------------------------------------------------------------
+ 180 // CompileTask::print_impl
+ 181 void CompileTask::print_impl(outputStream* st, Method* method, int compile_id, int comp_level,
+ 182                                          bool is_osr_method, int osr_bci, bool is_blocking,
+ 183                                          const char* msg, bool short_form, bool cr) {
+ 184   if (!short_form) {
+ 185     st-&gt;print("%7d ", (int) st-&gt;time_stamp().milliseconds());  // print timestamp
+ 186   }
+ 187   // print compiler name if requested
+ 188   if (CIPrintCompilerName) {
+ 189     st-&gt;print("%s:", CompileBroker::compiler_name(comp_level));
+ 190   }
+ 191   st-&gt;print("%4d ", compile_id);    // print compilation number
+ 192 
+ 193   // For unloaded methods the transition to zombie occurs after the
+ 194   // method is cleared so it's impossible to report accurate
+ 195   // information for that case.
+ 196   bool is_synchronized = false;
+ 197   bool has_exception_handler = false;
+ 198   bool is_native = false;
+ 199   if (method != NULL) {
+ 200     is_synchronized       = method-&gt;is_synchronized();
+ 201     has_exception_handler = method-&gt;has_exception_handler();
+ 202     is_native             = method-&gt;is_native();
+ 203   }
+ 204   // method attributes
+ 205   const char compile_type   = is_osr_method                   ? '%' : ' ';
+ 206   const char sync_char      = is_synchronized                 ? 's' : ' ';
+ 207   const char exception_char = has_exception_handler           ? '!' : ' ';
+ 208   const char blocking_char  = is_blocking                     ? 'b' : ' ';
+ 209   const char native_char    = is_native                       ? 'n' : ' ';
+ 210 
+ 211   // print method attributes
+ 212   st-&gt;print("%c%c%c%c%c ", compile_type, sync_char, exception_char, blocking_char, native_char);
+ 213 
+ 214   if (TieredCompilation) {
+ 215     if (comp_level != -1)  st-&gt;print("%d ", comp_level);
+ 216     else                   st-&gt;print("- ");
+ 217   }
+ 218   st-&gt;print("     ");  // more indent
+ 219 
+ 220   if (method == NULL) {
+ 221     st-&gt;print("(method)");
+ 222   } else {
+ 223     method-&gt;print_short_name(st);
+ 224     if (is_osr_method) {
+ 225       st-&gt;print(" @ %d", osr_bci);
+ 226     }
+ 227     if (method-&gt;is_native())
+ 228       st-&gt;print(" (native)");
+ 229     else
+ 230       st-&gt;print(" (%d bytes)", method-&gt;code_size());
+ 231   }
+ 232 
+ 233   if (msg != NULL) {
+ 234     st-&gt;print("   %s", msg);
+ 235   }
+ 236   if (cr) {
+ 237     st-&gt;cr();
+ 238   }
+ 239 }
+ 240 
+ 241 void CompileTask::print_inline_indent(int inline_level, outputStream* st) {
+ 242   //         1234567
+ 243   st-&gt;print("        ");     // print timestamp
+ 244   //         1234
+ 245   st-&gt;print("     ");        // print compilation number
+ 246   //         %s!bn
+ 247   st-&gt;print("      ");       // print method attributes
+ 248   if (TieredCompilation) {
+ 249     st-&gt;print("  ");
+ 250   }
+ 251   st-&gt;print("     ");        // more indent
+ 252   st-&gt;print("    ");         // initial inlining indent
+ 253   for (int i = 0; i &lt; inline_level; i++)  st-&gt;print("  ");
+ 254 }
+ 255 
+ 256 // ------------------------------------------------------------------
+ 257 // CompileTask::print_compilation
+ 258 void CompileTask::print(outputStream* st, const char* msg, bool short_form, bool cr) {
+ 259   bool is_osr_method = osr_bci() != InvocationEntryBci;
+ 260   print_impl(st, method(), compile_id(), comp_level(), is_osr_method, osr_bci(), is_blocking(), msg, short_form, cr);
+ 261 }
+ 262 
+ 263 // ------------------------------------------------------------------
+ 264 // CompileTask::log_task
+ 265 void CompileTask::log_task(xmlStream* log) {
+ 266   Thread* thread = Thread::current();
+ 267   methodHandle method(thread, this-&gt;method());
+ 268   ResourceMark rm(thread);
+ 269 
+ 270   // &lt;task id='9' method='M' osr_bci='X' level='1' blocking='1' stamp='1.234'&gt;
+ 271   log-&gt;print(" compile_id='%d'", _compile_id);
+ 272   if (_osr_bci != CompileBroker::standard_entry_bci) {
+ 273     log-&gt;print(" compile_kind='osr'");  // same as nmethod::compile_kind
+ 274   } // else compile_kind='c2c'
+ 275   if (!method.is_null())  log-&gt;method(method);
+ 276   if (_osr_bci != CompileBroker::standard_entry_bci) {
+ 277     log-&gt;print(" osr_bci='%d'", _osr_bci);
+ 278   }
+ 279   // Always print the level in tiered.
+ 280   if (_comp_level != CompLevel_highest_tier || TieredCompilation) {
+ 281     log-&gt;print(" level='%d'", _comp_level);
+ 282   }
+ 283   if (_is_blocking) {
+ 284     log-&gt;print(" blocking='1'");
+ 285   }
+ 286   log-&gt;stamp();
+ 287 }
+ 288 
+ 289 // ------------------------------------------------------------------
+ 290 // CompileTask::log_task_queued
+ 291 void CompileTask::log_task_queued() {
+ 292   Thread* thread = Thread::current();
+ 293   ttyLocker ttyl;
+ 294   ResourceMark rm(thread);
+ 295 
+ 296   xtty-&gt;begin_elem("task_queued");
+ 297   log_task(xtty);
+ 298   if (_comment != NULL) {
+ 299     xtty-&gt;print(" comment='%s'", _comment);
+ 300   }
+ 301   if (_hot_method != NULL) {
+ 302     methodHandle hot(thread, _hot_method);
+ 303     methodHandle method(thread, _method);
+ 304     if (hot() != method()) {
+ 305       xtty-&gt;method(hot);
+ 306     }
+ 307   }
+ 308   if (_hot_count != 0) {
+ 309     xtty-&gt;print(" hot_count='%d'", _hot_count);
+ 310   }
+ 311   xtty-&gt;end_elem();
+ 312 }
+ 313 
+ 314 
+ 315 // ------------------------------------------------------------------
+ 316 // CompileTask::log_task_dequeued
+ 317 void CompileTask::log_task_dequeued(const char* comment) {
+ 318   if (LogCompilation &amp;&amp; xtty != NULL) {
+ 319     Thread* thread = Thread::current();
+ 320     ttyLocker ttyl;
+ 321     ResourceMark rm(thread);
+ 322 
+ 323     xtty-&gt;begin_elem("task_dequeued");
+ 324     log_task(xtty);
+ 325     if (comment != NULL) {
+ 326       xtty-&gt;print(" comment='%s'", comment);
+ 327     }
+ 328     xtty-&gt;end_elem();
+ 329   }
+ 330 }
+ 331 
+ 332 
+ 333 // ------------------------------------------------------------------
+ 334 // CompileTask::log_task_start
+ 335 void CompileTask::log_task_start(CompileLog* log)   {
+ 336   log-&gt;begin_head("task");
+ 337   log_task(log);
+ 338   log-&gt;end_head();
+ 339 }
+ 340 
+ 341 
+ 342 // ------------------------------------------------------------------
+ 343 // CompileTask::log_task_done
+ 344 void CompileTask::log_task_done(CompileLog* log) {
+ 345   Thread* thread = Thread::current();
+ 346   methodHandle method(thread, this-&gt;method());
+ 347   ResourceMark rm(thread);
+ 348 
+ 349   if (!_is_success) {
+ 350     const char* reason = _failure_reason != NULL ? _failure_reason : "unknown";
+ 351     log-&gt;elem("failure reason='%s'", reason);
+ 352   }
+ 353 
+ 354   // &lt;task_done ... stamp='1.234'&gt;  &lt;/task&gt;
+ 355   nmethod* nm = code();
+ 356   log-&gt;begin_elem("task_done success='%d' nmsize='%d' count='%d'",
+ 357                   _is_success, nm == NULL ? 0 : nm-&gt;content_size(),
+ 358                   method-&gt;invocation_count());
+ 359   int bec = method-&gt;backedge_count();
+ 360   if (bec != 0)  log-&gt;print(" backedge_count='%d'", bec);
+ 361   // Note:  "_is_complete" is about to be set, but is not.
+ 362   if (_num_inlined_bytecodes != 0) {
+ 363     log-&gt;print(" inlined_bytes='%d'", _num_inlined_bytecodes);
+ 364   }
+ 365   log-&gt;stamp();
+ 366   log-&gt;end_elem();
+ 367   log-&gt;clear_identities();   // next task will have different CI
+ 368   log-&gt;tail("task");
+ 369   if (log-&gt;unflushed_count() &gt; 2000) {
+ 370     log-&gt;flush();
+ 371   }
+ 372   log-&gt;mark_file_end();
+ 373 }
+ 374 
+ 375 // ------------------------------------------------------------------
+ 376 // CompileTask::check_break_at_flags
+ 377 bool CompileTask::check_break_at_flags() {
+ 378   int compile_id = this-&gt;_compile_id;
+ 379   bool is_osr = (_osr_bci != CompileBroker::standard_entry_bci);
+ 380 
+ 381   if (CICountOSR &amp;&amp; is_osr &amp;&amp; (compile_id == CIBreakAtOSR)) {
+ 382     return true;
+ 383   } else {
+ 384     return (compile_id == CIBreakAt);
+ 385   }
+ 386 }
+ 387 
+ 388 // ------------------------------------------------------------------
+ 389 // CompileTask::print_inlining
+ 390 void CompileTask::print_inlining_inner(outputStream* st, ciMethod* method, int inline_level, int bci, const char* msg) {
+ 391   //         1234567
+ 392   st-&gt;print("        ");     // print timestamp
+ 393   //         1234
+ 394   st-&gt;print("     ");        // print compilation number
+ 395 
+ 396   // method attributes
+ 397   if (method-&gt;is_loaded()) {
+ 398     const char sync_char      = method-&gt;is_synchronized()        ? 's' : ' ';
+ 399     const char exception_char = method-&gt;has_exception_handlers() ? '!' : ' ';
+ 400     const char monitors_char  = method-&gt;has_monitor_bytecodes()  ? 'm' : ' ';
+ 401 
+ 402     // print method attributes
+ 403     st-&gt;print(" %c%c%c  ", sync_char, exception_char, monitors_char);
+ 404   } else {
+ 405     //         %s!bn
+ 406     st-&gt;print("      ");     // print method attributes
+ 407   }
+ 408 
+ 409   if (TieredCompilation) {
+ 410     st-&gt;print("  ");
+ 411   }
+ 412   st-&gt;print("     ");        // more indent
+ 413   st-&gt;print("    ");         // initial inlining indent
+ 414 
+ 415   for (int i = 0; i &lt; inline_level; i++)  st-&gt;print("  ");
+ 416 
+ 417   st-&gt;print("@ %d  ", bci);  // print bci
+ 418   method-&gt;print_short_name(st);
+ 419   if (method-&gt;is_loaded())
+ 420     st-&gt;print(" (%d bytes)", method-&gt;code_size());
+ 421   else
+ 422     st-&gt;print(" (not loaded)");
+ 423 
+ 424   if (msg != NULL) {
+ 425     st-&gt;print("   %s", msg);
+ 426   }
+ 427   st-&gt;cr();
+ 428 }
+<a name="2" id="anc2"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="2" type="hidden" /></form></body></html>

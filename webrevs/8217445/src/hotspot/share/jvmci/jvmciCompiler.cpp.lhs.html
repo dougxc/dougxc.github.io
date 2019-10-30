@@ -1,0 +1,403 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 
+  24 #include "precompiled.hpp"
+  25 #include "jvm.h"
+  26 #include "memory/oopFactory.hpp"
+  27 #include "memory/resourceArea.hpp"
+  28 #include "oops/oop.inline.hpp"
+  29 #include "runtime/javaCalls.hpp"
+  30 #include "runtime/handles.hpp"
+  31 #include "jvmci/jvmciJavaClasses.hpp"
+  32 #include "jvmci/jvmciCompiler.hpp"
+  33 #include "jvmci/jvmciEnv.hpp"
+  34 #include "jvmci/jvmciRuntime.hpp"
+  35 #include "runtime/compilationPolicy.hpp"
+  36 #include "runtime/globals_extension.hpp"
+  37 #include "runtime/handles.inline.hpp"
+  38 
+  39 JVMCICompiler* JVMCICompiler::_instance = NULL;
+  40 elapsedTimer JVMCICompiler::_codeInstallTimer;
+  41 
+  42 JVMCICompiler::JVMCICompiler() : AbstractCompiler(compiler_jvmci) {
+  43   _bootstrapping = false;
+  44   _bootstrap_compilation_request_handled = false;
+  45   _methods_compiled = 0;
+  46   assert(_instance == NULL, "only one instance allowed");
+  47   _instance = this;
+  48 }
+  49 
+  50 // Initialization
+  51 void JVMCICompiler::initialize() {
+  52   if (!UseCompiler || !EnableJVMCI || !UseJVMCICompiler || !should_perform_init()) {
+  53     return;
+  54   }
+  55 
+  56   set_state(initialized);
+  57 }
+  58 
+  59 void JVMCICompiler::bootstrap(TRAPS) {
+  60   if (Arguments::mode() == Arguments::_int) {
+  61     // Nothing to do in -Xint mode
+  62     return;
+  63   }
+  64   _bootstrapping = true;
+  65   ResourceMark rm;
+  66   HandleMark hm;
+  67   if (PrintBootstrap) {
+  68     tty-&gt;print("Bootstrapping JVMCI");
+  69   }
+  70   jlong start = os::javaTimeMillis();
+  71 
+  72   Array&lt;Method*&gt;* objectMethods = SystemDictionary::Object_klass()-&gt;methods();
+  73   // Initialize compile queue with a selected set of methods.
+  74   int len = objectMethods-&gt;length();
+  75   for (int i = 0; i &lt; len; i++) {
+  76     methodHandle mh = objectMethods-&gt;at(i);
+  77     if (!mh-&gt;is_native() &amp;&amp; !mh-&gt;is_static() &amp;&amp; !mh-&gt;is_initializer()) {
+  78       ResourceMark rm;
+  79       int hot_count = 10; // TODO: what's the appropriate value?
+  80       CompileBroker::compile_method(mh, InvocationEntryBci, CompLevel_full_optimization, mh, hot_count, CompileTask::Reason_Bootstrap, THREAD);
+  81     }
+  82   }
+  83 
+  84   int qsize;
+  85   bool first_round = true;
+  86   int z = 0;
+  87   do {
+  88     // Loop until there is something in the queue.
+  89     do {
+  90       os::sleep(THREAD, 100, true);
+  91       qsize = CompileBroker::queue_size(CompLevel_full_optimization);
+  92     } while (!_bootstrap_compilation_request_handled &amp;&amp; first_round &amp;&amp; qsize == 0);
+  93     first_round = false;
+  94     if (PrintBootstrap) {
+  95       while (z &lt; (_methods_compiled / 100)) {
+  96         ++z;
+  97         tty-&gt;print_raw(".");
+  98       }
+  99     }
+ 100   } while (qsize != 0);
+ 101 
+ 102   if (PrintBootstrap) {
+ 103     tty-&gt;print_cr(" in " JLONG_FORMAT " ms (compiled %d methods)", os::javaTimeMillis() - start, _methods_compiled);
+ 104   }
+ 105   _bootstrapping = false;
+ 106   JVMCIRuntime::bootstrap_finished(CHECK);
+ 107 }
+ 108 
+ 109 #define CHECK_EXIT THREAD); \
+ 110 if (HAS_PENDING_EXCEPTION) { \
+ 111   char buf[256]; \
+ 112   jio_snprintf(buf, 256, "Uncaught exception at %s:%d", __FILE__, __LINE__); \
+ 113   JVMCICompiler::exit_on_pending_exception(PENDING_EXCEPTION, buf); \
+ 114   return; \
+ 115 } \
+ 116 (void)(0
+ 117 
+ 118 void JVMCICompiler::compile_method(const methodHandle&amp; method, int entry_bci, JVMCIEnv* env) {
+ 119   JVMCI_EXCEPTION_CONTEXT
+ 120 
+ 121   bool is_osr = entry_bci != InvocationEntryBci;
+ 122   if (_bootstrapping &amp;&amp; is_osr) {
+ 123       // no OSR compilations during bootstrap - the compiler is just too slow at this point,
+ 124       // and we know that there are no endless loops
+<a name="1" id="anc1"></a>
+ 125       return;
+ 126   }
+ 127 
+ 128   JVMCIRuntime::initialize_well_known_classes(CHECK_EXIT);
+ 129 
+ 130   HandleMark hm;
+ 131   Handle receiver = JVMCIRuntime::get_HotSpotJVMCIRuntime(CHECK_EXIT);
+ 132 
+ 133   JavaValue method_result(T_OBJECT);
+ 134   JavaCallArguments args;
+ 135   args.push_long((jlong) (address) method());
+ 136   JavaCalls::call_static(&amp;method_result, SystemDictionary::HotSpotResolvedJavaMethodImpl_klass(),
+ 137                          vmSymbols::fromMetaspace_name(), vmSymbols::method_fromMetaspace_signature(), &amp;args, THREAD);
+ 138 
+ 139   JavaValue result(T_OBJECT);
+ 140   if (!HAS_PENDING_EXCEPTION) {
+ 141     JavaCallArguments args;
+ 142     args.push_oop(receiver);
+ 143     args.push_oop(Handle(THREAD, (oop)method_result.get_jobject()));
+ 144     args.push_int(entry_bci);
+ 145     args.push_long((jlong) (address) env);
+ 146     args.push_int(env-&gt;task()-&gt;compile_id());
+ 147     JavaCalls::call_special(&amp;result, receiver-&gt;klass(),
+ 148                             vmSymbols::compileMethod_name(), vmSymbols::compileMethod_signature(), &amp;args, THREAD);
+ 149   }
+ 150 
+ 151   // An uncaught exception was thrown during compilation.  Generally these
+ 152   // should be handled by the Java code in some useful way but if they leak
+ 153   // through to here report them instead of dying or silently ignoring them.
+ 154   if (HAS_PENDING_EXCEPTION) {
+ 155     Handle exception(THREAD, PENDING_EXCEPTION);
+ 156     CLEAR_PENDING_EXCEPTION;
+ 157 
+ 158     java_lang_Throwable::java_printStackTrace(exception, THREAD);
+ 159     if (HAS_PENDING_EXCEPTION) {
+ 160       CLEAR_PENDING_EXCEPTION;
+ 161     }
+ 162 
+<a name="2" id="anc2"></a><span class="changed"> 163     env-&gt;set_failure("exception throw", false);</span>
+ 164   } else {
+ 165     oop result_object = (oop) result.get_jobject();
+ 166     if (result_object != NULL) {
+ 167       oop failure_message = HotSpotCompilationRequestResult::failureMessage(result_object);
+ 168       if (failure_message != NULL) {
+<a name="3" id="anc3"></a>
+ 169         const char* failure_reason = java_lang_String::as_utf8_string(failure_message);
+<a name="4" id="anc4"></a><span class="changed"> 170         env-&gt;set_failure(failure_reason, HotSpotCompilationRequestResult::retry(result_object) != 0);</span>
+
+
+
+ 171       } else {
+ 172         if (env-&gt;task()-&gt;code() == NULL) {
+<a name="5" id="anc5"></a><span class="changed"> 173           env-&gt;set_failure("no nmethod produced", true);</span>
+ 174         } else {
+ 175           env-&gt;task()-&gt;set_num_inlined_bytecodes(HotSpotCompilationRequestResult::inlinedBytecodes(result_object));
+ 176           Atomic::inc(&amp;_methods_compiled);
+ 177         }
+ 178       }
+ 179     } else {
+ 180       assert(false, "JVMCICompiler.compileMethod should always return non-null");
+ 181     }
+ 182   }
+ 183   if (_bootstrapping) {
+ 184     _bootstrap_compilation_request_handled = true;
+ 185   }
+ 186 }
+ 187 
+ 188 CompLevel JVMCIRuntime::adjust_comp_level(const methodHandle&amp; method, bool is_osr, CompLevel level, JavaThread* thread) {
+ 189   if (!thread-&gt;adjusting_comp_level()) {
+ 190     thread-&gt;set_adjusting_comp_level(true);
+ 191     level = adjust_comp_level_inner(method, is_osr, level, thread);
+ 192     thread-&gt;set_adjusting_comp_level(false);
+ 193   }
+ 194   return level;
+ 195 }
+ 196 
+ 197 void JVMCICompiler::exit_on_pending_exception(oop exception, const char* message) {
+ 198   JavaThread* THREAD = JavaThread::current();
+ 199   CLEAR_PENDING_EXCEPTION;
+ 200 
+ 201   static volatile int report_error = 0;
+ 202   if (!report_error &amp;&amp; Atomic::cmpxchg(1, &amp;report_error, 0) == 0) {
+ 203     // Only report an error once
+ 204     tty-&gt;print_raw_cr(message);
+ 205     Handle ex(THREAD, exception);
+ 206     java_lang_Throwable::java_printStackTrace(ex, THREAD);
+ 207   } else {
+ 208     // Allow error reporting thread to print the stack trace.  Windows
+ 209     // doesn't allow uninterruptible wait for JavaThreads
+ 210     const bool interruptible = true;
+ 211     os::sleep(THREAD, 200, interruptible);
+ 212   }
+ 213 
+ 214   before_exit(THREAD);
+ 215   vm_exit(-1);
+ 216 }
+ 217 
+ 218 // Compilation entry point for methods
+ 219 void JVMCICompiler::compile_method(ciEnv* env, ciMethod* target, int entry_bci, DirectiveSet* directive) {
+ 220   ShouldNotReachHere();
+ 221 }
+ 222 
+ 223 // Print compilation timers and statistics
+ 224 void JVMCICompiler::print_timers() {
+ 225   print_compilation_timers();
+ 226 }
+ 227 
+ 228 // Print compilation timers and statistics
+ 229 void JVMCICompiler::print_compilation_timers() {
+ 230   TRACE_jvmci_1("JVMCICompiler::print_timers");
+ 231   tty-&gt;print_cr("       JVMCI code install time:        %6.3f s",    _codeInstallTimer.seconds());
+ 232 }
+<a name="6" id="anc6"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="6" type="hidden" /></form></body></html>

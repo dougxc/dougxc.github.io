@@ -1,0 +1,95 @@
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java	2016-07-06 12:41:43.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java	2016-07-06 12:41:43.000000000 +0200
+@@ -32,6 +32,11 @@
+ 
+ final class HotSpotJVMCICompilerConfig {
+ 
++    /**
++     * This factory allows JVMCI initialization to succeed but raises an error if the VM asks JVMCI
++     * to perform a compilation. This allows the reflective parts of the JVMCI API to be used
++     * without requiring a compiler implementation to be available.
++     */
+     private static class DummyCompilerFactory extends JVMCICompilerFactory implements JVMCICompiler {
+ 
+         public HotSpotCompilationRequestResult compileMethod(CompilationRequest request) {
+@@ -67,7 +72,6 @@
+                 for (JVMCICompilerFactory f : Services.load(JVMCICompilerFactory.class)) {
+                     if (f.getCompilerName().equals(compilerName)) {
+                         Services.exportJVMCITo(f.getClass());
+-                        f.onSelection();
+                         factory = f;
+                     }
+                 }
+@@ -75,8 +79,21 @@
+                     throw new JVMCIError("JVMCI compiler '%s' not found", compilerName);
+                 }
+             } else {
+-                factory = new DummyCompilerFactory();
++                // Auto select a single available compiler
++                for (JVMCICompilerFactory f : Services.load(JVMCICompilerFactory.class)) {
++                    if (factory == null) {
++                        factory = f;
++                    } else {
++                        // Multiple factories seen - cancel auto selection
++                        factory = null;
++                        break;
++                    }
++                }
++                if (factory == null) {
++                    factory = new DummyCompilerFactory();
++                }
+             }
++            factory.onSelection();
+             compilerFactory = factory;
+         }
+         return compilerFactory;
+--- old/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.java	2016-07-06 12:41:44.000000000 +0200
++++ new/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.java	2016-07-06 12:41:44.000000000 +0200
+@@ -32,15 +32,15 @@
+  *          java.base/jdk.internal.org.objectweb.asm.tree
+  *          jdk.vm.ci/jdk.vm.ci.hotspot
+  *          jdk.vm.ci/jdk.vm.ci.code
++ *          jdk.vm.ci/jdk.vm.ci.code.site
+  *          jdk.vm.ci/jdk.vm.ci.meta
+  *          jdk.vm.ci/jdk.vm.ci.runtime
+- * @ignore 8144964
+  * @build jdk.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper
+  * @build compiler.jvmci.common.JVMCIHelpers
+  *     compiler.jvmci.events.JvmciNotifyInstallEventTest
+  * @run main jdk.test.lib.FileInstaller ../common/services/ ./META-INF/services/
+  * @run main jdk.test.lib.FileInstaller ./JvmciNotifyInstallEventTest.config
+- *     ./META-INF/services/jdk.vm.ci.hotspot.HotSpotVMEventListener
++ *     ./META-INF/services/jdk.vm.ci.hotspot.services.HotSpotVMEventListener
+  * @run main ClassFileInstaller
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyHotspotCompiler
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyCompilerFactory
+@@ -52,6 +52,11 @@
+  *     jdk.test.lib.Asserts
+  *     jdk.test.lib.Utils
+  * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
++ *     -Xbootclasspath/a:. -Xmixed
++ *     -XX:+UseJVMCICompiler -XX:-BootstrapJVMCI
++ *     -Dcompiler.jvmci.events.JvmciNotifyInstallEventTest.failoninit=false
++ *     compiler.jvmci.events.JvmciNotifyInstallEventTest
++ * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
+  *     -Djvmci.compiler=EmptyCompiler -Xbootclasspath/a:. -Xmixed
+  *     -XX:+UseJVMCICompiler -XX:-BootstrapJVMCI
+  *     -Dcompiler.jvmci.events.JvmciNotifyInstallEventTest.failoninit=false
+@@ -74,7 +79,7 @@
+ import jdk.test.lib.Asserts;
+ import java.lang.reflect.Method;
+ import jdk.test.lib.Utils;
+-import jdk.vm.ci.hotspot.HotSpotVMEventListener;
++import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
+ import jdk.vm.ci.code.CompiledCode;
+ import jdk.vm.ci.code.InstalledCode;
+ import jdk.vm.ci.code.site.DataPatch;
+@@ -87,7 +92,7 @@
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
+ import jdk.vm.ci.hotspot.HotSpotResolvedJavaMethod;
+ 
+-public class JvmciNotifyInstallEventTest implements HotSpotVMEventListener {
++public class JvmciNotifyInstallEventTest extends HotSpotVMEventListener {
+     private static final String METHOD_NAME = "testMethod";
+     private static final boolean FAIL_ON_INIT = !Boolean.getBoolean(
+             "compiler.jvmci.events.JvmciNotifyInstallEventTest.failoninit");

@@ -1,0 +1,960 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>jdk9-hs-comp Sdiff src/share/vm/code </title>
+</head><body id="SUNWwebrev">
+<h2>src/share/vm/code/dependencies.cpp</h2>
+<a class="print" href="javascript:print()">Print this page</a>
+<pre></pre>
+
+<table><tr valign="top">
+<td><pre>
+
+</pre><hr></hr><pre>
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #include "precompiled.hpp"
+  26 #include "ci/ciArrayKlass.hpp"
+  27 #include "ci/ciEnv.hpp"
+  28 #include "ci/ciKlass.hpp"
+  29 #include "ci/ciMethod.hpp"
+  30 #include "code/dependencies.hpp"
+  31 #include "compiler/compileLog.hpp"
+  32 #include "oops/oop.inline.hpp"
+
+  33 #include "runtime/handles.hpp"
+  34 #include "runtime/handles.inline.hpp"
+  35 #include "utilities/copy.hpp"
+  36 
+  37 
+  38 #ifdef ASSERT
+  39 static bool must_be_in_vm() {
+  40   Thread* thread = Thread::current();
+  41   if (thread-&gt;is_Java_thread())
+  42     return ((JavaThread*)thread)-&gt;thread_state() == _thread_in_vm;
+  43   else
+  44     return true;  //something like this: thread-&gt;is_VM_thread();
+  45 }
+  46 #endif //ASSERT
+  47 
+  48 void Dependencies::initialize(ciEnv* env) {
+  49   Arena* arena = env-&gt;arena();
+  50   _oop_recorder = env-&gt;oop_recorder();
+  51   _log = env-&gt;log();
+  52   _dep_seen = new(arena) GrowableArray&lt;int&gt;(arena, 500, 0, 0);
+  53   DEBUG_ONLY(_deps[end_marker] = NULL);
+  54   for (int i = (int)FIRST_TYPE; i &lt; (int)TYPE_LIMIT; i++) {
+<span class="changed">  55     _deps[i] = new(arena) GrowableArray&lt;ciBaseObject*&gt;(arena, 10, 0, 0);</span>
+  56   }
+  57   _content_bytes = NULL;
+  58   _size_in_bytes = (size_t)-1;
+  59 
+  60   assert(TYPE_LIMIT &lt;= (1&lt;&lt;LG2_TYPE_LIMIT), "sanity");
+  61 }
+  62 
+<span class="changed">  63 void Dependencies::assert_evol_method(ciMethod* m) {</span>
+<span class="changed">  64   assert_common_1(evol_method, m);</span>
+  65 }
+  66 
+<span class="changed">  67 void Dependencies::assert_leaf_type(ciKlass* ctxk) {</span>
+<span class="changed">  68   if (ctxk-&gt;is_array_klass()) {</span>
+  69     // As a special case, support this assertion on an array type,
+  70     // which reduces to an assertion on its element type.
+  71     // Note that this cannot be done with assertions that
+  72     // relate to concreteness or abstractness.
+<span class="changed">  73     ciType* elemt = ctxk-&gt;as_array_klass()-&gt;base_element_type();</span>
+<span class="changed">  74     if (!elemt-&gt;is_instance_klass())  return;   // Ex:  int[][]</span>
+<span class="changed">  75     ctxk = elemt-&gt;as_instance_klass();</span>
+  76     //if (ctxk-&gt;is_final())  return;            // Ex:  String[][]
+  77   }
+  78   check_ctxk(ctxk);
+<span class="changed">  79   assert_common_1(leaf_type, ctxk);</span>
+  80 }
+  81 
+<span class="changed">  82 void Dependencies::assert_abstract_with_unique_concrete_subtype(ciKlass* ctxk, ciKlass* conck) {</span>
+  83   check_ctxk_abstract(ctxk);
+<span class="changed">  84   assert_common_2(abstract_with_unique_concrete_subtype, ctxk, conck);</span>
+
+  85 }
+  86 
+<span class="changed">  87 void Dependencies::assert_abstract_with_no_concrete_subtype(ciKlass* ctxk) {</span>
+  88   check_ctxk_abstract(ctxk);
+<span class="changed">  89   assert_common_1(abstract_with_no_concrete_subtype, ctxk);</span>
+  90 }
+  91 
+<span class="changed">  92 void Dependencies::assert_concrete_with_no_concrete_subtype(ciKlass* ctxk) {</span>
+  93   check_ctxk_concrete(ctxk);
+<span class="changed">  94   assert_common_1(concrete_with_no_concrete_subtype, ctxk);</span>
+  95 }
+  96 
+<span class="changed">  97 void Dependencies::assert_unique_concrete_method(ciKlass* ctxk, ciMethod* uniqm) {</span>
+  98   check_ctxk(ctxk);
+<span class="changed">  99   assert_common_2(unique_concrete_method, ctxk, uniqm);</span>
+ 100 }
+ 101 
+<span class="changed"> 102 void Dependencies::assert_abstract_with_exclusive_concrete_subtypes(ciKlass* ctxk, ciKlass* k1, ciKlass* k2) {</span>
+ 103   check_ctxk(ctxk);
+<span class="changed"> 104   assert_common_3(abstract_with_exclusive_concrete_subtypes_2, ctxk, k1, k2);</span>
+
+ 105 }
+ 106 
+<span class="changed"> 107 void Dependencies::assert_exclusive_concrete_methods(ciKlass* ctxk, ciMethod* m1, ciMethod* m2) {</span>
+ 108   check_ctxk(ctxk);
+<span class="changed"> 109   assert_common_3(exclusive_concrete_methods_2, ctxk, m1, m2);</span>
+
+ 110 }
+ 111 
+<span class="changed"> 112 void Dependencies::assert_has_no_finalizable_subclasses(ciKlass* ctxk) {</span>
+ 113   check_ctxk(ctxk);
+<span class="changed"> 114   assert_common_1(no_finalizable_subclasses, ctxk);</span>
+ 115 }
+ 116 
+<span class="changed"> 117 void Dependencies::assert_call_site_target_value(ciCallSite* call_site, ciMethodHandle* method_handle) {</span>
+<span class="changed"> 118   check_ctxk(call_site-&gt;klass());</span>
+<span class="changed"> 119   assert_common_2(call_site_target_value, call_site, method_handle);</span>
+
+ 120 }
+ 121 
+ 122 // Helper function.  If we are adding a new dep. under ctxk2,
+ 123 // try to find an old dep. under a broader* ctxk1.  If there is
+ 124 //
+<span class="changed"> 125 bool Dependencies::maybe_merge_ctxk(GrowableArray&lt;ciBaseObject*&gt;* deps,</span>
+<span class="changed"> 126                                     int ctxk_i, ciKlass* ctxk2) {</span>
+<span class="changed"> 127   ciKlass* ctxk1 = deps-&gt;at(ctxk_i)-&gt;as_metadata()-&gt;as_klass();</span>
+ 128   if (ctxk2-&gt;is_subtype_of(ctxk1)) {
+ 129     return true;  // success, and no need to change
+ 130   } else if (ctxk1-&gt;is_subtype_of(ctxk2)) {
+ 131     // new context class fully subsumes previous one
+<span class="changed"> 132     deps-&gt;at_put(ctxk_i, ctxk2);</span>
+ 133     return true;
+ 134   } else {
+ 135     return false;
+ 136   }
+ 137 }
+ 138 
+<span class="changed"> 139 void Dependencies::assert_common_1(DepType dept, ciBaseObject* x) {</span>
+ 140   assert(dep_args(dept) == 1, "sanity");
+ 141   log_dependency(dept, x);
+<span class="changed"> 142   GrowableArray&lt;ciBaseObject*&gt;* deps = _deps[dept];</span>
+ 143 
+ 144   // see if the same (or a similar) dep is already recorded
+ 145   if (note_dep_seen(dept, x)) {
+ 146     assert(deps-&gt;find(x) &gt;= 0, "sanity");
+ 147   } else {
+ 148     deps-&gt;append(x);
+ 149   }
+ 150 }
+ 151 
+ 152 void Dependencies::assert_common_2(DepType dept,
+<span class="changed"> 153                                    ciBaseObject* x0, ciBaseObject* x1) {</span>
+ 154   assert(dep_args(dept) == 2, "sanity");
+ 155   log_dependency(dept, x0, x1);
+<span class="changed"> 156   GrowableArray&lt;ciBaseObject*&gt;* deps = _deps[dept];</span>
+ 157 
+ 158   // see if the same (or a similar) dep is already recorded
+ 159   bool has_ctxk = has_explicit_context_arg(dept);
+ 160   if (has_ctxk) {
+ 161     assert(dep_context_arg(dept) == 0, "sanity");
+ 162     if (note_dep_seen(dept, x1)) {
+ 163       // look in this bucket for redundant assertions
+ 164       const int stride = 2;
+ 165       for (int i = deps-&gt;length(); (i -= stride) &gt;= 0; ) {
+<span class="changed"> 166         ciBaseObject* y1 = deps-&gt;at(i+1);</span>
+ 167         if (x1 == y1) {  // same subject; check the context
+<span class="changed"> 168           if (maybe_merge_ctxk(deps, i+0, x0-&gt;as_metadata()-&gt;as_klass())) {</span>
+ 169             return;
+ 170           }
+ 171         }
+ 172       }
+ 173     }
+ 174   } else {
+ 175     assert(dep_implicit_context_arg(dept) == 0, "sanity");
+ 176     if (note_dep_seen(dept, x0) &amp;&amp; note_dep_seen(dept, x1)) {
+ 177       // look in this bucket for redundant assertions
+ 178       const int stride = 2;
+ 179       for (int i = deps-&gt;length(); (i -= stride) &gt;= 0; ) {
+<span class="changed"> 180         ciBaseObject* y0 = deps-&gt;at(i+0);</span>
+<span class="changed"> 181         ciBaseObject* y1 = deps-&gt;at(i+1);</span>
+ 182         if (x0 == y0 &amp;&amp; x1 == y1) {
+ 183           return;
+ 184         }
+ 185       }
+ 186     }
+ 187   }
+ 188 
+ 189   // append the assertion in the correct bucket:
+ 190   deps-&gt;append(x0);
+ 191   deps-&gt;append(x1);
+ 192 }
+ 193 
+ 194 void Dependencies::assert_common_3(DepType dept,
+<span class="changed"> 195                                    ciKlass* ctxk, ciBaseObject* x, ciBaseObject* x2) {</span>
+ 196   assert(dep_context_arg(dept) == 0, "sanity");
+ 197   assert(dep_args(dept) == 3, "sanity");
+<span class="changed"> 198   log_dependency(dept, ctxk, x, x2);</span>
+<span class="changed"> 199   GrowableArray&lt;ciBaseObject*&gt;* deps = _deps[dept];</span>
+ 200 
+ 201   // try to normalize an unordered pair:
+ 202   bool swap = false;
+ 203   switch (dept) {
+ 204   case abstract_with_exclusive_concrete_subtypes_2:
+<span class="changed"> 205     swap = (x-&gt;ident() &gt; x2-&gt;ident() &amp;&amp; x-&gt;as_metadata()-&gt;as_klass() != ctxk);</span>
+ 206     break;
+ 207   case exclusive_concrete_methods_2:
+<span class="changed"> 208     swap = (x-&gt;ident() &gt; x2-&gt;ident() &amp;&amp; x-&gt;as_metadata()-&gt;as_method()-&gt;holder() != ctxk);</span>
+ 209     break;
+ 210   }
+<span class="changed"> 211   if (swap) { ciBaseObject* t = x; x = x2; x2 = t; }</span>
+ 212 
+ 213   // see if the same (or a similar) dep is already recorded
+ 214   if (note_dep_seen(dept, x) &amp;&amp; note_dep_seen(dept, x2)) {
+ 215     // look in this bucket for redundant assertions
+ 216     const int stride = 3;
+ 217     for (int i = deps-&gt;length(); (i -= stride) &gt;= 0; ) {
+<span class="changed"> 218       ciBaseObject* y  = deps-&gt;at(i+1);</span>
+<span class="changed"> 219       ciBaseObject* y2 = deps-&gt;at(i+2);</span>
+ 220       if (x == y &amp;&amp; x2 == y2) {  // same subjects; check the context
+ 221         if (maybe_merge_ctxk(deps, i+0, ctxk)) {
+ 222           return;
+ 223         }
+ 224       }
+ 225     }
+ 226   }
+ 227   // append the assertion in the correct bucket:
+<span class="changed"> 228   deps-&gt;append(ctxk);</span>
+ 229   deps-&gt;append(x);
+ 230   deps-&gt;append(x2);
+ 231 }
+ 232 
+ 233 /// Support for encoding dependencies into an nmethod:
+ 234 
+ 235 void Dependencies::copy_to(nmethod* nm) {
+ 236   address beg = nm-&gt;dependencies_begin();
+ 237   address end = nm-&gt;dependencies_end();
+ 238   guarantee(end - beg &gt;= (ptrdiff_t) size_in_bytes(), "bad sizing");
+ 239   Copy::disjoint_words((HeapWord*) content_bytes(),
+ 240                        (HeapWord*) beg,
+ 241                        size_in_bytes() / sizeof(HeapWord));
+ 242   assert(size_in_bytes() % sizeof(HeapWord) == 0, "copy by words");
+ 243 }
+ 244 
+<span class="changed"> 245 static int sort_dep(ciBaseObject** p1, ciBaseObject** p2, int narg) {</span>
+ 246   for (int i = 0; i &lt; narg; i++) {
+<span class="changed"> 247     int diff = p1[i]-&gt;ident() - p2[i]-&gt;ident();</span>
+ 248     if (diff != 0)  return diff;
+ 249   }
+ 250   return 0;
+ 251 }
+<span class="changed"> 252 static int sort_dep_arg_1(ciBaseObject** p1, ciBaseObject** p2)</span>
+ 253 { return sort_dep(p1, p2, 1); }
+<span class="changed"> 254 static int sort_dep_arg_2(ciBaseObject** p1, ciBaseObject** p2)</span>
+ 255 { return sort_dep(p1, p2, 2); }
+<span class="changed"> 256 static int sort_dep_arg_3(ciBaseObject** p1, ciBaseObject** p2)</span>
+ 257 { return sort_dep(p1, p2, 3); }
+ 258 
+ 259 void Dependencies::sort_all_deps() {
+ 260   for (int deptv = (int)FIRST_TYPE; deptv &lt; (int)TYPE_LIMIT; deptv++) {
+ 261     DepType dept = (DepType)deptv;
+<span class="changed"> 262     GrowableArray&lt;ciBaseObject*&gt;* deps = _deps[dept];</span>
+ 263     if (deps-&gt;length() &lt;= 1)  continue;
+ 264     switch (dep_args(dept)) {
+ 265     case 1: deps-&gt;sort(sort_dep_arg_1, 1); break;
+ 266     case 2: deps-&gt;sort(sort_dep_arg_2, 2); break;
+ 267     case 3: deps-&gt;sort(sort_dep_arg_3, 3); break;
+ 268     default: ShouldNotReachHere();
+ 269     }
+ 270   }
+ 271 }
+ 272 
+ 273 size_t Dependencies::estimate_size_in_bytes() {
+ 274   size_t est_size = 100;
+ 275   for (int deptv = (int)FIRST_TYPE; deptv &lt; (int)TYPE_LIMIT; deptv++) {
+ 276     DepType dept = (DepType)deptv;
+<span class="changed"> 277     GrowableArray&lt;ciBaseObject*&gt;* deps = _deps[dept];</span>
+ 278     est_size += deps-&gt;length()*2;  // tags and argument(s)
+ 279   }
+ 280   return est_size;
+ 281 }
+ 282 
+<span class="changed"> 283 ciKlass* Dependencies::ctxk_encoded_as_null(DepType dept, ciBaseObject* x) {</span>
+ 284   switch (dept) {
+ 285   case abstract_with_exclusive_concrete_subtypes_2:
+<span class="changed"> 286     return x-&gt;as_metadata()-&gt;as_klass();</span>
+ 287   case unique_concrete_method:
+ 288   case exclusive_concrete_methods_2:
+<span class="changed"> 289     return x-&gt;as_metadata()-&gt;as_method()-&gt;holder();</span>
+ 290   }
+ 291   return NULL;  // let NULL be NULL
+ 292 }
+ 293 
+ 294 Klass* Dependencies::ctxk_encoded_as_null(DepType dept, Metadata* x) {
+ 295   assert(must_be_in_vm(), "raw oops here");
+ 296   switch (dept) {
+ 297   case abstract_with_exclusive_concrete_subtypes_2:
+ 298     assert(x-&gt;is_klass(), "sanity");
+ 299     return (Klass*) x;
+ 300   case unique_concrete_method:
+ 301   case exclusive_concrete_methods_2:
+ 302     assert(x-&gt;is_method(), "sanity");
+ 303     return ((Method*)x)-&gt;method_holder();
+ 304   }
+ 305   return NULL;  // let NULL be NULL
+ 306 }
+ 307 
+ 308 void Dependencies::encode_content_bytes() {
+ 309   sort_all_deps();
+ 310 
+ 311   // cast is safe, no deps can overflow INT_MAX
+ 312   CompressedWriteStream bytes((int)estimate_size_in_bytes());
+ 313 
+ 314   for (int deptv = (int)FIRST_TYPE; deptv &lt; (int)TYPE_LIMIT; deptv++) {
+ 315     DepType dept = (DepType)deptv;
+<span class="changed"> 316     GrowableArray&lt;ciBaseObject*&gt;* deps = _deps[dept];</span>
+ 317     if (deps-&gt;length() == 0)  continue;
+ 318     int stride = dep_args(dept);
+ 319     int ctxkj  = dep_context_arg(dept);  // -1 if no context arg
+ 320     assert(stride &gt; 0, "sanity");
+ 321     for (int i = 0; i &lt; deps-&gt;length(); i += stride) {
+ 322       jbyte code_byte = (jbyte)dept;
+ 323       int skipj = -1;
+ 324       if (ctxkj &gt;= 0 &amp;&amp; ctxkj+1 &lt; stride) {
+<span class="changed"> 325         ciKlass*  ctxk = deps-&gt;at(i+ctxkj+0)-&gt;as_metadata()-&gt;as_klass();</span>
+<span class="changed"> 326         ciBaseObject* x     = deps-&gt;at(i+ctxkj+1);  // following argument</span>
+<span class="changed"> 327         if (ctxk == ctxk_encoded_as_null(dept, x)) {</span>
+ 328           skipj = ctxkj;  // we win:  maybe one less oop to keep track of
+ 329           code_byte |= default_context_type_bit;
+ 330         }
+ 331       }
+ 332       bytes.write_byte(code_byte);
+ 333       for (int j = 0; j &lt; stride; j++) {
+ 334         if (j == skipj)  continue;
+<span class="changed"> 335         ciBaseObject* v = deps-&gt;at(i+j);</span>
+<span class="changed"> 336         int idx;</span>
+<span class="changed"> 337         if (v-&gt;is_object()) {</span>
+<span class="changed"> 338           idx = _oop_recorder-&gt;find_index(v-&gt;as_object()-&gt;constant_encoding());</span>
+<span class="changed"> 339         } else {</span>
+<span class="changed"> 340           ciMetadata* meta = v-&gt;as_metadata();</span>
+<span class="changed"> 341           idx = _oop_recorder-&gt;find_index(meta-&gt;constant_encoding());</span>
+<span class="changed"> 342         }</span>
+ 343         bytes.write_int(idx);
+ 344       }
+ 345     }
+ 346   }
+ 347 
+ 348   // write a sentinel byte to mark the end
+ 349   bytes.write_byte(end_marker);
+ 350 
+ 351   // round it out to a word boundary
+ 352   while (bytes.position() % sizeof(HeapWord) != 0) {
+ 353     bytes.write_byte(end_marker);
+ 354   }
+ 355 
+ 356   // check whether the dept byte encoding really works
+ 357   assert((jbyte)default_context_type_bit != 0, "byte overflow");
+ 358 
+ 359   _content_bytes = bytes.buffer();
+ 360   _size_in_bytes = bytes.position();
+ 361 }
+ 362 
+
+</pre><hr></hr><pre>
+ 389   2  // call_site_target_value call_site, method_handle
+ 390 };
+ 391 
+ 392 const char* Dependencies::dep_name(Dependencies::DepType dept) {
+ 393   if (!dept_in_mask(dept, all_types))  return "?bad-dep?";
+ 394   return _dep_name[dept];
+ 395 }
+ 396 
+ 397 int Dependencies::dep_args(Dependencies::DepType dept) {
+ 398   if (!dept_in_mask(dept, all_types))  return -1;
+ 399   return _dep_args[dept];
+ 400 }
+ 401 
+ 402 void Dependencies::check_valid_dependency_type(DepType dept) {
+ 403   guarantee(FIRST_TYPE &lt;= dept &amp;&amp; dept &lt; TYPE_LIMIT, err_msg("invalid dependency type: %d", (int) dept));
+ 404 }
+ 405 
+ 406 // for the sake of the compiler log, print out current dependencies:
+ 407 void Dependencies::log_all_dependencies() {
+ 408   if (log() == NULL)  return;
+<span class="changed"> 409   ciBaseObject* args[max_arg_count];</span>
+ 410   for (int deptv = (int)FIRST_TYPE; deptv &lt; (int)TYPE_LIMIT; deptv++) {
+ 411     DepType dept = (DepType)deptv;
+<span class="changed"> 412     GrowableArray&lt;ciBaseObject*&gt;* deps = _deps[dept];</span>
+ 413     if (deps-&gt;length() == 0)  continue;
+ 414     int stride = dep_args(dept);
+ 415     for (int i = 0; i &lt; deps-&gt;length(); i += stride) {
+ 416       for (int j = 0; j &lt; stride; j++) {
+ 417         // flush out the identities before printing
+ 418         args[j] = deps-&gt;at(i+j);
+ 419       }
+ 420       write_dependency_to(log(), dept, stride, args);
+ 421     }
+ 422   }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 423 }
+ 424 
+ 425 void Dependencies::write_dependency_to(CompileLog* log,
+ 426                                        DepType dept,
+ 427                                        int nargs, DepArgument args[],
+ 428                                        Klass* witness) {
+ 429   if (log == NULL) {
+ 430     return;
+ 431   }
+ 432   ciEnv* env = ciEnv::current();
+ 433   ciBaseObject* ciargs[max_arg_count];
+ 434   assert(nargs &lt;= max_arg_count, "oob");
+ 435   for (int j = 0; j &lt; nargs; j++) {
+ 436     if (args[j].is_oop()) {
+ 437       ciargs[j] = env-&gt;get_object(args[j].oop_value());
+ 438     } else {
+ 439       ciargs[j] = env-&gt;get_metadata(args[j].metadata_value());
+ 440     }
+ 441   }
+ 442   Dependencies::write_dependency_to(log, dept, nargs, ciargs, witness);
+
+</pre><hr></hr>
+</pre></td><td><pre>
+
+</pre><hr></hr><pre>
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #include "precompiled.hpp"
+  26 #include "ci/ciArrayKlass.hpp"
+  27 #include "ci/ciEnv.hpp"
+  28 #include "ci/ciKlass.hpp"
+  29 #include "ci/ciMethod.hpp"
+  30 #include "code/dependencies.hpp"
+  31 #include "compiler/compileLog.hpp"
+  32 #include "oops/oop.inline.hpp"
+<span class="new">  33 #include "oops/objArrayKlass.hpp"</span>
+  34 #include "runtime/handles.hpp"
+  35 #include "runtime/handles.inline.hpp"
+  36 #include "utilities/copy.hpp"
+  37 
+  38 
+  39 #ifdef ASSERT
+  40 static bool must_be_in_vm() {
+  41   Thread* thread = Thread::current();
+  42   if (thread-&gt;is_Java_thread())
+  43     return ((JavaThread*)thread)-&gt;thread_state() == _thread_in_vm;
+  44   else
+  45     return true;  //something like this: thread-&gt;is_VM_thread();
+  46 }
+  47 #endif //ASSERT
+  48 
+  49 void Dependencies::initialize(ciEnv* env) {
+  50   Arena* arena = env-&gt;arena();
+  51   _oop_recorder = env-&gt;oop_recorder();
+  52   _log = env-&gt;log();
+  53   _dep_seen = new(arena) GrowableArray&lt;int&gt;(arena, 500, 0, 0);
+  54   DEBUG_ONLY(_deps[end_marker] = NULL);
+  55   for (int i = (int)FIRST_TYPE; i &lt; (int)TYPE_LIMIT; i++) {
+<span class="changed">  56     _deps[i] = new(arena) GrowableArray&lt;DepValue&gt;(arena, 10, 0, DepValue());</span>
+  57   }
+  58   _content_bytes = NULL;
+  59   _size_in_bytes = (size_t)-1;
+  60 
+  61   assert(TYPE_LIMIT &lt;= (1&lt;&lt;LG2_TYPE_LIMIT), "sanity");
+  62 }
+  63 
+<span class="changed">  64 void Dependencies::assert_evol_method(Method* m) {</span>
+<span class="changed">  65   assert_common_1(evol_method, DepValue(_oop_recorder, m));</span>
+  66 }
+  67 
+<span class="changed">  68 void Dependencies::assert_leaf_type(Klass* ctxk) {</span>
+<span class="changed">  69   if (ctxk-&gt;oop_is_array()) {</span>
+  70     // As a special case, support this assertion on an array type,
+  71     // which reduces to an assertion on its element type.
+  72     // Note that this cannot be done with assertions that
+  73     // relate to concreteness or abstractness.
+<span class="changed">  74     BasicType elemt = ArrayKlass::cast(ctxk)-&gt;element_type();</span>
+<span class="changed">  75     if (is_java_primitive(elemt))  return;   // Ex:  int[][]</span>
+<span class="changed">  76     ctxk = ObjArrayKlass::cast(ctxk)-&gt;bottom_klass();</span>
+  77     //if (ctxk-&gt;is_final())  return;            // Ex:  String[][]
+  78   }
+  79   check_ctxk(ctxk);
+<span class="changed">  80   assert_common_1(leaf_type, DepValue(_oop_recorder, ctxk));</span>
+  81 }
+  82 
+<span class="changed">  83 void Dependencies::assert_abstract_with_unique_concrete_subtype(Klass* ctxk, Klass* conck) {</span>
+  84   check_ctxk_abstract(ctxk);
+<span class="changed">  85   DepValue ctxk_dv(_oop_recorder, ctxk);</span>
+<span class="changed">  86   assert_common_2(abstract_with_unique_concrete_subtype, ctxk_dv, DepValue(_oop_recorder, conck, &amp;ctxk_dv));</span>
+  87 }
+  88 
+<span class="changed">  89 void Dependencies::assert_abstract_with_no_concrete_subtype(Klass* ctxk) {</span>
+  90   check_ctxk_abstract(ctxk);
+<span class="changed">  91   assert_common_1(abstract_with_no_concrete_subtype, DepValue(_oop_recorder, ctxk));</span>
+  92 }
+  93 
+<span class="changed">  94 void Dependencies::assert_concrete_with_no_concrete_subtype(Klass* ctxk) {</span>
+  95   check_ctxk_concrete(ctxk);
+<span class="changed">  96   assert_common_1(concrete_with_no_concrete_subtype, DepValue(_oop_recorder, ctxk));</span>
+  97 }
+  98 
+<span class="changed">  99 void Dependencies::assert_unique_concrete_method(Klass* ctxk, Method* uniqm) {</span>
+ 100   check_ctxk(ctxk);
+<span class="changed"> 101   assert_common_2(unique_concrete_method, DepValue(_oop_recorder, ctxk), DepValue(_oop_recorder, uniqm));</span>
+ 102 }
+ 103 
+<span class="changed"> 104 void Dependencies::assert_abstract_with_exclusive_concrete_subtypes(Klass* ctxk, Klass* k1, Klass* k2) {</span>
+ 105   check_ctxk(ctxk);
+<span class="changed"> 106   DepValue k1_dv(_oop_recorder, k1);</span>
+<span class="changed"> 107   assert_common_3(abstract_with_exclusive_concrete_subtypes_2, ctxk, k1_dv, DepValue(_oop_recorder, k2, &amp;k1_dv));</span>
+ 108 }
+ 109 
+<span class="changed"> 110 void Dependencies::assert_exclusive_concrete_methods(Klass* ctxk, Method* m1, Method* m2) {</span>
+ 111   check_ctxk(ctxk);
+<span class="changed"> 112   DepValue m1_dv(_oop_recorder, m1);</span>
+<span class="changed"> 113   assert_common_3(exclusive_concrete_methods_2, ctxk, m1_dv, DepValue(_oop_recorder, m2, &amp;m1_dv));</span>
+ 114 }
+ 115 
+<span class="changed"> 116 void Dependencies::assert_has_no_finalizable_subclasses(Klass* ctxk) {</span>
+ 117   check_ctxk(ctxk);
+<span class="changed"> 118   assert_common_1(no_finalizable_subclasses, DepValue(_oop_recorder, ctxk));</span>
+ 119 }
+ 120 
+<span class="changed"> 121 void Dependencies::assert_call_site_target_value(jobject call_site, jobject method_handle) {</span>
+<span class="changed"> 122   Klass* ctxk = JNIHandles::resolve(call_site)-&gt;klass();</span>
+<span class="changed"> 123   check_ctxk(ctxk);</span>
+<span class="changed"> 124   assert_common_2(call_site_target_value, DepValue(_oop_recorder, call_site), DepValue(_oop_recorder, method_handle));</span>
+ 125 }
+ 126 
+ 127 // Helper function.  If we are adding a new dep. under ctxk2,
+ 128 // try to find an old dep. under a broader* ctxk1.  If there is
+ 129 //
+<span class="changed"> 130 bool Dependencies::maybe_merge_ctxk(GrowableArray&lt;DepValue&gt;* deps,</span>
+<span class="changed"> 131                                     int ctxk_i, Klass* ctxk2) {</span>
+<span class="changed"> 132   Klass* ctxk1 = deps-&gt;at(ctxk_i).as_klass(_oop_recorder);</span>
+ 133   if (ctxk2-&gt;is_subtype_of(ctxk1)) {
+ 134     return true;  // success, and no need to change
+ 135   } else if (ctxk1-&gt;is_subtype_of(ctxk2)) {
+ 136     // new context class fully subsumes previous one
+<span class="changed"> 137     deps-&gt;at_put(ctxk_i, DepValue(_oop_recorder, ctxk2));</span>
+ 138     return true;
+ 139   } else {
+ 140     return false;
+ 141   }
+ 142 }
+ 143 
+<span class="changed"> 144 void Dependencies::assert_common_1(DepType dept, DepValue x) {</span>
+ 145   assert(dep_args(dept) == 1, "sanity");
+ 146   log_dependency(dept, x);
+<span class="changed"> 147   GrowableArray&lt;DepValue&gt;* deps = _deps[dept];</span>
+ 148 
+ 149   // see if the same (or a similar) dep is already recorded
+ 150   if (note_dep_seen(dept, x)) {
+ 151     assert(deps-&gt;find(x) &gt;= 0, "sanity");
+ 152   } else {
+ 153     deps-&gt;append(x);
+ 154   }
+ 155 }
+ 156 
+ 157 void Dependencies::assert_common_2(DepType dept,
+<span class="changed"> 158                                    DepValue x0, DepValue x1) {</span>
+ 159   assert(dep_args(dept) == 2, "sanity");
+ 160   log_dependency(dept, x0, x1);
+<span class="changed"> 161   GrowableArray&lt;DepValue&gt;* deps = _deps[dept];</span>
+ 162 
+ 163   // see if the same (or a similar) dep is already recorded
+ 164   bool has_ctxk = has_explicit_context_arg(dept);
+ 165   if (has_ctxk) {
+ 166     assert(dep_context_arg(dept) == 0, "sanity");
+ 167     if (note_dep_seen(dept, x1)) {
+ 168       // look in this bucket for redundant assertions
+ 169       const int stride = 2;
+ 170       for (int i = deps-&gt;length(); (i -= stride) &gt;= 0; ) {
+<span class="changed"> 171         DepValue y1 = deps-&gt;at(i+1);</span>
+ 172         if (x1 == y1) {  // same subject; check the context
+<span class="changed"> 173           if (maybe_merge_ctxk(deps, i+0, x0.as_klass(_oop_recorder))) {</span>
+ 174             return;
+ 175           }
+ 176         }
+ 177       }
+ 178     }
+ 179   } else {
+ 180     assert(dep_implicit_context_arg(dept) == 0, "sanity");
+ 181     if (note_dep_seen(dept, x0) &amp;&amp; note_dep_seen(dept, x1)) {
+ 182       // look in this bucket for redundant assertions
+ 183       const int stride = 2;
+ 184       for (int i = deps-&gt;length(); (i -= stride) &gt;= 0; ) {
+<span class="changed"> 185         DepValue y0 = deps-&gt;at(i+0);</span>
+<span class="changed"> 186         DepValue y1 = deps-&gt;at(i+1);</span>
+ 187         if (x0 == y0 &amp;&amp; x1 == y1) {
+ 188           return;
+ 189         }
+ 190       }
+ 191     }
+ 192   }
+ 193 
+ 194   // append the assertion in the correct bucket:
+ 195   deps-&gt;append(x0);
+ 196   deps-&gt;append(x1);
+ 197 }
+ 198 
+ 199 void Dependencies::assert_common_3(DepType dept,
+<span class="changed"> 200                                    Klass* ctxk, DepValue x, DepValue x2) {</span>
+ 201   assert(dep_context_arg(dept) == 0, "sanity");
+ 202   assert(dep_args(dept) == 3, "sanity");
+<span class="changed"> 203   log_dependency(dept, DepValue(_oop_recorder, ctxk), x, x2);</span>
+<span class="changed"> 204   GrowableArray&lt;DepValue&gt;* deps = _deps[dept];</span>
+ 205 
+ 206   // try to normalize an unordered pair:
+ 207   bool swap = false;
+ 208   switch (dept) {
+ 209   case abstract_with_exclusive_concrete_subtypes_2:
+<span class="changed"> 210     swap = (x.index() &gt; x2.index() &amp;&amp; x.as_klass(_oop_recorder) != ctxk);</span>
+ 211     break;
+ 212   case exclusive_concrete_methods_2:
+<span class="changed"> 213     swap = (x.index() &gt; x2.index() &amp;&amp; x.as_method(_oop_recorder)-&gt;method_holder() != ctxk);</span>
+ 214     break;
+ 215   }
+<span class="changed"> 216   if (swap) { DepValue t = x; x = x2; x2 = t; }</span>
+ 217 
+ 218   // see if the same (or a similar) dep is already recorded
+ 219   if (note_dep_seen(dept, x) &amp;&amp; note_dep_seen(dept, x2)) {
+ 220     // look in this bucket for redundant assertions
+ 221     const int stride = 3;
+ 222     for (int i = deps-&gt;length(); (i -= stride) &gt;= 0; ) {
+<span class="changed"> 223       DepValue y  = deps-&gt;at(i+1);</span>
+<span class="changed"> 224       DepValue y2 = deps-&gt;at(i+2);</span>
+ 225       if (x == y &amp;&amp; x2 == y2) {  // same subjects; check the context
+ 226         if (maybe_merge_ctxk(deps, i+0, ctxk)) {
+ 227           return;
+ 228         }
+ 229       }
+ 230     }
+ 231   }
+ 232   // append the assertion in the correct bucket:
+<span class="changed"> 233   deps-&gt;append(DepValue(_oop_recorder, ctxk));</span>
+ 234   deps-&gt;append(x);
+ 235   deps-&gt;append(x2);
+ 236 }
+ 237 
+ 238 /// Support for encoding dependencies into an nmethod:
+ 239 
+ 240 void Dependencies::copy_to(nmethod* nm) {
+ 241   address beg = nm-&gt;dependencies_begin();
+ 242   address end = nm-&gt;dependencies_end();
+ 243   guarantee(end - beg &gt;= (ptrdiff_t) size_in_bytes(), "bad sizing");
+ 244   Copy::disjoint_words((HeapWord*) content_bytes(),
+ 245                        (HeapWord*) beg,
+ 246                        size_in_bytes() / sizeof(HeapWord));
+ 247   assert(size_in_bytes() % sizeof(HeapWord) == 0, "copy by words");
+ 248 }
+ 249 
+<span class="changed"> 250 static int sort_dep(Dependencies::DepValue* p1, Dependencies::DepValue* p2, int narg) {</span>
+ 251   for (int i = 0; i &lt; narg; i++) {
+<span class="changed"> 252     int diff = p1[i].sort_key() - p2[i].sort_key();</span>
+ 253     if (diff != 0)  return diff;
+ 254   }
+ 255   return 0;
+ 256 }
+<span class="changed"> 257 static int sort_dep_arg_1(Dependencies::DepValue* p1, Dependencies::DepValue* p2)</span>
+ 258 { return sort_dep(p1, p2, 1); }
+<span class="changed"> 259 static int sort_dep_arg_2(Dependencies::DepValue* p1, Dependencies::DepValue* p2)</span>
+ 260 { return sort_dep(p1, p2, 2); }
+<span class="changed"> 261 static int sort_dep_arg_3(Dependencies::DepValue* p1, Dependencies::DepValue* p2)</span>
+ 262 { return sort_dep(p1, p2, 3); }
+ 263 
+ 264 void Dependencies::sort_all_deps() {
+ 265   for (int deptv = (int)FIRST_TYPE; deptv &lt; (int)TYPE_LIMIT; deptv++) {
+ 266     DepType dept = (DepType)deptv;
+<span class="changed"> 267     GrowableArray&lt;DepValue&gt;* deps = _deps[dept];</span>
+ 268     if (deps-&gt;length() &lt;= 1)  continue;
+ 269     switch (dep_args(dept)) {
+ 270     case 1: deps-&gt;sort(sort_dep_arg_1, 1); break;
+ 271     case 2: deps-&gt;sort(sort_dep_arg_2, 2); break;
+ 272     case 3: deps-&gt;sort(sort_dep_arg_3, 3); break;
+ 273     default: ShouldNotReachHere();
+ 274     }
+ 275   }
+ 276 }
+ 277 
+ 278 size_t Dependencies::estimate_size_in_bytes() {
+ 279   size_t est_size = 100;
+ 280   for (int deptv = (int)FIRST_TYPE; deptv &lt; (int)TYPE_LIMIT; deptv++) {
+ 281     DepType dept = (DepType)deptv;
+<span class="changed"> 282     GrowableArray&lt;DepValue&gt;* deps = _deps[dept];</span>
+ 283     est_size += deps-&gt;length()*2;  // tags and argument(s)
+ 284   }
+ 285   return est_size;
+ 286 }
+ 287 
+<span class="changed"> 288 Klass* Dependencies::ctxk_encoded_as_null(OopRecorder* oop_recorder, DepType dept, DepValue x) {</span>
+ 289   switch (dept) {
+ 290   case abstract_with_exclusive_concrete_subtypes_2:
+<span class="changed"> 291     return x.as_klass(oop_recorder);</span>
+ 292   case unique_concrete_method:
+ 293   case exclusive_concrete_methods_2:
+<span class="changed"> 294     return x.as_method(oop_recorder)-&gt;method_holder();</span>
+ 295   }
+ 296   return NULL;  // let NULL be NULL
+ 297 }
+ 298 
+ 299 Klass* Dependencies::ctxk_encoded_as_null(DepType dept, Metadata* x) {
+ 300   assert(must_be_in_vm(), "raw oops here");
+ 301   switch (dept) {
+ 302   case abstract_with_exclusive_concrete_subtypes_2:
+ 303     assert(x-&gt;is_klass(), "sanity");
+ 304     return (Klass*) x;
+ 305   case unique_concrete_method:
+ 306   case exclusive_concrete_methods_2:
+ 307     assert(x-&gt;is_method(), "sanity");
+ 308     return ((Method*)x)-&gt;method_holder();
+ 309   }
+ 310   return NULL;  // let NULL be NULL
+ 311 }
+ 312 
+ 313 void Dependencies::encode_content_bytes() {
+ 314   sort_all_deps();
+ 315 
+ 316   // cast is safe, no deps can overflow INT_MAX
+ 317   CompressedWriteStream bytes((int)estimate_size_in_bytes());
+ 318 
+ 319   for (int deptv = (int)FIRST_TYPE; deptv &lt; (int)TYPE_LIMIT; deptv++) {
+ 320     DepType dept = (DepType)deptv;
+<span class="changed"> 321     GrowableArray&lt;DepValue&gt;* deps = _deps[dept];</span>
+ 322     if (deps-&gt;length() == 0)  continue;
+ 323     int stride = dep_args(dept);
+ 324     int ctxkj  = dep_context_arg(dept);  // -1 if no context arg
+ 325     assert(stride &gt; 0, "sanity");
+ 326     for (int i = 0; i &lt; deps-&gt;length(); i += stride) {
+ 327       jbyte code_byte = (jbyte)dept;
+ 328       int skipj = -1;
+ 329       if (ctxkj &gt;= 0 &amp;&amp; ctxkj+1 &lt; stride) {
+<span class="changed"> 330         Klass*  ctxk = deps-&gt;at(i+ctxkj+0).as_klass(_oop_recorder);</span>
+<span class="changed"> 331         DepValue x     = deps-&gt;at(i+ctxkj+1);  // following argument</span>
+<span class="changed"> 332         if (ctxk == ctxk_encoded_as_null(_oop_recorder, dept, x)) {</span>
+ 333           skipj = ctxkj;  // we win:  maybe one less oop to keep track of
+ 334           code_byte |= default_context_type_bit;
+ 335         }
+ 336       }
+ 337       bytes.write_byte(code_byte);
+ 338       for (int j = 0; j &lt; stride; j++) {
+ 339         if (j == skipj)  continue;
+<span class="changed"> 340         DepValue v = deps-&gt;at(i+j);</span>
+<span class="changed"> 341         int idx = v.index();</span>
+
+
+
+
+
+
+ 342         bytes.write_int(idx);
+ 343       }
+ 344     }
+ 345   }
+ 346 
+ 347   // write a sentinel byte to mark the end
+ 348   bytes.write_byte(end_marker);
+ 349 
+ 350   // round it out to a word boundary
+ 351   while (bytes.position() % sizeof(HeapWord) != 0) {
+ 352     bytes.write_byte(end_marker);
+ 353   }
+ 354 
+ 355   // check whether the dept byte encoding really works
+ 356   assert((jbyte)default_context_type_bit != 0, "byte overflow");
+ 357 
+ 358   _content_bytes = bytes.buffer();
+ 359   _size_in_bytes = bytes.position();
+ 360 }
+ 361 
+
+</pre><hr></hr><pre>
+ 388   2  // call_site_target_value call_site, method_handle
+ 389 };
+ 390 
+ 391 const char* Dependencies::dep_name(Dependencies::DepType dept) {
+ 392   if (!dept_in_mask(dept, all_types))  return "?bad-dep?";
+ 393   return _dep_name[dept];
+ 394 }
+ 395 
+ 396 int Dependencies::dep_args(Dependencies::DepType dept) {
+ 397   if (!dept_in_mask(dept, all_types))  return -1;
+ 398   return _dep_args[dept];
+ 399 }
+ 400 
+ 401 void Dependencies::check_valid_dependency_type(DepType dept) {
+ 402   guarantee(FIRST_TYPE &lt;= dept &amp;&amp; dept &lt; TYPE_LIMIT, err_msg("invalid dependency type: %d", (int) dept));
+ 403 }
+ 404 
+ 405 // for the sake of the compiler log, print out current dependencies:
+ 406 void Dependencies::log_all_dependencies() {
+ 407   if (log() == NULL)  return;
+<span class="changed"> 408   DepValue args[max_arg_count];</span>
+ 409   for (int deptv = (int)FIRST_TYPE; deptv &lt; (int)TYPE_LIMIT; deptv++) {
+ 410     DepType dept = (DepType)deptv;
+<span class="changed"> 411     GrowableArray&lt;DepValue&gt;* deps = _deps[dept];</span>
+ 412     if (deps-&gt;length() == 0)  continue;
+ 413     int stride = dep_args(dept);
+ 414     for (int i = 0; i &lt; deps-&gt;length(); i += stride) {
+ 415       for (int j = 0; j &lt; stride; j++) {
+ 416         // flush out the identities before printing
+ 417         args[j] = deps-&gt;at(i+j);
+ 418       }
+ 419       write_dependency_to(log(), dept, stride, args);
+ 420     }
+ 421   }
+<span class="new"> 422 }</span>
+<span class="new"> 423 </span>
+<span class="new"> 424 void Dependencies::write_dependency_to(CompileLog* log,</span>
+<span class="new"> 425                                        DepType dept,</span>
+<span class="new"> 426                                        int nargs, DepValue args[],</span>
+<span class="new"> 427                                        Klass* witness) {</span>
+<span class="new"> 428   if (log == NULL) {</span>
+<span class="new"> 429     return;</span>
+<span class="new"> 430   }</span>
+<span class="new"> 431   ciEnv* env = ciEnv::current();</span>
+<span class="new"> 432   ciBaseObject* ciargs[max_arg_count];</span>
+<span class="new"> 433   assert(nargs &lt;= max_arg_count, "oob");</span>
+<span class="new"> 434   for (int j = 0; j &lt; nargs; j++) {</span>
+<span class="new"> 435     if (args[j].is_object()) {</span>
+<span class="new"> 436       ciargs[j] = env-&gt;get_object(JNIHandles::resolve(args[j].as_object(_oop_recorder)));</span>
+<span class="new"> 437     } else {</span>
+<span class="new"> 438       ciargs[j] = env-&gt;get_metadata(args[j].as_metadata(_oop_recorder));</span>
+<span class="new"> 439     }</span>
+<span class="new"> 440   }</span>
+<span class="new"> 441   Dependencies::write_dependency_to(log, dept, nargs, ciargs, witness);</span>
+ 442 }
+ 443 
+ 444 void Dependencies::write_dependency_to(CompileLog* log,
+ 445                                        DepType dept,
+ 446                                        int nargs, DepArgument args[],
+ 447                                        Klass* witness) {
+ 448   if (log == NULL) {
+ 449     return;
+ 450   }
+ 451   ciEnv* env = ciEnv::current();
+ 452   ciBaseObject* ciargs[max_arg_count];
+ 453   assert(nargs &lt;= max_arg_count, "oob");
+ 454   for (int j = 0; j &lt; nargs; j++) {
+ 455     if (args[j].is_oop()) {
+ 456       ciargs[j] = env-&gt;get_object(args[j].oop_value());
+ 457     } else {
+ 458       ciargs[j] = env-&gt;get_metadata(args[j].metadata_value());
+ 459     }
+ 460   }
+ 461   Dependencies::write_dependency_to(log, dept, nargs, ciargs, witness);
+
+</pre><hr></hr>
+</pre></td>
+</tr></table>
+</body></html>

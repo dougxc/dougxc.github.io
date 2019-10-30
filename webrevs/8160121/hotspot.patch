@@ -1,0 +1,115 @@
+--- old/src/share/vm/compiler/compileBroker.cpp	2016-06-23 12:39:21.000000000 +0200
++++ new/src/share/vm/compiler/compileBroker.cpp	2016-06-23 12:39:21.000000000 +0200
+@@ -551,17 +551,6 @@
+       } else {
+         c1_count = JVMCIHostThreads;
+       }
+-
+-      if (!UseInterpreter || !BackgroundCompilation) {
+-        // Force initialization of JVMCI compiler otherwise JVMCI
+-        // compilations will not block until JVMCI is initialized
+-        ResourceMark rm;
+-        TempNewSymbol getCompiler = SymbolTable::new_symbol("getCompiler", CHECK);
+-        TempNewSymbol sig = SymbolTable::new_symbol("()Ljdk/vm/ci/runtime/JVMCICompiler;", CHECK);
+-        Handle jvmciRuntime = JVMCIRuntime::get_HotSpotJVMCIRuntime(CHECK);
+-        JavaValue result(T_OBJECT);
+-        JavaCalls::call_virtual(&result, jvmciRuntime, HotSpotJVMCIRuntime::klass(), getCompiler, sig, CHECK);
+-      }
+     }
+   }
+ #endif // INCLUDE_JVMCI
+--- old/src/share/vm/jvmci/jvmciCompiler.cpp	2016-06-23 12:39:22.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciCompiler.cpp	2016-06-23 12:39:22.000000000 +0200
+@@ -125,6 +125,11 @@
+ 
+ void JVMCICompiler::compile_method(const methodHandle& method, int entry_bci, JVMCIEnv* env) {
+   JVMCI_EXCEPTION_CONTEXT
++  if (SystemDictionary::java_system_loader() == NULL) {
++    // 8160121: The system class loader is cached in the VM after VM init phase 3 has completed.
++    // We cannot compile before then as the ServiceLoader cannot be used until after phase 3.
++    return;
++  }
+ 
+   bool is_osr = entry_bci != InvocationEntryBci;
+   if (_bootstrapping && is_osr) {
+--- old/src/share/vm/jvmci/jvmciRuntime.cpp	2016-06-23 12:39:22.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciRuntime.cpp	2016-06-23 12:39:22.000000000 +0200
+@@ -612,6 +612,17 @@
+   return value;
+ JRT_END
+ 
++void JVMCIRuntime::force_initialization(TRAPS) {
++  JVMCIRuntime::initialize_well_known_classes(CHECK);
++
++  ResourceMark rm;
++  TempNewSymbol getCompiler = SymbolTable::new_symbol("getCompiler", CHECK);
++  TempNewSymbol sig = SymbolTable::new_symbol("()Ljdk/vm/ci/runtime/JVMCICompiler;", CHECK);
++  Handle jvmciRuntime = JVMCIRuntime::get_HotSpotJVMCIRuntime(CHECK);
++  JavaValue result(T_OBJECT);
++  JavaCalls::call_virtual(&result, jvmciRuntime, HotSpotJVMCIRuntime::klass(), getCompiler, sig, CHECK);
++}
++
+ // private static JVMCIRuntime JVMCI.initializeRuntime()
+ JVM_ENTRY(jobject, JVM_GetJVMCIRuntime(JNIEnv *env, jclass c))
+   if (!EnableJVMCI) {
+--- old/src/share/vm/jvmci/jvmciRuntime.hpp	2016-06-23 12:39:23.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciRuntime.hpp	2016-06-23 12:39:23.000000000 +0200
+@@ -157,6 +157,9 @@
+   static void throw_klass_external_name_exception(JavaThread* thread, const char* exception, Klass* klass);
+   static void throw_class_cast_exception(JavaThread* thread, const char* exception, Klass* caster_klass, Klass* target_klass);
+ 
++  // Forces initialization of the JVMCI runtime.
++  static void force_initialization(TRAPS);
++
+   // Test only function
+   static int test_deoptimize_call_int(JavaThread* thread, int value);
+ };
+--- old/src/share/vm/runtime/thread.cpp	2016-06-23 12:39:23.000000000 +0200
++++ new/src/share/vm/runtime/thread.cpp	2016-06-23 12:39:23.000000000 +0200
+@@ -3770,6 +3770,13 @@
+   // Final system initialization including security manager and system class loader
+   call_initPhase3(CHECK_JNI_ERR);
+ 
++#ifdef INCLUDE_JVMCI
++  if (EnableJVMCI && UseJVMCICompiler && (!UseInterpreter || !BackgroundCompilation)) {
++    // 8145270: Force initialization of JVMCI runtime otherwise requests for blocking
++    // compilations via JVMCI will not actually block until JVMCI is initialized.
++    JVMCIRuntime::force_initialization(CHECK_JNI_ERR);
++  }
++#endif
+   // cache the system class loader
+   SystemDictionary::compute_java_system_loader(CHECK_(JNI_ERR));
+ 
+--- old/test/compiler/jvmci/events/JvmciNotifyBootstrapFinishedEventTest.java	2016-06-23 12:39:24.000000000 +0200
++++ new/test/compiler/jvmci/events/JvmciNotifyBootstrapFinishedEventTest.java	2016-06-23 12:39:24.000000000 +0200
+@@ -43,6 +43,8 @@
+  * @run main ClassFileInstaller
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyHotspotCompiler
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyCompilerFactory
++ *     compiler.jvmci.common.JVMCIHelpers$EmptyCompilationRequestResult
++ *     compiler.jvmci.common.JVMCIHelpers$EmptyVMEventListener
+  *     compiler.jvmci.events.JvmciNotifyBootstrapFinishedEventTest
+  *     jdk.test.lib.Asserts
+  *     jdk.test.lib.Utils
+--- old/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.java	2016-06-23 12:39:25.000000000 +0200
++++ new/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.java	2016-06-23 12:39:25.000000000 +0200
+@@ -44,6 +44,8 @@
+  * @run main ClassFileInstaller
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyHotspotCompiler
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyCompilerFactory
++ *     compiler.jvmci.common.JVMCIHelpers$EmptyCompilationRequestResult
++ *     compiler.jvmci.common.JVMCIHelpers$EmptyVMEventListener
+  *     compiler.jvmci.events.JvmciNotifyInstallEventTest
+  *     compiler.jvmci.common.CTVMUtilities
+  *     compiler.jvmci.common.testcases.SimpleClass
+--- old/test/compiler/jvmci/events/JvmciShutdownEventTest.java	2016-06-23 12:39:25.000000000 +0200
++++ new/test/compiler/jvmci/events/JvmciShutdownEventTest.java	2016-06-23 12:39:25.000000000 +0200
+@@ -40,6 +40,8 @@
+  * @run main ClassFileInstaller
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyHotspotCompiler
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyCompilerFactory
++ *     compiler.jvmci.common.JVMCIHelpers$EmptyCompilationRequestResult
++ *     compiler.jvmci.common.JVMCIHelpers$EmptyVMEventListener
+  *     compiler.jvmci.events.JvmciShutdownEventListener
+  * @run main/othervm compiler.jvmci.events.JvmciShutdownEventTest
+  */

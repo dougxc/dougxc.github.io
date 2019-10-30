@@ -1,0 +1,461 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #include "precompiled.hpp"
+  26 #include "code/debugInfo.hpp"
+  27 #include "code/debugInfoRec.hpp"
+  28 #include "code/nmethod.hpp"
+  29 #include "oops/oop.inline.hpp"
+  30 #include "runtime/handles.inline.hpp"
+  31 #include "runtime/interfaceSupport.inline.hpp"
+  32 #include "runtime/jniHandles.inline.hpp"
+  33 #include "runtime/thread.hpp"
+  34 
+  35 // Constructors
+  36 
+  37 DebugInfoWriteStream::DebugInfoWriteStream(DebugInformationRecorder* recorder, int initial_size)
+  38 : CompressedWriteStream(initial_size) {
+  39   _recorder = recorder;
+  40 }
+  41 
+  42 // Serializing oops
+  43 
+  44 void DebugInfoWriteStream::write_handle(jobject h) {
+  45   write_int(recorder()-&gt;oop_recorder()-&gt;find_index(h));
+  46 }
+  47 
+  48 void DebugInfoWriteStream::write_metadata(Metadata* h) {
+  49   write_int(recorder()-&gt;oop_recorder()-&gt;find_index(h));
+  50 }
+  51 
+  52 oop DebugInfoReadStream::read_oop() {
+  53   oop o = code()-&gt;oop_at(read_int());
+  54   assert(oopDesc::is_oop_or_null(o), "oop only");
+  55   return o;
+  56 }
+  57 
+  58 ScopeValue* DebugInfoReadStream::read_object_value() {
+  59   int id = read_int();
+  60 #ifdef ASSERT
+  61   assert(_obj_pool != NULL, "object pool does not exist");
+  62   for (int i = _obj_pool-&gt;length() - 1; i &gt;= 0; i--) {
+  63     assert(_obj_pool-&gt;at(i)-&gt;as_ObjectValue()-&gt;id() != id, "should not be read twice");
+  64   }
+  65 #endif
+  66   ObjectValue* result = new ObjectValue(id);
+  67   // Cache the object since an object field could reference it.
+  68   _obj_pool-&gt;push(result);
+  69   result-&gt;read_object(this);
+  70   return result;
+  71 }
+  72 
+  73 ScopeValue* DebugInfoReadStream::get_cached_object() {
+  74   int id = read_int();
+  75   assert(_obj_pool != NULL, "object pool does not exist");
+  76   for (int i = _obj_pool-&gt;length() - 1; i &gt;= 0; i--) {
+  77     ObjectValue* ov = _obj_pool-&gt;at(i)-&gt;as_ObjectValue();
+  78     if (ov-&gt;id() == id) {
+  79       return ov;
+  80     }
+  81   }
+  82   ShouldNotReachHere();
+  83   return NULL;
+  84 }
+  85 
+  86 // Serializing scope values
+  87 
+  88 enum { LOCATION_CODE = 0, CONSTANT_INT_CODE = 1,  CONSTANT_OOP_CODE = 2,
+  89                           CONSTANT_LONG_CODE = 3, CONSTANT_DOUBLE_CODE = 4,
+  90                           OBJECT_CODE = 5,        OBJECT_ID_CODE = 6 };
+  91 
+  92 ScopeValue* ScopeValue::read_from(DebugInfoReadStream* stream) {
+  93   ScopeValue* result = NULL;
+  94   switch(stream-&gt;read_int()) {
+  95    case LOCATION_CODE:        result = new LocationValue(stream);        break;
+  96    case CONSTANT_INT_CODE:    result = new ConstantIntValue(stream);     break;
+  97    case CONSTANT_OOP_CODE:    result = new ConstantOopReadValue(stream); break;
+  98    case CONSTANT_LONG_CODE:   result = new ConstantLongValue(stream);    break;
+  99    case CONSTANT_DOUBLE_CODE: result = new ConstantDoubleValue(stream);  break;
+ 100    case OBJECT_CODE:          result = stream-&gt;read_object_value();      break;
+ 101    case OBJECT_ID_CODE:       result = stream-&gt;get_cached_object();      break;
+ 102    default: ShouldNotReachHere();
+ 103   }
+ 104   return result;
+ 105 }
+ 106 
+ 107 // LocationValue
+ 108 
+ 109 LocationValue::LocationValue(DebugInfoReadStream* stream) {
+ 110   _location = Location(stream);
+ 111 }
+ 112 
+ 113 void LocationValue::write_on(DebugInfoWriteStream* stream) {
+ 114   stream-&gt;write_int(LOCATION_CODE);
+ 115   location().write_on(stream);
+ 116 }
+ 117 
+ 118 void LocationValue::print_on(outputStream* st) const {
+ 119   location().print_on(st);
+ 120 }
+ 121 
+ 122 // ObjectValue
+ 123 
+ 124 void ObjectValue::set_value(oop value) {
+ 125   _value = Handle(Thread::current(), value);
+ 126 }
+ 127 
+ 128 void ObjectValue::read_object(DebugInfoReadStream* stream) {
+ 129   _klass = read_from(stream);
+<a name="1" id="anc1"></a><span class="new"> 130   _base_object = read_from(stream);</span>
+ 131   assert(_klass-&gt;is_constant_oop(), "should be constant java mirror oop");
+ 132   int length = stream-&gt;read_int();
+ 133   for (int i = 0; i &lt; length; i++) {
+ 134     ScopeValue* val = read_from(stream);
+ 135     _field_values.append(val);
+ 136   }
+ 137 }
+ 138 
+ 139 void ObjectValue::write_on(DebugInfoWriteStream* stream) {
+ 140   if (_visited) {
+ 141     stream-&gt;write_int(OBJECT_ID_CODE);
+ 142     stream-&gt;write_int(_id);
+ 143   } else {
+ 144     _visited = true;
+ 145     stream-&gt;write_int(OBJECT_CODE);
+ 146     stream-&gt;write_int(_id);
+ 147     _klass-&gt;write_on(stream);
+<a name="2" id="anc2"></a><span class="new"> 148     _base_object-&gt;write_on(stream);</span>
+ 149     int length = _field_values.length();
+ 150     stream-&gt;write_int(length);
+ 151     for (int i = 0; i &lt; length; i++) {
+ 152       _field_values.at(i)-&gt;write_on(stream);
+ 153     }
+ 154   }
+ 155 }
+ 156 
+ 157 void ObjectValue::print_on(outputStream* st) const {
+ 158   st-&gt;print("obj[%d]", _id);
+ 159 }
+ 160 
+ 161 void ObjectValue::print_fields_on(outputStream* st) const {
+ 162 #ifndef PRODUCT
+ 163   if (_field_values.length() &gt; 0) {
+ 164     _field_values.at(0)-&gt;print_on(st);
+ 165   }
+ 166   for (int i = 1; i &lt; _field_values.length(); i++) {
+ 167     st-&gt;print(", ");
+ 168     _field_values.at(i)-&gt;print_on(st);
+ 169   }
+ 170 #endif
+ 171 }
+ 172 
+ 173 // ConstantIntValue
+ 174 
+ 175 ConstantIntValue::ConstantIntValue(DebugInfoReadStream* stream) {
+ 176   _value = stream-&gt;read_signed_int();
+ 177 }
+ 178 
+ 179 void ConstantIntValue::write_on(DebugInfoWriteStream* stream) {
+ 180   stream-&gt;write_int(CONSTANT_INT_CODE);
+ 181   stream-&gt;write_signed_int(value());
+ 182 }
+ 183 
+ 184 void ConstantIntValue::print_on(outputStream* st) const {
+ 185   st-&gt;print("%d", value());
+ 186 }
+ 187 
+ 188 // ConstantLongValue
+ 189 
+ 190 ConstantLongValue::ConstantLongValue(DebugInfoReadStream* stream) {
+ 191   _value = stream-&gt;read_long();
+ 192 }
+ 193 
+ 194 void ConstantLongValue::write_on(DebugInfoWriteStream* stream) {
+ 195   stream-&gt;write_int(CONSTANT_LONG_CODE);
+ 196   stream-&gt;write_long(value());
+ 197 }
+ 198 
+ 199 void ConstantLongValue::print_on(outputStream* st) const {
+ 200   st-&gt;print(JLONG_FORMAT, value());
+ 201 }
+ 202 
+ 203 // ConstantDoubleValue
+ 204 
+ 205 ConstantDoubleValue::ConstantDoubleValue(DebugInfoReadStream* stream) {
+ 206   _value = stream-&gt;read_double();
+ 207 }
+ 208 
+ 209 void ConstantDoubleValue::write_on(DebugInfoWriteStream* stream) {
+ 210   stream-&gt;write_int(CONSTANT_DOUBLE_CODE);
+ 211   stream-&gt;write_double(value());
+ 212 }
+ 213 
+ 214 void ConstantDoubleValue::print_on(outputStream* st) const {
+ 215   st-&gt;print("%f", value());
+ 216 }
+ 217 
+ 218 // ConstantOopWriteValue
+ 219 
+ 220 void ConstantOopWriteValue::write_on(DebugInfoWriteStream* stream) {
+ 221 #ifdef ASSERT
+ 222   {
+ 223     // cannot use ThreadInVMfromNative here since in case of JVMCI compiler,
+ 224     // thread is already in VM state.
+ 225     ThreadInVMfromUnknown tiv;
+ 226     assert(JNIHandles::resolve(value()) == NULL ||
+ 227            Universe::heap()-&gt;is_in_reserved(JNIHandles::resolve(value())),
+ 228            "Should be in heap");
+ 229  }
+ 230 #endif
+ 231   stream-&gt;write_int(CONSTANT_OOP_CODE);
+ 232   stream-&gt;write_handle(value());
+ 233 }
+ 234 
+ 235 void ConstantOopWriteValue::print_on(outputStream* st) const {
+ 236   // using ThreadInVMfromUnknown here since in case of JVMCI compiler,
+ 237   // thread is already in VM state.
+ 238   ThreadInVMfromUnknown tiv;
+ 239   JNIHandles::resolve(value())-&gt;print_value_on(st);
+ 240 }
+ 241 
+ 242 
+ 243 // ConstantOopReadValue
+ 244 
+ 245 ConstantOopReadValue::ConstantOopReadValue(DebugInfoReadStream* stream) {
+ 246   _value = Handle(Thread::current(), stream-&gt;read_oop());
+ 247   assert(_value() == NULL ||
+ 248          Universe::heap()-&gt;is_in_reserved(_value()), "Should be in heap");
+ 249 }
+ 250 
+ 251 void ConstantOopReadValue::write_on(DebugInfoWriteStream* stream) {
+ 252   ShouldNotReachHere();
+ 253 }
+ 254 
+ 255 void ConstantOopReadValue::print_on(outputStream* st) const {
+ 256   if (value()() != NULL) {
+ 257     value()()-&gt;print_value_on(st);
+ 258   } else {
+ 259     st-&gt;print_cr("NULL");
+ 260   }
+ 261 }
+ 262 
+ 263 
+ 264 // MonitorValue
+ 265 
+ 266 MonitorValue::MonitorValue(ScopeValue* owner, Location basic_lock, bool eliminated) {
+ 267   _owner       = owner;
+ 268   _basic_lock  = basic_lock;
+ 269   _eliminated  = eliminated;
+ 270 }
+ 271 
+ 272 MonitorValue::MonitorValue(DebugInfoReadStream* stream) {
+ 273   _basic_lock  = Location(stream);
+ 274   _owner       = ScopeValue::read_from(stream);
+ 275   _eliminated  = (stream-&gt;read_bool() != 0);
+ 276 }
+ 277 
+ 278 void MonitorValue::write_on(DebugInfoWriteStream* stream) {
+ 279   _basic_lock.write_on(stream);
+ 280   _owner-&gt;write_on(stream);
+ 281   stream-&gt;write_bool(_eliminated);
+ 282 }
+ 283 
+ 284 #ifndef PRODUCT
+ 285 void MonitorValue::print_on(outputStream* st) const {
+ 286   st-&gt;print("monitor{");
+ 287   owner()-&gt;print_on(st);
+ 288   st-&gt;print(",");
+ 289   basic_lock().print_on(st);
+ 290   st-&gt;print("}");
+ 291   if (_eliminated) {
+ 292     st-&gt;print(" (eliminated)");
+ 293   }
+ 294 }
+ 295 #endif
+<a name="3" id="anc3"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="3" type="hidden" /></form></body></html>

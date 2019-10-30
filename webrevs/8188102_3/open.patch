@@ -1,0 +1,686 @@
+--- old/src/hotspot/.mx.jvmci/mx_jvmci.py	2017-11-02 08:30:02.000000000 +0100
++++ new/src/hotspot/.mx.jvmci/mx_jvmci.py	2017-11-02 08:30:01.000000000 +0100
+@@ -42,11 +42,6 @@
+ 
+ JVMCI_VERSION = 9
+ 
+-"""
+-Top level directory of the JDK source workspace.
+-"""
+-_jdkSourceRoot = dirname(_suite.dir)
+-
+ _JVMCI_JDK_TAG = 'jvmci'
+ 
+ _minVersion = mx.VersionSpec('1.9')
+@@ -145,7 +140,7 @@
+     return True
+ 
+ def _makehelp():
+-    return subprocess.check_output([mx.gmake_cmd(), 'help'], cwd=_jdkSourceRoot)
++    return subprocess.check_output([mx.gmake_cmd(), 'help'], cwd=_get_jdk_dir())
+ 
+ def _runmake(args):
+     """run the JDK make process
+@@ -155,12 +150,12 @@
+ 
+     jdkBuildDir = _get_jdk_build_dir()
+     if not exists(jdkBuildDir):
+-        # JDK9 must be bootstrapped with a JDK8
+-        compliance = mx.JavaCompliance('8')
+-        jdk8 = mx.get_jdk(compliance.exactMatch, versionDescription=compliance.value)
++        # JDK10 must be bootstrapped with a JDK9
++        compliance = mx.JavaCompliance('9')
++        jdk9 = mx.get_jdk(compliance.exactMatch, versionDescription=compliance.value)
+         cmd = ['sh', 'configure', '--with-debug-level=' + _vm.debugLevel, '--with-native-debug-symbols=external', '--disable-precompiled-headers', '--with-jvm-features=graal',
+-               '--with-jvm-variants=' + _vm.jvmVariant, '--disable-warnings-as-errors', '--with-boot-jdk=' + jdk8.home, '--with-jvm-features=graal']
+-        mx.run(cmd, cwd=_jdkSourceRoot)
++               '--with-jvm-variants=' + _vm.jvmVariant, '--disable-warnings-as-errors', '--with-boot-jdk=' + jdk9.home, '--with-jvm-features=graal']
++        mx.run(cmd, cwd=_get_jdk_dir())
+     cmd = [mx.gmake_cmd(), 'CONF=' + _vm.debugLevel]
+     if mx.get_opts().verbose:
+         cmd.append('LOG=debug')
+@@ -170,11 +165,11 @@
+ 
+     if not mx.get_opts().verbose:
+         mx.log('--------------- make execution ----------------------')
+-        mx.log('Working directory: ' + _jdkSourceRoot)
++        mx.log('Working directory: ' + _get_jdk_dir())
+         mx.log('Command line: ' + ' '.join(cmd))
+         mx.log('-----------------------------------------------------')
+ 
+-    mx.run(cmd, cwd=_jdkSourceRoot)
++    mx.run(cmd, cwd=_get_jdk_dir())
+ 
+ def _runmultimake(args):
+     """run the JDK make process for one or more configurations"""
+--- old/src/hotspot/share/code/nmethod.cpp	2017-11-02 08:30:03.000000000 +0100
++++ new/src/hotspot/share/code/nmethod.cpp	2017-11-02 08:30:02.000000000 +0100
+@@ -409,6 +409,7 @@
+ #if INCLUDE_JVMCI
+   _jvmci_installed_code   = NULL;
+   _speculation_log        = NULL;
++  _jvmci_installed_code_triggers_unloading = false;
+ #endif
+ }
+ 
+@@ -461,8 +462,8 @@
+   AbstractCompiler* compiler,
+   int comp_level
+ #if INCLUDE_JVMCI
+-  , Handle installed_code,
+-  Handle speculationLog
++  , jweak installed_code,
++  jweak speculationLog
+ #endif
+ )
+ {
+@@ -642,8 +643,8 @@
+   AbstractCompiler* compiler,
+   int comp_level
+ #if INCLUDE_JVMCI
+-  , Handle installed_code,
+-  Handle speculation_log
++  , jweak installed_code,
++  jweak speculation_log
+ #endif
+   )
+   : CompiledMethod(method, "nmethod", type, nmethod_size, sizeof(nmethod), code_buffer, offsets->value(CodeOffsets::Frame_Complete), frame_size, oop_maps, false),
+@@ -671,8 +672,14 @@
+     set_ctable_begin(header_begin() + _consts_offset);
+ 
+ #if INCLUDE_JVMCI
+-    _jvmci_installed_code = installed_code();
+-    _speculation_log = (instanceOop)speculation_log();
++    _jvmci_installed_code = installed_code;
++    _speculation_log = speculation_log;
++    oop obj = JNIHandles::resolve(installed_code);
++    if (obj == NULL || (obj->is_a(HotSpotNmethod::klass()) && HotSpotNmethod::isDefault(obj))) {
++      _jvmci_installed_code_triggers_unloading = false;
++    } else {
++      _jvmci_installed_code_triggers_unloading = true;
++    }
+ 
+     if (compiler->is_jvmci()) {
+       // JVMCI might not produce any stub sections
+@@ -1026,8 +1033,6 @@
+                   " unloadable, Method*(" INTPTR_FORMAT
+                   "), cause(" INTPTR_FORMAT ")",
+                   p2i(this), p2i(_method), p2i(cause));
+-    if (!Universe::heap()->is_gc_active())
+-      cause->klass()->print_on(&ls);
+   }
+   // Unlink the osr method, so we do not look this up again
+   if (is_osr_method()) {
+@@ -1077,14 +1082,8 @@
+ #if INCLUDE_JVMCI
+   // The method can only be unloaded after the pointer to the installed code
+   // Java wrapper is no longer alive. Here we need to clear out this weak
+-  // reference to the dead object. Nulling out the reference has to happen
+-  // after the method is unregistered since the original value may be still
+-  // tracked by the rset.
++  // reference to the dead object.
+   maybe_invalidate_installed_code();
+-  // Clear these out after the nmethod has been unregistered and any
+-  // updates to the InstalledCode instance have been performed.
+-  _jvmci_installed_code = NULL;
+-  _speculation_log = NULL;
+ #endif
+ 
+   // The Method* is gone at this point
+@@ -1246,10 +1245,6 @@
+       MutexLockerEx mu(CodeCache_lock, Mutex::_no_safepoint_check_flag);
+       if (nmethod_needs_unregister) {
+         Universe::heap()->unregister_nmethod(this);
+-#ifdef JVMCI
+-        _jvmci_installed_code = NULL;
+-        _speculation_log = NULL;
+-#endif
+       }
+       flush_dependencies(NULL);
+     }
+@@ -1314,6 +1309,11 @@
+     CodeCache::drop_scavenge_root_nmethod(this);
+   }
+ 
++#if INCLUDE_JVMCI
++  assert(_jvmci_installed_code == NULL, "should have been nulled out when transitioned to zombie");
++  assert(_speculation_log == NULL, "should have been nulled out when transitioned to zombie");
++#endif
++
+   CodeBlob::flush();
+   CodeCache::free(this);
+ }
+@@ -1500,29 +1500,18 @@
+ 
+ #if INCLUDE_JVMCI
+ bool nmethod::do_unloading_jvmci(BoolObjectClosure* is_alive, bool unloading_occurred) {
+-  bool is_unloaded = false;
+-  // Follow JVMCI method
+-  BarrierSet* bs = Universe::heap()->barrier_set();
+   if (_jvmci_installed_code != NULL) {
+-    if (_jvmci_installed_code->is_a(HotSpotNmethod::klass()) && HotSpotNmethod::isDefault(_jvmci_installed_code)) {
+-      if (!is_alive->do_object_b(_jvmci_installed_code)) {
+-        clear_jvmci_installed_code();
+-      }
+-    } else {
+-      if (can_unload(is_alive, (oop*)&_jvmci_installed_code, unloading_occurred)) {
++    if (JNIHandles::is_global_weak_cleared(_jvmci_installed_code)) {
++      if (_jvmci_installed_code_triggers_unloading) {
++        // jweak reference processing has already cleared the referent
++        make_unloaded(is_alive, NULL);
+         return true;
++      } else {
++        clear_jvmci_installed_code();
+       }
+     }
+   }
+-
+-  if (_speculation_log != NULL) {
+-    if (!is_alive->do_object_b(_speculation_log)) {
+-      bs->write_ref_nmethod_pre(&_speculation_log, this);
+-      _speculation_log = NULL;
+-      bs->write_ref_nmethod_post(&_speculation_log, this);
+-    }
+-  }
+-  return is_unloaded;
++  return false;
+ }
+ #endif
+ 
+@@ -1594,15 +1583,6 @@
+     // (See comment above.)
+   }
+ 
+-#if INCLUDE_JVMCI
+-  if (_jvmci_installed_code != NULL) {
+-    f->do_oop((oop*) &_jvmci_installed_code);
+-  }
+-  if (_speculation_log != NULL) {
+-    f->do_oop((oop*) &_speculation_log);
+-  }
+-#endif
+-
+   RelocIterator iter(this, low_boundary);
+ 
+   while (iter.next()) {
+@@ -2860,44 +2840,50 @@
+ 
+ #if INCLUDE_JVMCI
+ void nmethod::clear_jvmci_installed_code() {
+-  // write_ref_method_pre/post can only be safely called at a
+-  // safepoint or while holding the CodeCache_lock
+-  assert(CodeCache_lock->is_locked() ||
+-         SafepointSynchronize::is_at_safepoint(), "should be performed under a lock for consistency");
++  assert_locked_or_safepoint(Patching_lock);
+   if (_jvmci_installed_code != NULL) {
+-    // This must be done carefully to maintain nmethod remembered sets properly
+-    BarrierSet* bs = Universe::heap()->barrier_set();
+-    bs->write_ref_nmethod_pre(&_jvmci_installed_code, this);
++    JNIHandles::destroy_weak_global(_jvmci_installed_code);
+     _jvmci_installed_code = NULL;
+-    bs->write_ref_nmethod_post(&_jvmci_installed_code, this);
++  }
++}
++
++void nmethod::clear_speculation_log() {
++  assert_locked_or_safepoint(Patching_lock);
++  if (_speculation_log != NULL) {
++    JNIHandles::destroy_weak_global(_speculation_log);
++    _speculation_log = NULL;
+   }
+ }
+ 
+ void nmethod::maybe_invalidate_installed_code() {
+   assert(Patching_lock->is_locked() ||
+          SafepointSynchronize::is_at_safepoint(), "should be performed under a lock for consistency");
+-  oop installed_code = jvmci_installed_code();
++  oop installed_code = JNIHandles::resolve(_jvmci_installed_code);
+   if (installed_code != NULL) {
++    // Update the values in the InstalledCode instance if it still refers to this nmethod
+     nmethod* nm = (nmethod*)InstalledCode::address(installed_code);
+-    if (nm == NULL || nm != this) {
+-      // The link has been broken or the InstalledCode instance is
+-      // associated with another nmethod so do nothing.
+-      return;
+-    }
+-    if (!is_alive()) {
+-      // Break the link between nmethod and InstalledCode such that the nmethod
+-      // can subsequently be flushed safely.  The link must be maintained while
+-      // the method could have live activations since invalidateInstalledCode
+-      // might want to invalidate all existing activations.
+-      InstalledCode::set_address(installed_code, 0);
+-      InstalledCode::set_entryPoint(installed_code, 0);
+-    } else if (is_not_entrant()) {
+-      // Remove the entry point so any invocation will fail but keep
+-      // the address link around that so that existing activations can
+-      // be invalidated.
+-      InstalledCode::set_entryPoint(installed_code, 0);
++    if (nm == this) {
++      if (!is_alive()) {
++        // Break the link between nmethod and InstalledCode such that the nmethod
++        // can subsequently be flushed safely.  The link must be maintained while
++        // the method could have live activations since invalidateInstalledCode
++        // might want to invalidate all existing activations.
++        InstalledCode::set_address(installed_code, 0);
++        InstalledCode::set_entryPoint(installed_code, 0);
++      } else if (is_not_entrant()) {
++        // Remove the entry point so any invocation will fail but keep
++        // the address link around that so that existing activations can
++        // be invalidated.
++        InstalledCode::set_entryPoint(installed_code, 0);
++      }
+     }
+   }
++  if (!is_alive()) {
++    // Clear these out after the nmethod has been unregistered and any
++    // updates to the InstalledCode instance have been performed.
++    clear_jvmci_installed_code();
++    clear_speculation_log();
++  }
+ }
+ 
+ void nmethod::invalidate_installed_code(Handle installedCode, TRAPS) {
+@@ -2916,45 +2902,49 @@
+   {
+     MutexLockerEx pl(Patching_lock, Mutex::_no_safepoint_check_flag);
+     // This relationship can only be checked safely under a lock
+-    assert(nm == NULL || !nm->is_alive() || nm->jvmci_installed_code() == installedCode(), "sanity check");
++    assert(!nm->is_alive() || nm->jvmci_installed_code() == installedCode(), "sanity check");
+   }
+ #endif
+ 
+   if (nm->is_alive()) {
+-    // The nmethod state machinery maintains the link between the
+-    // HotSpotInstalledCode and nmethod* so as long as the nmethod appears to be
+-    // alive assume there is work to do and deoptimize the nmethod.
++    // Invalidating the InstalledCode means we want the nmethod
++    // to be deoptimized.
+     nm->mark_for_deoptimization();
+     VM_Deoptimize op;
+     VMThread::execute(&op);
+   }
+ 
++  // Multiple threads could reach this point so we now need to
++  // lock and re-check the link to the nmethod so that only one
++  // thread clears it.
+   MutexLockerEx pl(Patching_lock, Mutex::_no_safepoint_check_flag);
+-  // Check that it's still associated with the same nmethod and break
+-  // the link if it is.
+   if (InstalledCode::address(installedCode) == nativeMethod) {
+-    InstalledCode::set_address(installedCode, 0);
++      InstalledCode::set_address(installedCode, 0);
+   }
+ }
+ 
++oop nmethod::jvmci_installed_code() {
++  return JNIHandles::resolve(_jvmci_installed_code);
++}
++
++oop nmethod::speculation_log() {
++  return JNIHandles::resolve(_speculation_log);
++}
++
+ char* nmethod::jvmci_installed_code_name(char* buf, size_t buflen) {
+   if (!this->is_compiled_by_jvmci()) {
+     return NULL;
+   }
+-  oop installedCode = this->jvmci_installed_code();
+-  if (installedCode != NULL) {
+-    oop installedCodeName = NULL;
+-    if (installedCode->is_a(InstalledCode::klass())) {
+-      installedCodeName = InstalledCode::name(installedCode);
++  oop installed_code = JNIHandles::resolve(_jvmci_installed_code);
++  if (installed_code != NULL) {
++    oop installed_code_name = NULL;
++    if (installed_code->is_a(InstalledCode::klass())) {
++      installed_code_name = InstalledCode::name(installed_code);
+     }
+-    if (installedCodeName != NULL) {
+-      return java_lang_String::as_utf8_string(installedCodeName, buf, (int)buflen);
+-    } else {
+-      jio_snprintf(buf, buflen, "null");
+-      return buf;
++    if (installed_code_name != NULL) {
++      return java_lang_String::as_utf8_string(installed_code_name, buf, (int)buflen);
+     }
+   }
+-  jio_snprintf(buf, buflen, "noInstalledCode");
+-  return buf;
++  return NULL;
+ }
+ #endif
+--- old/src/hotspot/share/code/nmethod.hpp	2017-11-02 08:30:04.000000000 +0100
++++ new/src/hotspot/share/code/nmethod.hpp	2017-11-02 08:30:03.000000000 +0100
+@@ -63,9 +63,22 @@
+   jmethodID _jmethod_id;       // Cache of method()->jmethod_id()
+ 
+ #if INCLUDE_JVMCI
+-  // Needed to keep nmethods alive that are not the default nmethod for the associated Method.
+-  oop       _jvmci_installed_code;
+-  oop       _speculation_log;
++  // A weak reference to an InstalledCode object associated with
++  // this nmethod.
++  jweak     _jvmci_installed_code;
++
++  // A weak reference to a SpeculationLog object associated with
++  // this nmethod.
++  jweak     _speculation_log;
++
++  // Determines whether this nmethod is unloaded when the
++  // referent in _jvmci_installed_code is cleared. This
++  // will be false if the referent is initialized to a
++  // HotSpotNMethod object whose isDefault field is true.
++  // That is, installed code other than a "default"
++  // HotSpotNMethod causes nmethod unloading.
++  // This field is ignored once _jvmci_installed_code is NULL.
++  bool _jvmci_installed_code_triggers_unloading;
+ #endif
+ 
+   // To support simple linked-list chaining of nmethods:
+@@ -192,8 +205,8 @@
+           AbstractCompiler* compiler,
+           int comp_level
+ #if INCLUDE_JVMCI
+-          , Handle installed_code,
+-          Handle speculation_log
++          , jweak installed_code,
++          jweak speculation_log
+ #endif
+           );
+ 
+@@ -236,8 +249,8 @@
+                               AbstractCompiler* compiler,
+                               int comp_level
+ #if INCLUDE_JVMCI
+-                              , Handle installed_code = Handle(),
+-                              Handle speculation_log = Handle()
++                              , jweak installed_code = NULL,
++                              jweak speculation_log = NULL
+ #endif
+   );
+ 
+@@ -433,27 +446,46 @@
+   void set_method(Method* method) { _method = method; }
+ 
+ #if INCLUDE_JVMCI
+-  oop jvmci_installed_code() { return _jvmci_installed_code ; }
++  // Gets the InstalledCode object associated with this nmethod
++  // which may be NULL if this nmethod was not compiled by JVMCI
++  // or the weak reference has been cleared.
++  oop jvmci_installed_code();
++
++  // Copies the value of the name field in the InstalledCode
++  // object (if any) associated with this nmethod into buf.
++  // Returns the value of buf if it was updated otherwise NULL.
+   char* jvmci_installed_code_name(char* buf, size_t buflen);
+ 
+-  // Update the state of any InstalledCode instance associated with
++  // Updates the state of the InstalledCode (if any) associated with
+   // this nmethod based on the current value of _state.
+   void maybe_invalidate_installed_code();
+ 
+-  // Helper function to invalidate InstalledCode instances
++  // Deoptimizes the nmethod (if any) in the address field of a given
++  // InstalledCode object. The address field is zeroed upon return.
+   static void invalidate_installed_code(Handle installed_code, TRAPS);
+ 
+-  oop speculation_log() { return _speculation_log ; }
++  // Gets the SpeculationLog object associated with this nmethod
++  // which may be NULL if this nmethod was not compiled by JVMCI
++  // or the weak reference has been cleared.
++  oop speculation_log();
+ 
+  private:
++  // Deletes the weak reference (if any) to the InstalledCode object
++  // associated with this nmethod.
+   void clear_jvmci_installed_code();
+ 
++  // Deletes the weak reference (if any) to the SpeculationLog object
++  // associated with this nmethod.
++  void clear_speculation_log();
++
+  public:
+ #endif
+ 
+  protected:
+   virtual bool do_unloading_oops(address low_boundary, BoolObjectClosure* is_alive, bool unloading_occurred);
+ #if INCLUDE_JVMCI
++  // See comment for _jvmci_installed_code_triggers_unloading field.
++  // Returns whether this nmethod was unloaded.
+   virtual bool do_unloading_jvmci(BoolObjectClosure* is_alive, bool unloading_occurred);
+ #endif
+ 
+--- old/src/hotspot/share/gc/g1/g1SATBCardTableModRefBS.cpp	2017-11-02 08:30:04.000000000 +0100
++++ new/src/hotspot/share/gc/g1/g1SATBCardTableModRefBS.cpp	2017-11-02 08:30:04.000000000 +0100
+@@ -214,52 +214,3 @@
+     }
+   }
+ }
+-
+-void G1SATBCardTableModRefBS::write_ref_nmethod_post(oop* dst, nmethod* nm) {
+-  oop obj = oopDesc::load_heap_oop(dst);
+-  if (obj != NULL) {
+-    G1CollectedHeap* g1h = G1CollectedHeap::heap();
+-    HeapRegion* hr = g1h->heap_region_containing(obj);
+-    hr->add_strong_code_root(nm);
+-  }
+-}
+-
+-class G1EnsureLastRefToRegion : public OopClosure {
+-  G1CollectedHeap* _g1h;
+-  HeapRegion* _hr;
+-  oop* _dst;
+-
+-  bool _value;
+-public:
+-  G1EnsureLastRefToRegion(G1CollectedHeap* g1h, HeapRegion* hr, oop* dst) :
+-    _g1h(g1h), _hr(hr), _dst(dst), _value(true) {}
+-
+-  void do_oop(oop* p) {
+-    if (_value && p != _dst) {
+-      oop obj = oopDesc::load_heap_oop(p);
+-      if (obj != NULL) {
+-        HeapRegion* hr = _g1h->heap_region_containing(obj);
+-        if (hr == _hr) {
+-          // Another reference to the same region.
+-          _value = false;
+-        }
+-      }
+-    }
+-  }
+-  void do_oop(narrowOop* p) { ShouldNotReachHere(); }
+-  bool value() const        { return _value;  }
+-};
+-
+-void G1SATBCardTableModRefBS::write_ref_nmethod_pre(oop* dst, nmethod* nm) {
+-  oop obj = oopDesc::load_heap_oop(dst);
+-  if (obj != NULL) {
+-    G1CollectedHeap* g1h = G1CollectedHeap::heap();
+-    HeapRegion* hr = g1h->heap_region_containing(obj);
+-    G1EnsureLastRefToRegion ensure_last_ref(g1h, hr, dst);
+-    nm->oops_do(&ensure_last_ref);
+-    if (ensure_last_ref.value()) {
+-      // Last reference to this region, remove the nmethod from the rset.
+-      hr->remove_strong_code_root(nm);
+-    }
+-  }
+-}
+--- old/src/hotspot/share/gc/g1/g1SATBCardTableModRefBS.hpp	2017-11-02 08:30:05.000000000 +0100
++++ new/src/hotspot/share/gc/g1/g1SATBCardTableModRefBS.hpp	2017-11-02 08:30:05.000000000 +0100
+@@ -95,9 +95,6 @@
+     jbyte val = _byte_map[card_index];
+     return (val & (clean_card_mask_val() | deferred_card_val())) == deferred_card_val();
+   }
+-  virtual void write_ref_nmethod_pre(oop* dst, nmethod* nm);
+-  virtual void write_ref_nmethod_post(oop* dst, nmethod* nm);
+-
+ };
+ 
+ template<>
+--- old/src/hotspot/share/gc/shared/barrierSet.hpp	2017-11-02 08:30:06.000000000 +0100
++++ new/src/hotspot/share/gc/shared/barrierSet.hpp	2017-11-02 08:30:06.000000000 +0100
+@@ -120,9 +120,6 @@
+   static void static_write_ref_array_pre(HeapWord* start, size_t count);
+   static void static_write_ref_array_post(HeapWord* start, size_t count);
+ 
+-  virtual void write_ref_nmethod_pre(oop* dst, nmethod* nm) {}
+-  virtual void write_ref_nmethod_post(oop* dst, nmethod* nm) {}
+-
+ protected:
+   virtual void write_ref_array_work(MemRegion mr) = 0;
+ 
+--- old/src/hotspot/share/jvmci/jvmciCompilerToVM.cpp	2017-11-02 08:30:07.000000000 +0100
++++ new/src/hotspot/share/jvmci/jvmciCompilerToVM.cpp	2017-11-02 08:30:07.000000000 +0100
+@@ -1039,7 +1039,7 @@
+   if (result != JVMCIEnv::ok) {
+     assert(cb == NULL, "should be");
+   } else {
+-    if (!installed_code_handle.is_null()) {
++    if (installed_code_handle.not_null()) {
+       assert(installed_code_handle->is_a(InstalledCode::klass()), "wrong type");
+       nmethod::invalidate_installed_code(installed_code_handle, CHECK_0);
+       {
+@@ -1058,13 +1058,6 @@
+           HotSpotInstalledCode::set_codeSize(installed_code_handle, cb->code_size());
+         }
+       }
+-      nmethod* nm = cb->as_nmethod_or_null();
+-      if (nm != NULL && installed_code_handle->is_scavengable()) {
+-        assert(nm->detect_scavenge_root_oops(), "nm should be scavengable if installed_code is scavengable");
+-        if (!UseG1GC) {
+-          assert(nm->on_scavenge_root_list(), "nm should be on scavengable list");
+-        }
+-      }
+     }
+   }
+   return result;
+--- old/src/hotspot/share/jvmci/jvmciEnv.cpp	2017-11-02 08:30:08.000000000 +0100
++++ new/src/hotspot/share/jvmci/jvmciEnv.cpp	2017-11-02 08:30:08.000000000 +0100
+@@ -521,7 +521,9 @@
+                                  debug_info, dependencies, code_buffer,
+                                  frame_words, oop_map_set,
+                                  handler_table, &implicit_tbl,
+-                                 compiler, comp_level, installed_code, speculation_log);
++                                 compiler, comp_level,
++                                 JNIHandles::make_weak_global(installed_code),
++                                 JNIHandles::make_weak_global(speculation_log));
+ 
+       // Free codeBlobs
+       //code_buffer->free_blob();
+--- old/src/hotspot/share/runtime/deoptimization.cpp	2017-11-02 08:30:09.000000000 +0100
++++ new/src/hotspot/share/runtime/deoptimization.cpp	2017-11-02 08:30:09.000000000 +0100
+@@ -1674,19 +1674,9 @@
+         tty->print(" compiler=%s compile_id=%d", nm->compiler_name(), nm->compile_id());
+ #if INCLUDE_JVMCI
+         if (nm->is_nmethod()) {
+-          oop installedCode = nm->as_nmethod()->jvmci_installed_code();
+-          if (installedCode != NULL) {
+-            oop installedCodeName = NULL;
+-            if (installedCode->is_a(InstalledCode::klass())) {
+-              installedCodeName = InstalledCode::name(installedCode);
+-            }
+-            if (installedCodeName != NULL) {
+-              tty->print(" (JVMCI: installedCodeName=%s) ", java_lang_String::as_utf8_string(installedCodeName));
+-            } else {
+-              tty->print(" (JVMCI: installed code has no name) ");
+-            }
+-          } else if (nm->is_compiled_by_jvmci()) {
+-            tty->print(" (JVMCI: no installed code) ");
++          char* installed_code_name = nm->as_nmethod()->jvmci_installed_code_name(buf, sizeof(buf));
++          if (installed_code_name != NULL) {
++            tty->print(" (JVMCI: installed code name=%s) ", installed_code_name);
+           }
+         }
+ #endif
+--- old/src/hotspot/share/runtime/jniHandles.cpp	2017-11-02 08:30:10.000000000 +0100
++++ new/src/hotspot/share/runtime/jniHandles.cpp	2017-11-02 08:30:10.000000000 +0100
+@@ -126,6 +126,11 @@
+ template oop JNIHandles::resolve_jweak<true>(jweak);
+ template oop JNIHandles::resolve_jweak<false>(jweak);
+ 
++bool JNIHandles::is_global_weak_cleared(jweak handle) {
++  assert(is_jweak(handle), "not a weak handle");
++  return guard_value<false>(jweak_ref(handle)) == NULL;
++}
++
+ void JNIHandles::destroy_global(jobject handle) {
+   if (handle != NULL) {
+     assert(is_global_handle(handle), "Invalid delete of global JNI handle");
+--- old/src/hotspot/share/runtime/jniHandles.hpp	2017-11-02 08:30:11.000000000 +0100
++++ new/src/hotspot/share/runtime/jniHandles.hpp	2017-11-02 08:30:11.000000000 +0100
+@@ -82,6 +82,7 @@
+   // Weak global handles
+   static jobject make_weak_global(Handle obj);
+   static void destroy_weak_global(jobject handle);
++  static bool is_global_weak_cleared(jweak handle); // Test jweak without resolution
+ 
+   // Sentinel marking deleted handles in block. Note that we cannot store NULL as
+   // the sentinel, since clearing weak global JNI refs are done by storing NULL in
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotNmethod.java	2017-11-02 08:30:12.000000000 +0100
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotNmethod.java	2017-11-02 08:30:11.000000000 +0100
+@@ -30,13 +30,10 @@
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+ 
+ /**
+- * Implementation of {@link InstalledCode} for code installed as an nmethod. The nmethod stores a
+- * weak reference to an instance of this class. This is necessary to keep the nmethod from being
+- * unloaded while the associated {@link HotSpotNmethod} instance is alive.
+- * <p>
+- * Note that there is no (current) way for the reference from an nmethod to a {@link HotSpotNmethod}
+- * instance to be anything but weak. This is due to the fact that HotSpot does not treat nmethods as
+- * strong GC roots.
++ * Implementation of {@link InstalledCode} for code installed as an nmethod.
++ *
++ * When a {@link HotSpotNmethod} dies, it triggers unloading of the nmethod unless
++ * {@link #isDefault() == true}.
+  */
+ public class HotSpotNmethod extends HotSpotInstalledCode {
+ 
+@@ -54,6 +51,11 @@
+         this.isDefault = isDefault;
+     }
+ 
++    /**
++     * Determines if the nmethod associated with this object is the compiled entry point for
++     * {@link #getMethod()}. If {@code false}, then the nmethod is unloaded when the VM determines
++     * this object has died.
++     */
+     public boolean isDefault() {
+         return isDefault;
+     }
+--- old/src/hotspot/.mx.jvmci/.project	2017-11-02 08:30:13.000000000 +0100
++++ /dev/null	2017-11-02 08:30:13.000000000 +0100
+@@ -1,18 +0,0 @@
+-<?xml version="1.0" encoding="UTF-8"?>
+-<projectDescription>
+-	<name>mx.jvmci</name>
+-	<comment></comment>
+-	<projects>
+-		<project>mx</project>
+-	</projects>
+-	<buildSpec>
+-		<buildCommand>
+-			<name>org.python.pydev.PyDevBuilder</name>
+-			<arguments>
+-			</arguments>
+-		</buildCommand>
+-	</buildSpec>
+-	<natures>
+-		<nature>org.python.pydev.pythonNature</nature>
+-	</natures>
+-</projectDescription>
+--- old/src/hotspot/.mx.jvmci/.pydevproject	2017-11-02 08:30:13.000000000 +0100
++++ /dev/null	2017-11-02 08:30:13.000000000 +0100
+@@ -1,12 +0,0 @@
+-<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+-<?eclipse-pydev version="1.0"?><pydev_project>
+-<pydev_property name="org.python.pydev.PYTHON_PROJECT_INTERPRETER">Default</pydev_property>
+-<pydev_property name="org.python.pydev.PYTHON_PROJECT_VERSION">python 2.7</pydev_property>
+-<pydev_pathproperty name="org.python.pydev.PROJECT_SOURCE_PATH">
+-<path>/mx.jvmci</path>
+-</pydev_pathproperty>
+-<pydev_pathproperty name="org.python.pydev.PROJECT_SOURCE_PATH">
+-<path>/mx</path>
+-</pydev_pathproperty>
+-
+-</pydev_project>

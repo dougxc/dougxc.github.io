@@ -1,0 +1,217 @@
+--- old/src/share/vm/code/dependencies.hpp	2014-01-13 23:24:02.837329138 +0100
++++ new/src/share/vm/code/dependencies.hpp	2014-01-13 23:24:02.777329137 +0100
+@@ -27,6 +27,7 @@
+ 
+ #include "ci/ciCallSite.hpp"
+ #include "ci/ciKlass.hpp"
++#include "ci/ciMethod.hpp"
+ #include "ci/ciMethodHandle.hpp"
+ #include "classfile/systemDictionary.hpp"
+ #include "code/compressedStream.hpp"
+@@ -200,10 +201,53 @@
+ 
+   static void check_valid_dependency_type(DepType dept);
+ 
++  // A Metadata* or object value recorded in an OopRecorder
++  class DepValue VALUE_OBJ_CLASS_SPEC {
++   private:
++    // Unique identifier of the value within the associated OopRecorder that
++    // encodes both the category of the value (0: invalid, positive: metadata, negative: object)
++    // and the index within a category specific array (metadata: index + 1, object: -(index + 1))
++    int _id;
++
++   public:
++    DepValue() : _id(0) {}
++    DepValue(OopRecorder* rec, Metadata* metadata, DepValue* candidate = NULL) {
++      assert(candidate == NULL || candidate->is_metadata(), "oops");
++      if (candidate != NULL && candidate->as_metadata(rec) == metadata) {
++        _id = candidate->_id;
++      } else {
++        _id = rec->find_index(metadata) + 1;
++      }
++    }
++    DepValue(OopRecorder* rec, jobject obj, DepValue* candidate = NULL) {
++      assert(candidate == NULL || candidate->is_object(), "oops");
++      if (candidate != NULL && candidate->as_object(rec) == obj) {
++        _id = candidate->_id;
++      } else {
++        _id = -(rec->find_index(obj) + 1);
++      }
++    }
++
++    // Used to sort values in ascending order of index() with metadata values preceding object values
++    int sort_key() const { return -_id; }
++
++    bool operator == (const DepValue& other) const   { return other._id == _id; }
++
++    bool is_valid() const             { return _id != 0; }
++    int  index() const                { assert(is_valid(), "oops"); return _id < 0 ? -(_id + 1) : _id - 1; }
++    bool is_metadata() const          { assert(is_valid(), "oops"); return _id > 0; }
++    bool is_object() const            { assert(is_valid(), "oops"); return _id < 0; }
++
++    Metadata*  as_metadata(OopRecorder* rec) const    { assert(is_metadata(), "oops"); return rec->metadata_at(index()); }
++    Klass*     as_klass(OopRecorder* rec) const       { assert(as_metadata(rec)->is_klass(), "oops"); return (Klass*) as_metadata(rec); }
++    Method*    as_method(OopRecorder* rec) const      { assert(as_metadata(rec)->is_method(), "oops"); return (Method*) as_metadata(rec); }
++    jobject    as_object(OopRecorder* rec) const      { assert(is_object(), "oops"); return rec->oop_at(index()); }
++  };
++
+  private:
+   // State for writing a new set of dependencies:
+   GrowableArray<int>*       _dep_seen;  // (seen[h->ident] & (1<<dept))
+-  GrowableArray<ciBaseObject*>*  _deps[TYPE_LIMIT];
++  GrowableArray<DepValue>*  _deps[TYPE_LIMIT];
+ 
+   static const char* _dep_name[TYPE_LIMIT];
+   static int         _dep_args[TYPE_LIMIT];
+@@ -212,9 +256,10 @@
+     return (int)dept >= 0 && dept < TYPE_LIMIT && ((1<<dept) & mask) != 0;
+   }
+ 
+-  bool note_dep_seen(int dept, ciBaseObject* x) {
+-    assert(dept < BitsPerInt, "oob");
+-    int x_id = x->ident();
++  bool note_dep_seen(int dept, DepValue x) {
++    assert(dept < BitsPerInt, "oops");
++    // place metadata deps at even indexes, object deps at odd indexes
++    int x_id = x.is_metadata() ? x.index() * 2 : (x.index() * 2) + 1;
+     assert(_dep_seen != NULL, "deps must be writable");
+     int seen = _dep_seen->at_grow(x_id, 0);
+     _dep_seen->at_put(x_id, seen | (1<<dept));
+@@ -222,8 +267,8 @@
+     return (seen & (1<<dept)) != 0;
+   }
+ 
+-  bool maybe_merge_ctxk(GrowableArray<ciBaseObject*>* deps,
+-                        int ctxk_i, ciKlass* ctxk);
++  bool maybe_merge_ctxk(GrowableArray<DepValue>* deps,
++                        int ctxk_i, Klass* ctxk);
+ 
+   void sort_all_deps();
+   size_t estimate_size_in_bytes();
+@@ -249,33 +294,66 @@
+  private:
+   // Check for a valid context type.
+   // Enforce the restriction against array types.
+-  static void check_ctxk(ciKlass* ctxk) {
+-    assert(ctxk->is_instance_klass(), "java types only");
++  static void check_ctxk(Klass* ctxk) {
++    assert(ctxk->oop_is_instance(), "java types only");
+   }
+-  static void check_ctxk_concrete(ciKlass* ctxk) {
+-    assert(is_concrete_klass(ctxk->as_instance_klass()), "must be concrete");
++  static void check_ctxk_concrete(Klass* ctxk) {
++    check_ctxk(ctxk);
++    assert(!ctxk->is_abstract(), "must be abstract");
+   }
+-  static void check_ctxk_abstract(ciKlass* ctxk) {
++  static void check_ctxk_abstract(Klass* ctxk) {
+     check_ctxk(ctxk);
+-    assert(!is_concrete_klass(ctxk->as_instance_klass()), "must be abstract");
++    assert(ctxk->is_abstract(), "must be abstract");
+   }
+ 
+-  void assert_common_1(DepType dept, ciBaseObject* x);
+-  void assert_common_2(DepType dept, ciBaseObject* x0, ciBaseObject* x1);
+-  void assert_common_3(DepType dept, ciKlass* ctxk, ciBaseObject* x1, ciBaseObject* x2);
++  void assert_common_1(DepType dept, DepValue x);
++  void assert_common_2(DepType dept, DepValue x0, DepValue x1);
++  void assert_common_3(DepType dept, Klass* ctxk, DepValue x1, DepValue x2);
+ 
+  public:
+   // Adding assertions to a new dependency set at compile time:
+-  void assert_evol_method(ciMethod* m);
+-  void assert_leaf_type(ciKlass* ctxk);
+-  void assert_abstract_with_unique_concrete_subtype(ciKlass* ctxk, ciKlass* conck);
+-  void assert_abstract_with_no_concrete_subtype(ciKlass* ctxk);
+-  void assert_concrete_with_no_concrete_subtype(ciKlass* ctxk);
+-  void assert_unique_concrete_method(ciKlass* ctxk, ciMethod* uniqm);
+-  void assert_abstract_with_exclusive_concrete_subtypes(ciKlass* ctxk, ciKlass* k1, ciKlass* k2);
+-  void assert_exclusive_concrete_methods(ciKlass* ctxk, ciMethod* m1, ciMethod* m2);
+-  void assert_has_no_finalizable_subclasses(ciKlass* ctxk);
+-  void assert_call_site_target_value(ciCallSite* call_site, ciMethodHandle* method_handle);
++  void assert_evol_method(Method* m);
++  void assert_leaf_type(Klass* ctxk);
++  void assert_abstract_with_unique_concrete_subtype(Klass* ctxk, Klass* conck);
++  void assert_abstract_with_no_concrete_subtype(Klass* ctxk);
++  void assert_concrete_with_no_concrete_subtype(Klass* ctxk);
++  void assert_unique_concrete_method(Klass* ctxk, Method* uniqm);
++  void assert_abstract_with_exclusive_concrete_subtypes(Klass* ctxk, Klass* k1, Klass* k2);
++  void assert_exclusive_concrete_methods(Klass* ctxk, Method* m1, Method* m2);
++  void assert_has_no_finalizable_subclasses(Klass* ctxk);
++  void assert_call_site_target_value(jobject call_site, jobject method_handle);
++
++  // Wrappers for the above in terms of ci classes:
++  void assert_evol_method(ciMethod* m) {
++    assert_evol_method(m->get_Method());
++  }
++  void assert_leaf_type(ciKlass* ctxk) {
++    assert_leaf_type(ctxk->get_Klass());
++  }
++  void assert_abstract_with_unique_concrete_subtype(ciKlass* ctxk, ciKlass* conck) {
++    assert_abstract_with_unique_concrete_subtype(ctxk->get_Klass(), conck->get_Klass());
++  }
++  void assert_abstract_with_no_concrete_subtype(ciKlass* ctxk) {
++    assert_abstract_with_no_concrete_subtype(ctxk->get_Klass());
++  }
++  void assert_concrete_with_no_concrete_subtype(ciKlass* ctxk) {
++    assert_concrete_with_no_concrete_subtype(ctxk->get_Klass());
++  }
++  void assert_unique_concrete_method(ciKlass* ctxk, ciMethod* uniqm) {
++    assert_unique_concrete_method(ctxk->get_Klass(), uniqm->get_Method());
++  }
++  void assert_abstract_with_exclusive_concrete_subtypes(ciKlass* ctxk, ciKlass* k1, ciKlass* k2) {
++    assert_abstract_with_exclusive_concrete_subtypes(ctxk->get_Klass(), k1->get_Klass(), k2->get_Klass());
++  }
++  void assert_exclusive_concrete_methods(ciKlass* ctxk, ciMethod* m1, ciMethod* m2) {
++    assert_exclusive_concrete_methods(ctxk->get_Klass(), m1->get_Method(), m2->get_Method());
++  }
++  void assert_has_no_finalizable_subclasses(ciKlass* ctxk) {
++    assert_has_no_finalizable_subclasses(ctxk->get_Klass());
++  }
++  void assert_call_site_target_value(ciCallSite* call_site, ciMethodHandle* method_handle) {
++    assert_call_site_target_value(call_site->constant_encoding(), method_handle->constant_encoding());
++  }
+ 
+   // Define whether a given method or type is concrete.
+   // These methods define the term "concrete" as used in this module.
+@@ -368,15 +446,15 @@
+   void copy_to(nmethod* nm);
+ 
+   void log_all_dependencies();
+-  void log_dependency(DepType dept, int nargs, ciBaseObject* args[]) {
++  void log_dependency(DepType dept, int nargs, DepValue args[]) {
+     write_dependency_to(log(), dept, nargs, args);
+   }
+   void log_dependency(DepType dept,
+-                      ciBaseObject* x0,
+-                      ciBaseObject* x1 = NULL,
+-                      ciBaseObject* x2 = NULL) {
++                      DepValue x0,
++                      DepValue x1 = DepValue(),
++                      DepValue x2 = DepValue()) {
+     if (log() == NULL)  return;
+-    ciBaseObject* args[max_arg_count];
++    DepValue args[max_arg_count];
+     args[0] = x0;
+     args[1] = x1;
+     args[2] = x2;
+@@ -412,6 +490,10 @@
+                                   DepType dept,
+                                   int nargs, DepArgument args[],
+                                   Klass* witness = NULL);
++         void write_dependency_to(CompileLog* log,
++                                  DepType dept,
++                                  int nargs, DepValue args[],
++                                  Klass* witness = NULL);
+   static void write_dependency_to(xmlStream* xtty,
+                                   DepType dept,
+                                   int nargs, DepArgument args[],
+@@ -422,7 +504,7 @@
+ 
+  private:
+   // helper for encoding common context types as zero:
+-  static ciKlass* ctxk_encoded_as_null(DepType dept, ciBaseObject* x);
++  static Klass* ctxk_encoded_as_null(OopRecorder* oop_recorder, DepType dept, DepValue x);
+ 
+   static Klass* ctxk_encoded_as_null(DepType dept, Metadata* x);
+ 

@@ -1,0 +1,729 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../../../../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package jdk.vm.ci.hotspot;
+  24 
+  25 import static jdk.vm.ci.common.InitTimer.timer;
+  26 
+  27 import java.io.IOException;
+  28 import java.io.OutputStream;
+  29 import java.io.PrintStream;
+  30 import java.util.Collections;
+  31 import java.util.HashMap;
+  32 import java.util.List;
+  33 import java.util.Map;
+  34 import java.util.Objects;
+  35 import java.util.TreeMap;
+  36 
+  37 import jdk.internal.misc.VM;
+  38 import jdk.vm.ci.code.Architecture;
+  39 import jdk.vm.ci.code.CompilationRequestResult;
+  40 import jdk.vm.ci.code.CompiledCode;
+  41 import jdk.vm.ci.code.InstalledCode;
+  42 import jdk.vm.ci.common.InitTimer;
+  43 import jdk.vm.ci.common.JVMCIError;
+  44 import jdk.vm.ci.hotspot.HotSpotJVMCICompilerFactory.CompilationLevel;
+  45 import jdk.vm.ci.meta.JavaKind;
+  46 import jdk.vm.ci.meta.JavaType;
+  47 import jdk.vm.ci.meta.ResolvedJavaType;
+  48 import jdk.vm.ci.runtime.JVMCI;
+  49 import jdk.vm.ci.runtime.JVMCIBackend;
+  50 import jdk.vm.ci.runtime.JVMCICompiler;
+  51 import jdk.vm.ci.runtime.JVMCICompilerFactory;
+  52 import jdk.vm.ci.services.JVMCIServiceLocator;
+  53 import jdk.vm.ci.services.Services;
+  54 
+  55 /**
+  56  * HotSpot implementation of a JVMCI runtime.
+  57  *
+  58  * The initialization of this class is very fragile since it's initialized both through
+  59  * {@link JVMCI#initialize()} or through calling {@link HotSpotJVMCIRuntime#runtime()} and
+  60  * {@link HotSpotJVMCIRuntime#runtime()} is also called by {@link JVMCI#initialize()}. So this class
+  61  * can't have a static initializer and any required initialization must be done as part of
+  62  * {@link #runtime()}. This allows the initialization to funnel back through
+  63  * {@link JVMCI#initialize()} without deadlocking.
+  64  */
+  65 public final class HotSpotJVMCIRuntime implements HotSpotJVMCIRuntimeProvider {
+  66 
+  67     @SuppressWarnings("try")
+  68     static class DelayedInit {
+  69         private static final HotSpotJVMCIRuntime instance;
+  70 
+  71         static {
+  72             try (InitTimer t = timer("HotSpotJVMCIRuntime.&lt;init&gt;")) {
+  73                 instance = new HotSpotJVMCIRuntime();
+  74             }
+  75         }
+  76     }
+  77 
+  78     /**
+  79      * Gets the singleton {@link HotSpotJVMCIRuntime} object.
+  80      */
+  81     public static HotSpotJVMCIRuntime runtime() {
+  82         JVMCI.initialize();
+  83         return DelayedInit.instance;
+  84     }
+  85 
+  86     /**
+  87      * A list of all supported JVMCI options.
+  88      */
+  89     public enum Option {
+  90         // @formatter:off
+  91         Compiler(String.class, null, "Selects the system compiler."),
+  92         // Note: The following one is not used (see InitTimer.ENABLED). It is added here
+  93         // so that -XX:+JVMCIPrintProperties shows the option.
+  94         InitTimer(Boolean.class, false, "Specifies if initialization timing is enabled."),
+  95         PrintConfig(Boolean.class, false, "Prints VM configuration available via JVMCI."),
+  96         TraceMethodDataFilter(String.class, null,
+  97                         "Enables tracing of profiling info when read by JVMCI.",
+  98                         "Empty value: trace all methods",
+  99                         "Non-empty value: trace methods whose fully qualified name contains the value.");
+ 100         // @formatter:on
+ 101 
+ 102         /**
+ 103          * The prefix for system properties that are JVMCI options.
+ 104          */
+ 105         private static final String JVMCI_OPTION_PROPERTY_PREFIX = "jvmci.";
+ 106 
+ 107         /**
+ 108          * Marker for uninitialized flags.
+ 109          */
+ 110         private static final String UNINITIALIZED = "UNINITIALIZED";
+ 111 
+ 112         private final Class&lt;?&gt; type;
+ 113         private Object value;
+ 114         private final Object defaultValue;
+ 115         private boolean isDefault;
+ 116         private final String[] helpLines;
+ 117 
+ 118         Option(Class&lt;?&gt; type, Object defaultValue, String... helpLines) {
+ 119             assert Character.isUpperCase(name().charAt(0)) : "Option name must start with upper-case letter: " + name();
+ 120             this.type = type;
+ 121             this.value = UNINITIALIZED;
+ 122             this.defaultValue = defaultValue;
+ 123             this.helpLines = helpLines;
+ 124         }
+ 125 
+ 126         @SuppressFBWarnings(value = "ES_COMPARING_STRINGS_WITH_EQ", justification = "sentinel must be String since it's a static final in an enum")
+ 127         private Object getValue() {
+ 128             if (value == UNINITIALIZED) {
+ 129                 String propertyValue = VM.getSavedProperty(getPropertyName());
+ 130                 if (propertyValue == null) {
+ 131                     this.value = defaultValue;
+ 132                     this.isDefault = true;
+ 133                 } else {
+ 134                     if (type == Boolean.class) {
+ 135                         this.value = Boolean.parseBoolean(propertyValue);
+ 136                     } else if (type == String.class) {
+ 137                         this.value = propertyValue;
+ 138                     } else {
+ 139                         throw new JVMCIError("Unexpected option type " + type);
+ 140                     }
+ 141                     this.isDefault = false;
+ 142                 }
+ 143                 // Saved properties should not be interned - let's be sure
+ 144                 assert value != UNINITIALIZED;
+ 145             }
+ 146             return value;
+ 147         }
+ 148 
+ 149         /**
+ 150          * Gets the name of system property from which this option gets its value.
+ 151          */
+ 152         public String getPropertyName() {
+ 153             return JVMCI_OPTION_PROPERTY_PREFIX + name();
+ 154         }
+ 155 
+ 156         /**
+ 157          * Returns the option's value as boolean.
+ 158          *
+ 159          * @return option's value
+ 160          */
+ 161         public boolean getBoolean() {
+ 162             return (boolean) getValue();
+ 163         }
+ 164 
+ 165         /**
+ 166          * Returns the option's value as String.
+ 167          *
+ 168          * @return option's value
+ 169          */
+ 170         public String getString() {
+ 171             return (String) getValue();
+ 172         }
+ 173 
+<a name="1" id="anc1"></a>
+
+
+ 174         /**
+ 175          * Prints a description of the properties used to configure shared JVMCI code.
+ 176          *
+ 177          * @param out stream to print to
+ 178          */
+ 179         public static void printProperties(PrintStream out) {
+ 180             out.println("[JVMCI properties]");
+<a name="2" id="anc2"></a><span class="removed"> 181             int typeWidth = 0;</span>
+<span class="removed"> 182             int nameWidth = 0;</span>
+ 183             Option[] values = values();
+ 184             for (Option option : values) {
+<a name="3" id="anc3"></a><span class="removed"> 185                 typeWidth = Math.max(typeWidth, option.type.getSimpleName().length());</span>
+<span class="removed"> 186                 nameWidth = Math.max(nameWidth, option.getPropertyName().length());</span>
+<span class="removed"> 187             }</span>
+<span class="removed"> 188             for (Option option : values) {</span>
+ 189                 Object value = option.getValue();
+ 190                 if (value instanceof String) {
+ 191                     value = '"' + String.valueOf(value) + '"';
+ 192                 }
+<a name="4" id="anc4"></a><span class="changed"> 193                 String assign = option.isDefault ? " =" : ":=";</span>
+<span class="changed"> 194                 String format = "%" + (typeWidth + 1) + "s %-" + (nameWidth + 1) + "s %s %s%n";</span>
+<span class="changed"> 195                 out.printf(format, option.type.getSimpleName(), option.getPropertyName(), assign, value);</span>
+<span class="changed"> 196                 String helpFormat = "%" + (typeWidth + 1) + "s %s%n";</span>
+
+
+
+
+
+
+
+
+ 197                 for (String line : option.helpLines) {
+<a name="5" id="anc5"></a><span class="changed"> 198                     out.printf(helpFormat, "", line);</span>
+ 199                 }
+ 200             }
+ 201         }
+ 202     }
+ 203 
+ 204     public static HotSpotJVMCIBackendFactory findFactory(String architecture) {
+ 205         for (HotSpotJVMCIBackendFactory factory : Services.load(HotSpotJVMCIBackendFactory.class)) {
+ 206             if (factory.getArchitecture().equalsIgnoreCase(architecture)) {
+ 207                 return factory;
+ 208             }
+ 209         }
+ 210 
+ 211         throw new JVMCIError("No JVMCI runtime available for the %s architecture", architecture);
+ 212     }
+ 213 
+ 214     /**
+ 215      * Gets the kind of a word value on the {@linkplain #getHostJVMCIBackend() host} backend.
+ 216      */
+ 217     public static JavaKind getHostWordKind() {
+ 218         return runtime().getHostJVMCIBackend().getCodeCache().getTarget().wordJavaKind;
+ 219     }
+ 220 
+ 221     protected final CompilerToVM compilerToVm;
+ 222 
+ 223     protected final HotSpotVMConfigStore configStore;
+ 224     protected final HotSpotVMConfig config;
+ 225     private final JVMCIBackend hostBackend;
+ 226 
+ 227     private final JVMCICompilerFactory compilerFactory;
+ 228     private final HotSpotJVMCICompilerFactory hsCompilerFactory;
+ 229     private volatile JVMCICompiler compiler;
+ 230     protected final HotSpotJVMCIMetaAccessContext metaAccessContext;
+ 231 
+ 232     /**
+ 233      * Stores the result of {@link HotSpotJVMCICompilerFactory#getCompilationLevelAdjustment} so
+ 234      * that it can be read from the VM.
+ 235      */
+ 236     @SuppressWarnings("unused") private final int compilationLevelAdjustment;
+ 237 
+ 238     private final Map&lt;Class&lt;? extends Architecture&gt;, JVMCIBackend&gt; backends = new HashMap&lt;&gt;();
+ 239 
+ 240     private volatile List&lt;HotSpotVMEventListener&gt; vmEventListeners;
+ 241 
+ 242     private Iterable&lt;HotSpotVMEventListener&gt; getVmEventListeners() {
+ 243         if (vmEventListeners == null) {
+ 244             synchronized (this) {
+ 245                 if (vmEventListeners == null) {
+ 246                     vmEventListeners = JVMCIServiceLocator.getProviders(HotSpotVMEventListener.class);
+ 247                 }
+ 248             }
+ 249         }
+ 250         return vmEventListeners;
+ 251     }
+ 252 
+ 253     /**
+ 254      * Stores the result of {@link HotSpotJVMCICompilerFactory#getTrivialPrefixes()} so that it can
+ 255      * be read from the VM.
+ 256      */
+ 257     @SuppressWarnings("unused") private final String[] trivialPrefixes;
+ 258 
+ 259     @SuppressWarnings("try")
+ 260     private HotSpotJVMCIRuntime() {
+ 261         compilerToVm = new CompilerToVM();
+ 262 
+ 263         try (InitTimer t = timer("HotSpotVMConfig&lt;init&gt;")) {
+ 264             configStore = new HotSpotVMConfigStore(compilerToVm);
+ 265             config = new HotSpotVMConfig(configStore);
+ 266         }
+ 267 
+ 268         String hostArchitecture = config.getHostArchitectureName();
+ 269 
+ 270         HotSpotJVMCIBackendFactory factory;
+ 271         try (InitTimer t = timer("find factory:", hostArchitecture)) {
+ 272             factory = findFactory(hostArchitecture);
+ 273         }
+ 274 
+ 275         try (InitTimer t = timer("create JVMCI backend:", hostArchitecture)) {
+ 276             hostBackend = registerBackend(factory.createJVMCIBackend(this, null));
+ 277         }
+ 278 
+ 279         metaAccessContext = new HotSpotJVMCIMetaAccessContext();
+ 280 
+ 281         compilerFactory = HotSpotJVMCICompilerConfig.getCompilerFactory();
+ 282         if (compilerFactory instanceof HotSpotJVMCICompilerFactory) {
+ 283             hsCompilerFactory = (HotSpotJVMCICompilerFactory) compilerFactory;
+ 284             trivialPrefixes = hsCompilerFactory.getTrivialPrefixes();
+ 285             switch (hsCompilerFactory.getCompilationLevelAdjustment()) {
+ 286                 case None:
+ 287                     compilationLevelAdjustment = config.compLevelAdjustmentNone;
+ 288                     break;
+ 289                 case ByHolder:
+ 290                     compilationLevelAdjustment = config.compLevelAdjustmentByHolder;
+ 291                     break;
+ 292                 case ByFullSignature:
+ 293                     compilationLevelAdjustment = config.compLevelAdjustmentByFullSignature;
+ 294                     break;
+ 295                 default:
+ 296                     compilationLevelAdjustment = config.compLevelAdjustmentNone;
+ 297                     break;
+ 298             }
+ 299         } else {
+ 300             hsCompilerFactory = null;
+ 301             trivialPrefixes = null;
+ 302             compilationLevelAdjustment = config.compLevelAdjustmentNone;
+ 303         }
+ 304 
+ 305         if (config.getFlag("JVMCIPrintProperties", Boolean.class)) {
+ 306             PrintStream out = new PrintStream(getLogStream());
+ 307             Option.printProperties(out);
+ 308             compilerFactory.printProperties(out);
+<a name="6" id="anc6"></a>
+ 309         }
+ 310 
+ 311         if (Option.PrintConfig.getBoolean()) {
+ 312             printConfig(configStore, compilerToVm);
+ 313         }
+ 314     }
+ 315 
+ 316     private JVMCIBackend registerBackend(JVMCIBackend backend) {
+ 317         Class&lt;? extends Architecture&gt; arch = backend.getCodeCache().getTarget().arch.getClass();
+ 318         JVMCIBackend oldValue = backends.put(arch, backend);
+ 319         assert oldValue == null : "cannot overwrite existing backend for architecture " + arch.getSimpleName();
+ 320         return backend;
+ 321     }
+ 322 
+ 323     public ResolvedJavaType fromClass(Class&lt;?&gt; javaClass) {
+ 324         return metaAccessContext.fromClass(javaClass);
+ 325     }
+ 326 
+ 327     public HotSpotVMConfigStore getConfigStore() {
+ 328         return configStore;
+ 329     }
+ 330 
+ 331     public HotSpotVMConfig getConfig() {
+ 332         return config;
+ 333     }
+ 334 
+ 335     public CompilerToVM getCompilerToVM() {
+ 336         return compilerToVm;
+ 337     }
+ 338 
+ 339     public JVMCICompiler getCompiler() {
+ 340         if (compiler == null) {
+ 341             synchronized (this) {
+ 342                 if (compiler == null) {
+ 343                     compiler = compilerFactory.createCompiler(this);
+ 344                 }
+ 345             }
+ 346         }
+ 347         return compiler;
+ 348     }
+ 349 
+ 350     public JavaType lookupType(String name, HotSpotResolvedObjectType accessingType, boolean resolve) {
+ 351         Objects.requireNonNull(accessingType, "cannot resolve type without an accessing class");
+ 352         // If the name represents a primitive type we can short-circuit the lookup.
+ 353         if (name.length() == 1) {
+ 354             JavaKind kind = JavaKind.fromPrimitiveOrVoidTypeChar(name.charAt(0));
+ 355             return fromClass(kind.toJavaClass());
+ 356         }
+ 357 
+ 358         // Resolve non-primitive types in the VM.
+ 359         HotSpotResolvedObjectTypeImpl hsAccessingType = (HotSpotResolvedObjectTypeImpl) accessingType;
+ 360         final HotSpotResolvedObjectTypeImpl klass = compilerToVm.lookupType(name, hsAccessingType.mirror(), resolve);
+ 361 
+ 362         if (klass == null) {
+ 363             assert resolve == false;
+ 364             return HotSpotUnresolvedJavaType.create(this, name);
+ 365         }
+ 366         return klass;
+ 367     }
+ 368 
+ 369     public JVMCIBackend getHostJVMCIBackend() {
+ 370         return hostBackend;
+ 371     }
+ 372 
+ 373     public &lt;T extends Architecture&gt; JVMCIBackend getJVMCIBackend(Class&lt;T&gt; arch) {
+ 374         assert arch != Architecture.class;
+ 375         return backends.get(arch);
+ 376     }
+ 377 
+ 378     public Map&lt;Class&lt;? extends Architecture&gt;, JVMCIBackend&gt; getJVMCIBackends() {
+ 379         return Collections.unmodifiableMap(backends);
+ 380     }
+ 381 
+ 382     /**
+ 383      * Called from the VM.
+ 384      */
+ 385     @SuppressWarnings({"unused"})
+ 386     private int adjustCompilationLevel(Class&lt;?&gt; declaringClass, String name, String signature, boolean isOsr, int level) {
+ 387         CompilationLevel curLevel;
+ 388         if (level == config.compilationLevelNone) {
+ 389             curLevel = CompilationLevel.None;
+ 390         } else if (level == config.compilationLevelSimple) {
+ 391             curLevel = CompilationLevel.Simple;
+ 392         } else if (level == config.compilationLevelLimitedProfile) {
+ 393             curLevel = CompilationLevel.LimitedProfile;
+ 394         } else if (level == config.compilationLevelFullProfile) {
+ 395             curLevel = CompilationLevel.FullProfile;
+ 396         } else if (level == config.compilationLevelFullOptimization) {
+ 397             curLevel = CompilationLevel.FullOptimization;
+ 398         } else {
+ 399             throw JVMCIError.shouldNotReachHere();
+ 400         }
+ 401 
+ 402         switch (hsCompilerFactory.adjustCompilationLevel(declaringClass, name, signature, isOsr, curLevel)) {
+ 403             case None:
+ 404                 return config.compilationLevelNone;
+ 405             case Simple:
+ 406                 return config.compilationLevelSimple;
+ 407             case LimitedProfile:
+ 408                 return config.compilationLevelLimitedProfile;
+ 409             case FullProfile:
+ 410                 return config.compilationLevelFullProfile;
+ 411             case FullOptimization:
+ 412                 return config.compilationLevelFullOptimization;
+ 413             default:
+ 414                 return level;
+ 415         }
+ 416     }
+ 417 
+ 418     /**
+ 419      * Called from the VM.
+ 420      */
+ 421     @SuppressWarnings({"unused"})
+ 422     private HotSpotCompilationRequestResult compileMethod(HotSpotResolvedJavaMethod method, int entryBCI, long jvmciEnv, int id) {
+ 423         CompilationRequestResult result = getCompiler().compileMethod(new HotSpotCompilationRequest(method, entryBCI, jvmciEnv, id));
+ 424         assert result != null : "compileMethod must always return something";
+ 425         HotSpotCompilationRequestResult hsResult;
+ 426         if (result instanceof HotSpotCompilationRequestResult) {
+ 427             hsResult = (HotSpotCompilationRequestResult) result;
+ 428         } else {
+ 429             Object failure = result.getFailure();
+ 430             if (failure != null) {
+ 431                 boolean retry = false; // Be conservative with unknown compiler
+ 432                 hsResult = HotSpotCompilationRequestResult.failure(failure.toString(), retry);
+ 433             } else {
+ 434                 int inlinedBytecodes = -1;
+ 435                 hsResult = HotSpotCompilationRequestResult.success(inlinedBytecodes);
+ 436             }
+ 437         }
+ 438 
+ 439         return hsResult;
+ 440     }
+ 441 
+ 442     /**
+ 443      * Shuts down the runtime.
+ 444      *
+ 445      * Called from the VM.
+ 446      */
+ 447     @SuppressWarnings({"unused"})
+ 448     private void shutdown() throws Exception {
+ 449         for (HotSpotVMEventListener vmEventListener : getVmEventListeners()) {
+ 450             vmEventListener.notifyShutdown();
+ 451         }
+ 452     }
+ 453 
+ 454     /**
+ 455      * Notify on completion of a bootstrap.
+ 456      *
+ 457      * Called from the VM.
+ 458      */
+ 459     @SuppressWarnings({"unused"})
+ 460     private void bootstrapFinished() throws Exception {
+ 461         for (HotSpotVMEventListener vmEventListener : getVmEventListeners()) {
+ 462             vmEventListener.notifyBootstrapFinished();
+ 463         }
+ 464     }
+ 465 
+ 466     /**
+ 467      * Notify on successful install into the CodeCache.
+ 468      *
+ 469      * @param hotSpotCodeCacheProvider
+ 470      * @param installedCode
+ 471      * @param compiledCode
+ 472      */
+ 473     void notifyInstall(HotSpotCodeCacheProvider hotSpotCodeCacheProvider, InstalledCode installedCode, CompiledCode compiledCode) {
+ 474         for (HotSpotVMEventListener vmEventListener : getVmEventListeners()) {
+ 475             vmEventListener.notifyInstall(hotSpotCodeCacheProvider, installedCode, compiledCode);
+ 476         }
+ 477     }
+ 478 
+ 479     @SuppressFBWarnings(value = "DM_DEFAULT_ENCODING", justification = "no localization here please!")
+ 480     private static void printConfigLine(CompilerToVM vm, String format, Object... args) {
+ 481         String line = String.format(format, args);
+ 482         byte[] lineBytes = line.getBytes();
+ 483         vm.writeDebugOutput(lineBytes, 0, lineBytes.length);
+ 484         vm.flushDebugOutput();
+ 485     }
+ 486 
+ 487     private static void printConfig(HotSpotVMConfigStore store, CompilerToVM vm) {
+ 488         TreeMap&lt;String, VMField&gt; fields = new TreeMap&lt;&gt;(store.getFields());
+ 489         for (VMField field : fields.values()) {
+ 490             if (!field.isStatic()) {
+ 491                 printConfigLine(vm, "[vmconfig:instance field] %s %s {offset=%d[0x%x]}%n", field.type, field.name, field.offset, field.offset);
+ 492             } else {
+ 493                 String value = field.value == null ? "null" : String.format("%d[0x%x]", field.value, field.value);
+ 494                 printConfigLine(vm, "[vmconfig:static field] %s %s = %s {address=0x%x}%n", field.type, field.name, value, field.address);
+ 495             }
+ 496         }
+ 497         TreeMap&lt;String, VMFlag&gt; flags = new TreeMap&lt;&gt;(store.getFlags());
+ 498         for (VMFlag flag : flags.values()) {
+ 499             printConfigLine(vm, "[vmconfig:flag] %s %s = %s%n", flag.type, flag.name, flag.value);
+ 500         }
+ 501         TreeMap&lt;String, Long&gt; addresses = new TreeMap&lt;&gt;(store.getAddresses());
+ 502         for (Map.Entry&lt;String, Long&gt; e : addresses.entrySet()) {
+ 503             printConfigLine(vm, "[vmconfig:address] %s = %d[0x%x]%n", e.getKey(), e.getValue(), e.getValue());
+ 504         }
+ 505         TreeMap&lt;String, Long&gt; constants = new TreeMap&lt;&gt;(store.getConstants());
+ 506         for (Map.Entry&lt;String, Long&gt; e : constants.entrySet()) {
+ 507             printConfigLine(vm, "[vmconfig:constant] %s = %d[0x%x]%n", e.getKey(), e.getValue(), e.getValue());
+ 508         }
+ 509         TreeMap&lt;String, Long&gt; typeSizes = new TreeMap&lt;&gt;(store.getTypeSizes());
+ 510         for (Map.Entry&lt;String, Long&gt; e : typeSizes.entrySet()) {
+ 511             printConfigLine(vm, "[vmconfig:type size] %s = %d%n", e.getKey(), e.getValue());
+ 512         }
+ 513         for (VMIntrinsicMethod e : store.getIntrinsics()) {
+ 514             printConfigLine(vm, "[vmconfig:intrinsic] %d = %s.%s %s%n", e.id, e.declaringClass, e.name, e.descriptor);
+ 515         }
+ 516     }
+ 517 
+ 518     public OutputStream getLogStream() {
+ 519         return new OutputStream() {
+ 520 
+ 521             @Override
+ 522             public void write(byte[] b, int off, int len) throws IOException {
+ 523                 if (b == null) {
+ 524                     throw new NullPointerException();
+ 525                 } else if (off &lt; 0 || off &gt; b.length || len &lt; 0 || (off + len) &gt; b.length || (off + len) &lt; 0) {
+ 526                     throw new IndexOutOfBoundsException();
+ 527                 } else if (len == 0) {
+ 528                     return;
+ 529                 }
+ 530                 compilerToVm.writeDebugOutput(b, off, len);
+ 531             }
+ 532 
+ 533             @Override
+ 534             public void write(int b) throws IOException {
+ 535                 write(new byte[]{(byte) b}, 0, 1);
+ 536             }
+ 537 
+ 538             @Override
+ 539             public void flush() throws IOException {
+ 540                 compilerToVm.flushDebugOutput();
+ 541             }
+ 542         };
+ 543     }
+ 544 
+ 545     /**
+ 546      * Collects the current values of all JVMCI benchmark counters, summed up over all threads.
+ 547      */
+ 548     public long[] collectCounters() {
+ 549         return compilerToVm.collectCounters();
+ 550     }
+ 551 }
+<a name="7" id="anc7"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="7" type="hidden" /></form></body></html>

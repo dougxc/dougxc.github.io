@@ -1,0 +1,202 @@
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java	2016-07-02 01:01:22.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java	2016-07-02 01:01:22.000000000 +0200
+@@ -22,12 +22,17 @@
+  */
+ package jdk.vm.ci.hotspot;
+ 
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Comparator;
++
+ import jdk.vm.ci.code.CompilationRequest;
+ import jdk.vm.ci.common.JVMCIError;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.Option;
+ import jdk.vm.ci.runtime.JVMCICompiler;
+ import jdk.vm.ci.runtime.JVMCIRuntime;
+ import jdk.vm.ci.runtime.services.JVMCICompilerFactory;
++import jdk.vm.ci.runtime.services.JVMCICompilerFactory.AutoSelectionPrecedence;
+ import jdk.vm.ci.services.Services;
+ 
+ final class HotSpotJVMCICompilerConfig {
+@@ -55,6 +60,54 @@
+     private static JVMCICompilerFactory compilerFactory;
+ 
+     /**
++     * Comparator that sorts available {@link JVMCICompilerFactory} objects according to their
++     * {@link JVMCICompilerFactory#getAutoSelectionRelationTo(JVMCICompilerFactory) relative}
++     * auto-selection preferences. Factories with higher preferences are sorted earlier. If a
++     */
++    static class FactoryComparator implements Comparator<JVMCICompilerFactory> {
++
++        /**
++         * Compares two compiler factories and returns -1 if {@code o1} should be auto-selected over
++         * {@code o2}, -1 if {@code o1} should be auto-selected over {@code o2} or 0 if
++         * {@code o1 == o2 || o1.getClass() == o2.getClass()}.
++         *
++         * @throws JVMCIError there is no auto-selection preference relation between {@code o1} and
++         *             {@code o2}
++         */
++        public int compare(JVMCICompilerFactory o1, JVMCICompilerFactory o2) {
++            if (o1 == o2 || o1.getClass() == o2.getClass()) {
++                return 0;
++            }
++            AutoSelectionPrecedence o1Precedence = o1.getAutoSelectionRelationTo(o2);
++            AutoSelectionPrecedence o2Precedence = o2.getAutoSelectionRelationTo(o1);
++            switch (o1Precedence) {
++                case HIGHER: {
++                    assert o2Precedence != o1Precedence : "auto selection precedence of " + o1 + " and " + o2 + " cannot both be " + o1Precedence;
++                    return -1;
++                }
++                case LOWER: {
++                    assert o2Precedence != o1Precedence : "auto selection precedence of " + o1 + " and " + o2 + " cannot both be " + o1Precedence;
++                    return 1;
++                }
++                case UNRELATED: {
++                    switch (o2Precedence) {
++                        case HIGHER: {
++                            return 1;
++                        }
++                        case LOWER: {
++                            return -1;
++                        }
++                        default:
++                            break;
++                    }
++                }
++            }
++            // No auto-selection preference relation between o1 and o2
++            throw new JVMCIError("JVMCI compiler must be specified with the '%s' system property", Option.JVMCI_OPTION_PROPERTY_PREFIX + Option.Compiler);
++        }
++    }
++
++    /**
+      * Gets the selected system compiler factory.
+      *
+      * @return the selected system compiler factory
+@@ -67,7 +120,6 @@
+                 for (JVMCICompilerFactory f : Services.load(JVMCICompilerFactory.class)) {
+                     if (f.getCompilerName().equals(compilerName)) {
+                         Services.exportJVMCITo(f.getClass());
+-                        f.onSelection();
+                         factory = f;
+                     }
+                 }
+@@ -75,8 +127,24 @@
+                     throw new JVMCIError("JVMCI compiler '%s' not found", compilerName);
+                 }
+             } else {
+-                factory = new DummyCompilerFactory();
++                // Auto selection
++                ArrayList<JVMCICompilerFactory> factories = new ArrayList<>();
++                for (JVMCICompilerFactory f : Services.load(JVMCICompilerFactory.class)) {
++                    factories.add(f);
++                }
++                if (!factories.isEmpty()) {
++                    if (factories.size() == 1) {
++                        factory = factories.get(0);
++                    } else {
++                        Collections.sort(factories, new FactoryComparator());
++                        factory = factories.get(0);
++                    }
++                    Services.exportJVMCITo(factory.getClass());
++                } else {
++                    factory = new DummyCompilerFactory();
++                }
+             }
++            factory.onSelection();
+             compilerFactory = factory;
+         }
+         return compilerFactory;
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java	2016-07-02 01:01:22.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java	2016-07-02 01:01:22.000000000 +0200
+@@ -102,7 +102,7 @@
+         /**
+          * The prefix for system properties that are JVMCI options.
+          */
+-        private static final String JVMCI_OPTION_PROPERTY_PREFIX = "jvmci.";
++        static final String JVMCI_OPTION_PROPERTY_PREFIX = "jvmci.";
+ 
+         /**
+          * Marker for uninitialized flags.
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/services/JVMCICompilerFactory.java	2016-07-02 01:01:23.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/services/JVMCICompilerFactory.java	2016-07-02 01:01:23.000000000 +0200
+@@ -54,6 +54,29 @@
+     }
+ 
+     /**
++     * Constants denoting the relative precedence between two factories in terms of
++     * {@linkplain JVMCICompilerFactory#getAutoSelectionRelationTo(JVMCICompilerFactory) auto
++     * selecting} which factory to use.
++     */
++    public enum AutoSelectionPrecedence {
++        UNRELATED,
++        HIGHER,
++        LOWER;
++    }
++
++    /**
++     * Gets the precedence of factory relative to another factory in terms of selecting which
++     * factory to use in absence of information (such as a system property) specifying a specific
++     * factory.
++     *
++     * @param other a factory guaranteed to have a different concrete type than this factory
++     * @return the precedence of selecting this factory over {@code other}
++     */
++    public AutoSelectionPrecedence getAutoSelectionRelationTo(JVMCICompilerFactory other) {
++        return AutoSelectionPrecedence.UNRELATED;
++    }
++
++    /**
+      * Get the name of this compiler. The name is used by JVMCI to determine which factory to use.
+      */
+     public abstract String getCompilerName();
+--- old/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.java	2016-07-02 01:01:23.000000000 +0200
++++ new/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.java	2016-07-02 01:01:23.000000000 +0200
+@@ -32,15 +32,15 @@
+  *          java.base/jdk.internal.org.objectweb.asm.tree
+  *          jdk.vm.ci/jdk.vm.ci.hotspot
+  *          jdk.vm.ci/jdk.vm.ci.code
++ *          jdk.vm.ci/jdk.vm.ci.code.site
+  *          jdk.vm.ci/jdk.vm.ci.meta
+  *          jdk.vm.ci/jdk.vm.ci.runtime
+- * @ignore 8144964
+  * @build jdk.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper
+  * @build compiler.jvmci.common.JVMCIHelpers
+  *     compiler.jvmci.events.JvmciNotifyInstallEventTest
+  * @run main jdk.test.lib.FileInstaller ../common/services/ ./META-INF/services/
+  * @run main jdk.test.lib.FileInstaller ./JvmciNotifyInstallEventTest.config
+- *     ./META-INF/services/jdk.vm.ci.hotspot.HotSpotVMEventListener
++ *     ./META-INF/services/jdk.vm.ci.hotspot.services.HotSpotVMEventListener
+  * @run main ClassFileInstaller
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyHotspotCompiler
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyCompilerFactory
+@@ -52,6 +52,11 @@
+  *     jdk.test.lib.Asserts
+  *     jdk.test.lib.Utils
+  * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
++ *     -Xbootclasspath/a:. -Xmixed
++ *     -XX:+UseJVMCICompiler -XX:-BootstrapJVMCI
++ *     -Dcompiler.jvmci.events.JvmciNotifyInstallEventTest.failoninit=false
++ *     compiler.jvmci.events.JvmciNotifyInstallEventTest
++ * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
+  *     -Djvmci.compiler=EmptyCompiler -Xbootclasspath/a:. -Xmixed
+  *     -XX:+UseJVMCICompiler -XX:-BootstrapJVMCI
+  *     -Dcompiler.jvmci.events.JvmciNotifyInstallEventTest.failoninit=false
+@@ -74,7 +79,7 @@
+ import jdk.test.lib.Asserts;
+ import java.lang.reflect.Method;
+ import jdk.test.lib.Utils;
+-import jdk.vm.ci.hotspot.HotSpotVMEventListener;
++import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
+ import jdk.vm.ci.code.CompiledCode;
+ import jdk.vm.ci.code.InstalledCode;
+ import jdk.vm.ci.code.site.DataPatch;
+@@ -87,7 +92,7 @@
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
+ import jdk.vm.ci.hotspot.HotSpotResolvedJavaMethod;
+ 
+-public class JvmciNotifyInstallEventTest implements HotSpotVMEventListener {
++public class JvmciNotifyInstallEventTest extends HotSpotVMEventListener {
+     private static final String METHOD_NAME = "testMethod";
+     private static final boolean FAIL_ON_INIT = !Boolean.getBoolean(
+             "compiler.jvmci.events.JvmciNotifyInstallEventTest.failoninit");

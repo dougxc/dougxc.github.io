@@ -1,0 +1,269 @@
+# HG changeset patch
+# User dnsimon
+# Date 1477696182 -7200
+#      Sat Oct 29 01:09:42 2016 +0200
+# Node ID 0c5f7d3df29fb607b9a7b7007ecc83be6a5975e9
+# Parent  2839c246aa766d46a4be494f8fd6eca3f9577231
+8168915: [JVMCI] use MethodParameters attribute instead of depending on -g option for sanity checks
+
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java
+@@ -33,8 +33,10 @@
+ 
+ import java.lang.annotation.Annotation;
+ import java.lang.reflect.Executable;
++import java.lang.reflect.Method;
+ import java.lang.reflect.Modifier;
+ import java.lang.reflect.Type;
++import java.util.Arrays;
+ import java.util.HashMap;
+ import java.util.Map;
+ 
+@@ -460,6 +462,22 @@
+     }
+ 
+     @Override
++    public Parameter[] getParameters() {
++        Executable javaMethod = toJava();
++        if (javaMethod == null) {
++            return null;
++        }
++
++        java.lang.reflect.Parameter[] javaParameters = javaMethod.getParameters();
++        Parameter[] res = new Parameter[javaParameters.length];
++        for (int i = 0; i < res.length; i++) {
++            java.lang.reflect.Parameter src = javaParameters[i];
++            res[i] = new Parameter(src.getName(), src.getModifiers(), this, i);
++        }
++        return res;
++    }
++
++    @Override
+     public Annotation[][] getParameterAnnotations() {
+         Executable javaMethod = toJava();
+         return javaMethod == null ? null : javaMethod.getParameterAnnotations();
+@@ -529,13 +547,31 @@
+         return result;
+     }
+ 
++    private static Method searchMethods(Method[] methods, String name, Class<?> returnType, Class<?>[] parameterTypes) {
++        for (Method m : methods) {
++            if (m.getName().equals(name) && returnType.equals(m.getReturnType()) && Arrays.equals(m.getParameterTypes(), parameterTypes)) {
++                return m;
++            }
++        }
++        return null;
++    }
++
+     private Executable toJava() {
+         if (toJavaCache != null) {
+             return toJavaCache;
+         }
+         try {
+             Class<?>[] parameterTypes = signatureToTypes();
+-            Executable result = isConstructor() ? holder.mirror().getDeclaredConstructor(parameterTypes) : holder.mirror().getDeclaredMethod(name, parameterTypes);
++            Class<?> returnType = ((HotSpotResolvedJavaType) getSignature().getReturnType(holder).resolve(holder)).mirror();
++
++            Executable result;
++            if (isConstructor()) {
++                result = holder.mirror().getDeclaredConstructor(parameterTypes);
++            } else {
++                // Do not use Method.getDeclaredMethod() as it can return a bridge method
++                // when this.isBridge() is false and vice versa.
++                result = searchMethods(holder.mirror().getDeclaredMethods(), name, returnType, parameterTypes);
++            }
+             toJavaCache = result;
+             return result;
+         } catch (NoSuchMethodException | NoClassDefFoundError e) {
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaMethod.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaMethod.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaMethod.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaMethod.java
+@@ -26,6 +26,7 @@
+ import java.lang.reflect.AnnotatedElement;
+ import java.lang.reflect.Array;
+ import java.lang.reflect.Method;
++import java.lang.reflect.Modifier;
+ import java.lang.reflect.Type;
+ 
+ /**
+@@ -174,6 +175,133 @@
+     ConstantPool getConstantPool();
+ 
+     /**
++     * A {@code Parameter} provides information about method parameters.
++     */
++    public static class Parameter implements AnnotatedElement {
++        private final String name;
++        private final ResolvedJavaMethod method;
++        private final int modifiers;
++        private final int index;
++
++        /**
++         * Constructor for {@code Parameter}.
++         *
++         * @param name the name of the parameter
++         * @param modifiers the modifier flags for the parameter
++         * @param method the method which defines this parameter
++         * @param index the index of the parameter
++         */
++        public Parameter(String name,
++                        int modifiers,
++                        ResolvedJavaMethod method,
++                        int index) {
++            this.name = name;
++            this.modifiers = modifiers;
++            this.method = method;
++            this.index = index;
++        }
++
++        /**
++         * Gets the name of the parameter.
++         */
++        public String getName() {
++            return name;
++        }
++
++        /**
++         * Gets the method declaring the parameter.
++         */
++        public ResolvedJavaMethod getDeclaringMethod() {
++            return method;
++        }
++
++        /**
++         * Get the modifier flags for the parameter
++         */
++        public int getModifiers() {
++            return modifiers;
++        }
++
++        /**
++         * Gets the kind of the parameter.
++         */
++        public JavaKind getKind() {
++            return method.getSignature().getParameterKind(index);
++        }
++
++        /**
++         * Gets the formal type of the parameter.
++         */
++        public Type getParameterizedType() {
++            return method.getGenericParameterTypes()[index];
++        }
++
++        /**
++         * Gets the type of the parameter.
++         */
++        public JavaType getType() {
++            return method.getSignature().getParameterType(index, method.getDeclaringClass());
++        }
++
++        /**
++         * Determines if the parameter represents a variable argument list.
++         */
++        public boolean isVarArgs() {
++            return method.isVarArgs() && index == method.getSignature().getParameterCount(false) - 1;
++        }
++
++        public <T extends Annotation> T getAnnotation(Class<T> annotationClass) {
++            return method.getParameterAnnotations(annotationClass)[index];
++        }
++
++        public Annotation[] getAnnotations() {
++            return method.getParameterAnnotations()[index];
++        }
++
++        public Annotation[] getDeclaredAnnotations() {
++            return getAnnotations();
++        }
++
++        @Override
++        public String toString() {
++            Type type = getParameterizedType();
++            String typename = type.getTypeName();
++            if (isVarArgs()) {
++                typename = typename.replaceFirst("\\[\\]$", "...");
++            }
++
++            final StringBuilder sb = new StringBuilder(Modifier.toString(getModifiers()));
++            if (sb.length() != 0) {
++                sb.append(' ');
++            }
++            return sb.append(typename).append(' ').append(getName()).toString();
++        }
++
++        @Override
++        public boolean equals(Object obj) {
++            if (obj instanceof Parameter) {
++                Parameter other = (Parameter) obj;
++                return (other.method.equals(method) && other.index == index);
++            }
++            return false;
++        }
++
++        @Override
++        public int hashCode() {
++            return method.hashCode() ^ index;
++        }
++    }
++
++    /**
++     * Returns an array of {@code Parameter} objects that represent all the parameters to this
++     * method. Returns an array of length 0 if this method has no parameters. Returns {@code null}
++     * if the parameter information is unavailable.
++     */
++    default Parameter[] getParameters() {
++        return null;
++    }
++
++    /**
+      * Returns an array of arrays that represent the annotations on the formal parameters, in
+      * declaration order, of this method.
+      *
+diff --git a/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaMethod.java b/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaMethod.java
+--- a/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaMethod.java
++++ b/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaMethod.java
+@@ -33,6 +33,7 @@
+ 
+ package jdk.vm.ci.runtime.test;
+ 
++import static org.junit.Assert.assertArrayEquals;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertNotNull;
+@@ -60,6 +61,7 @@
+ import jdk.vm.ci.meta.ConstantPool;
+ import jdk.vm.ci.meta.ExceptionHandler;
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
++import jdk.vm.ci.meta.ResolvedJavaMethod.Parameter;
+ import jdk.vm.ci.meta.ResolvedJavaType;
+ 
+ /**
+@@ -266,6 +268,26 @@
+         }
+     }
+ 
++    @Test
++    public void getParametersTest() {
++        for (Map.Entry<Method, ResolvedJavaMethod> e : methods.entrySet()) {
++            java.lang.reflect.Parameter[] expected = e.getKey().getParameters();
++            Parameter[] actual = e.getValue().getParameters();
++            assertEquals(actual.length, expected.length);
++            for (int i = 0; i < actual.length; i++) {
++                java.lang.reflect.Parameter exp = expected[i];
++                Parameter act = actual[i];
++                assertEquals(exp.getName(), act.getName());
++                assertEquals(exp.getModifiers(), act.getModifiers());
++                assertEquals(exp.getModifiers(), act.getModifiers());
++                assertArrayEquals(exp.getAnnotations(), act.getAnnotations());
++                assertEquals(exp.getType().getName(), act.getType().toClassName());
++                assertEquals(exp.getParameterizedType(), act.getParameterizedType());
++                assertEquals(metaAccess.lookupJavaMethod(exp.getDeclaringExecutable()), act.getDeclaringMethod());
++            }
++        }
++    }
++
+     @Retention(RetentionPolicy.RUNTIME)
+     @Target(ElementType.METHOD)
+     @interface TestAnnotation {

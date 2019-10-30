@@ -1,0 +1,1013 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>New src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2011, 2017, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package jdk.vm.ci.hotspot;
+  24 
+  25 import static java.util.Objects.requireNonNull;
+  26 import static jdk.vm.ci.hotspot.CompilerToVM.compilerToVM;
+  27 import static jdk.vm.ci.hotspot.HotSpotConstantPool.isSignaturePolymorphicHolder;
+  28 import static jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.runtime;
+  29 import static jdk.vm.ci.hotspot.HotSpotModifiers.jvmClassModifiers;
+  30 import static jdk.vm.ci.hotspot.HotSpotVMConfig.config;
+  31 import static jdk.vm.ci.hotspot.UnsafeAccess.UNSAFE;
+  32 
+  33 import java.lang.annotation.Annotation;
+  34 import java.lang.reflect.Array;
+  35 import java.lang.reflect.Constructor;
+  36 import java.lang.reflect.Method;
+  37 import java.lang.reflect.Modifier;
+  38 import java.nio.ByteOrder;
+  39 import java.util.HashMap;
+  40 
+  41 import jdk.vm.ci.common.JVMCIError;
+  42 import jdk.vm.ci.meta.Assumptions.AssumptionResult;
+  43 import jdk.vm.ci.meta.Assumptions.ConcreteMethod;
+  44 import jdk.vm.ci.meta.Assumptions.ConcreteSubtype;
+  45 import jdk.vm.ci.meta.Assumptions.LeafType;
+  46 import jdk.vm.ci.meta.Assumptions.NoFinalizableSubclass;
+  47 import jdk.vm.ci.meta.Constant;
+  48 import jdk.vm.ci.meta.JavaConstant;
+  49 import jdk.vm.ci.meta.JavaKind;
+  50 import jdk.vm.ci.meta.JavaType;
+  51 import jdk.vm.ci.meta.ResolvedJavaField;
+  52 import jdk.vm.ci.meta.ResolvedJavaMethod;
+  53 import jdk.vm.ci.meta.ResolvedJavaType;
+  54 
+  55 /**
+  56  * Implementation of {@link JavaType} for resolved non-primitive HotSpot classes.
+  57  */
+  58 final class HotSpotResolvedObjectTypeImpl extends HotSpotResolvedJavaType implements HotSpotResolvedObjectType, MetaspaceWrapperObject {
+  59 
+  60     private static final HotSpotResolvedJavaField[] NO_FIELDS = new HotSpotResolvedJavaField[0];
+  61     private static final int METHOD_CACHE_ARRAY_CAPACITY = 8;
+  62 
+  63     /**
+  64      * The Java class this type represents.
+  65      */
+  66     private final Class&lt;?&gt; javaClass;
+  67     private HotSpotResolvedJavaMethodImpl[] methodCacheArray;
+  68     private HashMap&lt;Long, HotSpotResolvedJavaMethodImpl&gt; methodCacheHashMap;
+  69     private HotSpotResolvedJavaField[] instanceFields;
+  70     private HotSpotResolvedObjectTypeImpl[] interfaces;
+  71     private HotSpotConstantPool constantPool;
+  72     final HotSpotJVMCIMetaAccessContext context;
+  73     private HotSpotResolvedObjectType arrayOfType;
+  74 
+  75     /**
+  76      * Gets the JVMCI mirror for a {@link Class} object.
+  77      *
+  78      * @return the {@link HotSpotResolvedJavaType} corresponding to {@code javaClass}
+  79      */
+  80     static HotSpotResolvedObjectTypeImpl fromObjectClass(Class&lt;?&gt; javaClass) {
+  81         return (HotSpotResolvedObjectTypeImpl) runtime().fromClass(javaClass);
+  82     }
+  83 
+  84     /**
+  85      * Gets the JVMCI mirror from a HotSpot type. Since {@link Class} is already a proxy for the
+  86      * underlying Klass*, it is used instead of the raw Klass*.
+  87      *
+  88      * Called from the VM.
+  89      *
+  90      * @param javaClass a {@link Class} object
+  91      * @return the {@link ResolvedJavaType} corresponding to {@code javaClass}
+  92      */
+  93     @SuppressWarnings("unused")
+  94     private static HotSpotResolvedObjectTypeImpl fromMetaspace(Class&lt;?&gt; javaClass) {
+  95         return fromObjectClass(javaClass);
+  96     }
+  97 
+  98     /**
+  99      * Creates the JVMCI mirror for a {@link Class} object.
+ 100      *
+ 101      * &lt;p&gt;
+ 102      * &lt;b&gt;NOTE&lt;/b&gt;: Creating an instance of this class does not install the mirror for the
+ 103      * {@link Class} type. Use {@link #fromObjectClass(Class)} or {@link #fromMetaspace(Class)}
+ 104      * instead.
+ 105      * &lt;/p&gt;
+ 106      *
+ 107      * @param javaClass the Class to create the mirror for
+ 108      * @param context
+ 109      */
+ 110     HotSpotResolvedObjectTypeImpl(Class&lt;?&gt; javaClass, HotSpotJVMCIMetaAccessContext context) {
+ 111         super(getSignatureName(javaClass));
+ 112         this.javaClass = javaClass;
+ 113         this.context = context;
+ 114         assert getName().charAt(0) != '[' || isArray() : getName();
+ 115     }
+ 116 
+ 117     /**
+ 118      * Returns the name of this type as it would appear in a signature.
+ 119      */
+ 120     private static String getSignatureName(Class&lt;?&gt; javaClass) {
+ 121         if (javaClass.isArray()) {
+ 122             return javaClass.getName().replace('.', '/');
+ 123         }
+ 124         return "L" + javaClass.getName().replace('.', '/') + ";";
+ 125     }
+ 126 
+ 127     /**
+ 128      * Gets the metaspace Klass for this type.
+ 129      */
+ 130     long getMetaspaceKlass() {
+ 131         if (HotSpotJVMCIRuntime.getHostWordKind() == JavaKind.Long) {
+ 132             return UNSAFE.getLong(javaClass, config().klassOffset);
+ 133         }
+ 134         return UNSAFE.getInt(javaClass, config().klassOffset) &amp; 0xFFFFFFFFL;
+ 135     }
+ 136 
+ 137     @Override
+ 138     public long getMetaspacePointer() {
+ 139         return getMetaspaceKlass();
+ 140     }
+ 141 
+ 142     /**
+ 143      * The Klass* for this object is kept alive by the direct reference to {@link #javaClass} so no
+ 144      * extra work is required.
+ 145      */
+ 146     @Override
+ 147     public boolean isRegistered() {
+ 148         return true;
+ 149     }
+ 150 
+ 151     @Override
+ 152     public int getModifiers() {
+ 153         if (isArray()) {
+ 154             return (getElementalType().getModifiers() &amp; (Modifier.PUBLIC | Modifier.PRIVATE | Modifier.PROTECTED)) | Modifier.FINAL | Modifier.ABSTRACT;
+ 155         } else {
+ 156             return getAccessFlags() &amp; jvmClassModifiers();
+ 157         }
+ 158     }
+ 159 
+ 160     public int getAccessFlags() {
+ 161         HotSpotVMConfig config = config();
+ 162         return UNSAFE.getInt(getMetaspaceKlass() + config.klassAccessFlagsOffset);
+ 163     }
+ 164 
+ 165     @Override
+ 166     public HotSpotResolvedObjectType getArrayClass() {
+ 167         if (arrayOfType == null) {
+ 168             arrayOfType = fromObjectClass(Array.newInstance(mirror(), 0).getClass());
+ 169         }
+ 170         return arrayOfType;
+ 171     }
+ 172 
+ 173     @Override
+ 174     public ResolvedJavaType getComponentType() {
+ 175         Class&lt;?&gt; javaComponentType = mirror().getComponentType();
+ 176         return javaComponentType == null ? null : runtime().fromClass(javaComponentType);
+ 177     }
+ 178 
+ 179     @Override
+ 180     public AssumptionResult&lt;ResolvedJavaType&gt; findLeafConcreteSubtype() {
+ 181         if (isLeaf()) {
+ 182             // No assumptions are required.
+ 183             return new AssumptionResult&lt;&gt;(this);
+ 184         }
+ 185         HotSpotVMConfig config = config();
+ 186         if (isArray()) {
+ 187             ResolvedJavaType elementalType = getElementalType();
+ 188             AssumptionResult&lt;ResolvedJavaType&gt; elementType = elementalType.findLeafConcreteSubtype();
+ 189             if (elementType != null &amp;&amp; elementType.getResult().equals(elementalType)) {
+ 190                 /*
+ 191                  * If the elementType is leaf then the array is leaf under the same assumptions but
+ 192                  * only if the element type is exactly the leaf type. The element type can be
+ 193                  * abstract even if there is only one implementor of the abstract type.
+ 194                  */
+ 195                 AssumptionResult&lt;ResolvedJavaType&gt; result = new AssumptionResult&lt;&gt;(this);
+ 196                 result.add(elementType);
+ 197                 return result;
+ 198             }
+ 199             return null;
+ 200         } else if (isInterface()) {
+ 201             HotSpotResolvedObjectTypeImpl implementor = getSingleImplementor();
+ 202             /*
+ 203              * If the implementor field contains itself that indicates that the interface has more
+ 204              * than one implementors (see: InstanceKlass::add_implementor).
+ 205              */
+ 206             if (implementor == null || implementor.equals(this)) {
+ 207                 return null;
+ 208             }
+ 209 
+ 210             assert !implementor.isInterface();
+ 211             if (implementor.isAbstract() || !implementor.isLeafClass()) {
+ 212                 AssumptionResult&lt;ResolvedJavaType&gt; leafConcreteSubtype = implementor.findLeafConcreteSubtype();
+ 213                 if (leafConcreteSubtype != null) {
+ 214                     assert !leafConcreteSubtype.getResult().equals(implementor);
+ 215                     AssumptionResult&lt;ResolvedJavaType&gt; newResult = new AssumptionResult&lt;&gt;(leafConcreteSubtype.getResult(), new ConcreteSubtype(this, implementor));
+ 216                     // Accumulate leaf assumptions and return the combined result.
+ 217                     newResult.add(leafConcreteSubtype);
+ 218                     return newResult;
+ 219                 }
+ 220                 return null;
+ 221             }
+ 222             return concreteSubtype(implementor);
+ 223         } else {
+ 224             HotSpotResolvedObjectTypeImpl type = this;
+ 225             while (type.isAbstract()) {
+ 226                 HotSpotResolvedObjectTypeImpl subklass = type.getSubklass();
+ 227                 if (subklass == null || UNSAFE.getAddress(subklass.getMetaspaceKlass() + config.nextSiblingOffset) != 0) {
+ 228                     return null;
+ 229                 }
+ 230                 type = subklass;
+ 231             }
+ 232             if (type.isAbstract() || type.isInterface() || !type.isLeafClass()) {
+ 233                 return null;
+ 234             }
+ 235             if (this.isAbstract()) {
+ 236                 return concreteSubtype(type);
+ 237             } else {
+ 238                 assert this.equals(type);
+ 239                 return new AssumptionResult&lt;&gt;(type, new LeafType(type));
+ 240             }
+ 241         }
+ 242     }
+ 243 
+ 244     private AssumptionResult&lt;ResolvedJavaType&gt; concreteSubtype(HotSpotResolvedObjectTypeImpl type) {
+ 245         if (type.isLeaf()) {
+ 246             return new AssumptionResult&lt;&gt;(type, new ConcreteSubtype(this, type));
+ 247         } else {
+ 248             return new AssumptionResult&lt;&gt;(type, new LeafType(type), new ConcreteSubtype(this, type));
+ 249         }
+ 250     }
+ 251 
+ 252     /**
+ 253      * Returns if type {@code type} is a leaf class. This is the case if the
+ 254      * {@code Klass::_subklass} field of the underlying class is zero.
+ 255      *
+ 256      * @return true if the type is a leaf class
+ 257      */
+ 258     private boolean isLeafClass() {
+ 259         return UNSAFE.getLong(this.getMetaspaceKlass() + config().subklassOffset) == 0;
+ 260     }
+ 261 
+ 262     /**
+ 263      * Returns the {@code Klass::_subklass} field of the underlying metaspace klass for the given
+ 264      * type {@code type}.
+ 265      *
+ 266      * @return value of the subklass field as metaspace klass pointer
+ 267      */
+ 268     private HotSpotResolvedObjectTypeImpl getSubklass() {
+ 269         return compilerToVM().getResolvedJavaType(this, config().subklassOffset, false);
+ 270     }
+ 271 
+ 272     @Override
+ 273     public HotSpotResolvedObjectTypeImpl getSuperclass() {
+ 274         Class&lt;?&gt; javaSuperclass = mirror().getSuperclass();
+ 275         return javaSuperclass == null ? null : fromObjectClass(javaSuperclass);
+ 276     }
+ 277 
+ 278     @Override
+ 279     public HotSpotResolvedObjectTypeImpl[] getInterfaces() {
+ 280         if (interfaces == null) {
+ 281             Class&lt;?&gt;[] javaInterfaces = mirror().getInterfaces();
+ 282             HotSpotResolvedObjectTypeImpl[] result = new HotSpotResolvedObjectTypeImpl[javaInterfaces.length];
+ 283             for (int i = 0; i &lt; javaInterfaces.length; i++) {
+ 284                 result[i] = fromObjectClass(javaInterfaces[i]);
+ 285             }
+ 286             interfaces = result;
+ 287         }
+ 288         return interfaces;
+ 289     }
+ 290 
+ 291     @Override
+ 292     public HotSpotResolvedObjectTypeImpl getSingleImplementor() {
+ 293         if (!isInterface()) {
+ 294             throw new JVMCIError("Cannot call getSingleImplementor() on a non-interface type: %s", this);
+ 295         }
+ 296         return compilerToVM().getImplementor(this);
+ 297     }
+ 298 
+ 299     public HotSpotResolvedObjectTypeImpl getSupertype() {
+ 300         if (isArray()) {
+ 301             ResolvedJavaType componentType = getComponentType();
+ 302             if (mirror() == Object[].class || componentType.isPrimitive()) {
+ 303                 return fromObjectClass(Object.class);
+ 304             }
+ 305             return (HotSpotResolvedObjectTypeImpl) ((HotSpotResolvedObjectTypeImpl) componentType).getSupertype().getArrayClass();
+ 306         }
+ 307         if (isInterface()) {
+ 308             return fromObjectClass(Object.class);
+ 309         }
+ 310         return getSuperclass();
+ 311     }
+ 312 
+ 313     @Override
+ 314     public HotSpotResolvedObjectType findLeastCommonAncestor(ResolvedJavaType otherType) {
+ 315         if (otherType.isPrimitive()) {
+ 316             return null;
+ 317         } else {
+ 318             HotSpotResolvedObjectTypeImpl t1 = this;
+ 319             HotSpotResolvedObjectTypeImpl t2 = (HotSpotResolvedObjectTypeImpl) otherType;
+ 320             while (true) {
+ 321                 if (t1.isAssignableFrom(t2)) {
+ 322                     return t1;
+ 323                 }
+ 324                 if (t2.isAssignableFrom(t1)) {
+ 325                     return t2;
+ 326                 }
+ 327                 t1 = t1.getSupertype();
+ 328                 t2 = t2.getSupertype();
+ 329             }
+ 330         }
+ 331     }
+ 332 
+ 333     @Override
+ 334     public AssumptionResult&lt;Boolean&gt; hasFinalizableSubclass() {
+ 335         assert !isArray();
+ 336         if (!compilerToVM().hasFinalizableSubclass(this)) {
+ 337             return new AssumptionResult&lt;&gt;(false, new NoFinalizableSubclass(this));
+ 338         }
+ 339         return new AssumptionResult&lt;&gt;(true);
+ 340     }
+ 341 
+ 342     @Override
+ 343     public boolean hasFinalizer() {
+ 344         return (getAccessFlags() &amp; config().jvmAccHasFinalizer) != 0;
+ 345     }
+ 346 
+ 347     @Override
+ 348     public boolean isPrimitive() {
+ 349         return false;
+ 350     }
+ 351 
+ 352     @Override
+ 353     public boolean isArray() {
+ 354         return mirror().isArray();
+ 355     }
+ 356 
+ 357     @Override
+ 358     public boolean isInitialized() {
+ 359         return isArray() ? true : getInitState() == config().instanceKlassStateFullyInitialized;
+ 360     }
+ 361 
+ 362     @Override
+ 363     public boolean isLinked() {
+ 364         return isArray() ? true : getInitState() &gt;= config().instanceKlassStateLinked;
+ 365     }
+ 366 
+ 367     /**
+ 368      * Returns the value of the state field {@code InstanceKlass::_init_state} of the metaspace
+ 369      * klass.
+ 370      *
+ 371      * @return state field value of this type
+ 372      */
+ 373     private int getInitState() {
+ 374         assert !isArray() : "_init_state only exists in InstanceKlass";
+ 375         return UNSAFE.getByte(getMetaspaceKlass() + config().instanceKlassInitStateOffset) &amp; 0xFF;
+ 376     }
+ 377 
+ 378     @Override
+ 379     public void initialize() {
+ 380         if (!isInitialized()) {
+ 381             UNSAFE.ensureClassInitialized(mirror());
+ 382             assert isInitialized();
+ 383         }
+ 384     }
+ 385 
+ 386     @Override
+ 387     public boolean isInstance(JavaConstant obj) {
+ 388         if (obj.getJavaKind() == JavaKind.Object &amp;&amp; !obj.isNull()) {
+ 389             return mirror().isInstance(((HotSpotObjectConstantImpl) obj).object());
+ 390         }
+ 391         return false;
+ 392     }
+ 393 
+ 394     @Override
+ 395     public boolean isInstanceClass() {
+ 396         return !isArray() &amp;&amp; !isInterface();
+ 397     }
+ 398 
+ 399     @Override
+ 400     public boolean isInterface() {
+ 401         return mirror().isInterface();
+ 402     }
+ 403 
+ 404     @Override
+ 405     public boolean isAssignableFrom(ResolvedJavaType other) {
+ 406         assert other != null;
+ 407         if (other instanceof HotSpotResolvedObjectTypeImpl) {
+ 408             HotSpotResolvedObjectTypeImpl otherType = (HotSpotResolvedObjectTypeImpl) other;
+ 409             return mirror().isAssignableFrom(otherType.mirror());
+ 410         }
+ 411         return false;
+ 412     }
+ 413 
+ 414     @Override
+ 415     public boolean isJavaLangObject() {
+ 416         return javaClass.equals(Object.class);
+ 417     }
+ 418 
+ 419     @Override
+ 420     public JavaKind getJavaKind() {
+ 421         return JavaKind.Object;
+ 422     }
+ 423 
+ 424     @Override
+ 425     public ResolvedJavaMethod resolveMethod(ResolvedJavaMethod method, ResolvedJavaType callerType) {
+ 426         assert !callerType.isArray();
+ 427         if (isInterface()) {
+ 428             // Methods can only be resolved against concrete types
+ 429             return null;
+ 430         }
+ 431         if (method.isConcrete() &amp;&amp; method.getDeclaringClass().equals(this) &amp;&amp; method.isPublic() &amp;&amp; !isSignaturePolymorphicHolder(method.getDeclaringClass())) {
+ 432             return method;
+ 433         }
+ 434         if (!method.getDeclaringClass().isAssignableFrom(this)) {
+ 435             return null;
+ 436         }
+ 437         HotSpotResolvedJavaMethodImpl hotSpotMethod = (HotSpotResolvedJavaMethodImpl) method;
+ 438         HotSpotResolvedObjectTypeImpl hotSpotCallerType = (HotSpotResolvedObjectTypeImpl) callerType;
+ 439         return compilerToVM().resolveMethod(this, hotSpotMethod, hotSpotCallerType);
+ 440     }
+ 441 
+ 442     public HotSpotConstantPool getConstantPool() {
+ 443         if (constantPool == null || !isArray() &amp;&amp; UNSAFE.getAddress(getMetaspaceKlass() + config().instanceKlassConstantsOffset) != constantPool.getMetaspaceConstantPool()) {
+ 444             /*
+ 445              * If the pointer to the ConstantPool has changed since this was last read refresh the
+ 446              * HotSpotConstantPool wrapper object. This ensures that uses of the constant pool are
+ 447              * operating on the latest one and that HotSpotResolvedJavaMethodImpls will be able to
+ 448              * use the shared copy instead of creating their own instance.
+ 449              */
+ 450             constantPool = compilerToVM().getConstantPool(this);
+ 451         }
+ 452         return constantPool;
+ 453     }
+ 454 
+ 455     /**
+ 456      * Gets the instance size of this type. If an instance of this type cannot be fast path
+ 457      * allocated, then the returned value is negative (its absolute value gives the size). Must not
+ 458      * be called if this is an array or interface type.
+ 459      */
+ 460     public int instanceSize() {
+ 461         assert !isArray();
+ 462         assert !isInterface();
+ 463 
+ 464         HotSpotVMConfig config = config();
+ 465         final int layoutHelper = layoutHelper();
+ 466         assert layoutHelper &gt; config.klassLayoutHelperNeutralValue : "must be instance";
+ 467 
+ 468         // See: Klass::layout_helper_size_in_bytes
+ 469         int size = layoutHelper &amp; ~config.klassLayoutHelperInstanceSlowPathBit;
+ 470 
+ 471         // See: Klass::layout_helper_needs_slow_path
+ 472         boolean needsSlowPath = (layoutHelper &amp; config.klassLayoutHelperInstanceSlowPathBit) != 0;
+ 473 
+ 474         return needsSlowPath ? -size : size;
+ 475     }
+ 476 
+ 477     public int layoutHelper() {
+ 478         HotSpotVMConfig config = config();
+ 479         return UNSAFE.getInt(getMetaspaceKlass() + config.klassLayoutHelperOffset);
+ 480     }
+ 481 
+ 482     @Override
+ 483     public long getFingerprint() {
+ 484         return compilerToVM().getFingerprint(getMetaspaceKlass());
+ 485     }
+ 486 
+ 487     synchronized HotSpotResolvedJavaMethod createMethod(long metaspaceMethod) {
+ 488         // Maintain cache as array.
+ 489         if (methodCacheArray == null) {
+ 490             methodCacheArray = new HotSpotResolvedJavaMethodImpl[METHOD_CACHE_ARRAY_CAPACITY];
+ 491         }
+ 492 
+ 493         int i = 0;
+ 494         for (; i &lt; methodCacheArray.length; ++i) {
+ 495             HotSpotResolvedJavaMethodImpl curMethod = methodCacheArray[i];
+ 496             if (curMethod == null) {
+ 497                 HotSpotResolvedJavaMethodImpl newMethod = new HotSpotResolvedJavaMethodImpl(this, metaspaceMethod);
+ 498                 methodCacheArray[i] = newMethod;
+ 499                 context.add(newMethod);
+ 500                 return newMethod;
+ 501             } else if (curMethod.getMetaspacePointer() == metaspaceMethod) {
+ 502                 return curMethod;
+ 503             }
+ 504         }
+ 505 
+ 506         // Fall-back to hash table.
+ 507         if (methodCacheHashMap == null) {
+ 508             methodCacheHashMap = new HashMap&lt;&gt;();
+ 509         }
+ 510 
+ 511         HotSpotResolvedJavaMethodImpl lookupResult = methodCacheHashMap.get(metaspaceMethod);
+ 512         if (lookupResult == null) {
+ 513             HotSpotResolvedJavaMethodImpl newMethod = new HotSpotResolvedJavaMethodImpl(this, metaspaceMethod);
+ 514             methodCacheHashMap.put(metaspaceMethod, newMethod);
+ 515             context.add(lookupResult);
+ 516             return newMethod;
+ 517         } else {
+ 518             return lookupResult;
+ 519         }
+ 520     }
+ 521 
+ 522     public int getVtableLength() {
+ 523         HotSpotVMConfig config = config();
+ 524         if (isInterface() || isArray()) {
+ 525             /* Everything has the core vtable of java.lang.Object */
+ 526             return config.baseVtableLength();
+ 527         }
+ 528         int result = UNSAFE.getInt(getMetaspaceKlass() + config.klassVtableLengthOffset) / (config.vtableEntrySize / config.heapWordSize);
+ 529         assert result &gt;= config.baseVtableLength() : UNSAFE.getInt(getMetaspaceKlass() + config.klassVtableLengthOffset) + " " + config.vtableEntrySize;
+ 530         return result;
+ 531     }
+ 532 
+ 533     synchronized HotSpotResolvedJavaField createField(JavaType type, long offset, int rawFlags, int index) {
+ 534         return new HotSpotResolvedJavaFieldImpl(this, type, offset, rawFlags, index);
+ 535     }
+ 536 
+ 537     @Override
+ 538     public AssumptionResult&lt;ResolvedJavaMethod&gt; findUniqueConcreteMethod(ResolvedJavaMethod method) {
+ 539         HotSpotResolvedJavaMethod hmethod = (HotSpotResolvedJavaMethod) method;
+ 540         HotSpotResolvedObjectType declaredHolder = hmethod.getDeclaringClass();
+ 541         /*
+ 542          * Sometimes the receiver type in the graph hasn't stabilized to a subtype of declared
+ 543          * holder, usually because of phis, so make sure that the type is related to the declared
+ 544          * type before using it for lookup. Unlinked types should also be ignored because we can't
+ 545          * resolve the proper method to invoke. Generally unlinked types in invokes should result in
+ 546          * a deopt instead since they can't really be used if they aren't linked yet.
+ 547          */
+ 548         if (!declaredHolder.isAssignableFrom(this) || this.isArray() || this.equals(declaredHolder) || !isLinked() || isInterface()) {
+ 549             ResolvedJavaMethod result = hmethod.uniqueConcreteMethod(declaredHolder);
+ 550             if (result != null) {
+ 551                 return new AssumptionResult&lt;&gt;(result, new ConcreteMethod(method, declaredHolder, result));
+ 552             }
+ 553             return null;
+ 554         }
+ 555         /*
+ 556          * The holder may be a subtype of the declaredHolder so make sure to resolve the method to
+ 557          * the correct method for the subtype.
+ 558          */
+ 559         HotSpotResolvedJavaMethod resolvedMethod = (HotSpotResolvedJavaMethod) resolveMethod(hmethod, this);
+ 560         if (resolvedMethod == null) {
+ 561             // The type isn't known to implement the method.
+ 562             return null;
+ 563         }
+ 564 
+ 565         ResolvedJavaMethod result = resolvedMethod.uniqueConcreteMethod(this);
+ 566         if (result != null) {
+ 567             return new AssumptionResult&lt;&gt;(result, new ConcreteMethod(method, this, result));
+ 568         }
+ 569         return null;
+ 570     }
+ 571 
+ 572     FieldInfo createFieldInfo(int index) {
+ 573         return new FieldInfo(index);
+ 574     }
+ 575 
+ 576     /**
+ 577      * This class represents the field information for one field contained in the fields array of an
+ 578      * {@code InstanceKlass}. The implementation is similar to the native {@code FieldInfo} class.
+ 579      */
+ 580     class FieldInfo {
+ 581         /**
+ 582          * Native pointer into the array of Java shorts.
+ 583          */
+ 584         private final long metaspaceData;
+ 585 
+ 586         /**
+ 587          * Creates a field info for the field in the fields array at index {@code index}.
+ 588          *
+ 589          * @param index index to the fields array
+ 590          */
+ 591         FieldInfo(int index) {
+ 592             HotSpotVMConfig config = config();
+ 593             // Get Klass::_fields
+ 594             final long metaspaceFields = UNSAFE.getAddress(getMetaspaceKlass() + config.instanceKlassFieldsOffset);
+ 595             assert config.fieldInfoFieldSlots == 6 : "revisit the field parsing code";
+ 596             int offset = config.fieldInfoFieldSlots * Short.BYTES * index;
+ 597             metaspaceData = metaspaceFields + config.arrayU2DataOffset + offset;
+ 598         }
+ 599 
+ 600         private int getAccessFlags() {
+ 601             return readFieldSlot(config().fieldInfoAccessFlagsOffset);
+ 602         }
+ 603 
+ 604         private int getNameIndex() {
+ 605             return readFieldSlot(config().fieldInfoNameIndexOffset);
+ 606         }
+ 607 
+ 608         private int getSignatureIndex() {
+ 609             return readFieldSlot(config().fieldInfoSignatureIndexOffset);
+ 610         }
+ 611 
+ 612         public int getOffset() {
+ 613             HotSpotVMConfig config = config();
+ 614             final int lowPacked = readFieldSlot(config.fieldInfoLowPackedOffset);
+ 615             final int highPacked = readFieldSlot(config.fieldInfoHighPackedOffset);
+ 616             final int offset = ((highPacked &lt;&lt; Short.SIZE) | lowPacked) &gt;&gt; config.fieldInfoTagSize;
+ 617             return offset;
+ 618         }
+ 619 
+ 620         /**
+ 621          * Helper method to read an entry (slot) from the field array. Currently field info is laid
+ 622          * on top an array of Java shorts.
+ 623          */
+ 624         private int readFieldSlot(int index) {
+ 625             int offset = Short.BYTES * index;
+ 626             return UNSAFE.getChar(metaspaceData + offset);
+ 627         }
+ 628 
+ 629         /**
+ 630          * Returns the name of this field as a {@link String}. If the field is an internal field the
+ 631          * name index is pointing into the vmSymbols table.
+ 632          */
+ 633         public String getName() {
+ 634             final int nameIndex = getNameIndex();
+ 635             return isInternal() ? config().symbolAt(nameIndex) : getConstantPool().lookupUtf8(nameIndex);
+ 636         }
+ 637 
+ 638         /**
+ 639          * Returns the signature of this field as {@link String}. If the field is an internal field
+ 640          * the signature index is pointing into the vmSymbols table.
+ 641          */
+ 642         public String getSignature() {
+ 643             final int signatureIndex = getSignatureIndex();
+ 644             return isInternal() ? config().symbolAt(signatureIndex) : getConstantPool().lookupUtf8(signatureIndex);
+ 645         }
+ 646 
+ 647         public JavaType getType() {
+ 648             String signature = getSignature();
+ 649             return runtime().lookupType(signature, HotSpotResolvedObjectTypeImpl.this, false);
+ 650         }
+ 651 
+ 652         private boolean isInternal() {
+ 653             return (getAccessFlags() &amp; config().jvmAccFieldInternal) != 0;
+ 654         }
+ 655 
+ 656         public boolean isStatic() {
+ 657             return Modifier.isStatic(getAccessFlags());
+ 658         }
+ 659 
+ 660         public boolean hasGenericSignature() {
+ 661             return (getAccessFlags() &amp; config().jvmAccFieldHasGenericSignature) != 0;
+ 662         }
+ 663     }
+ 664 
+ 665     @Override
+ 666     public ResolvedJavaField[] getInstanceFields(boolean includeSuperclasses) {
+ 667         if (instanceFields == null) {
+ 668             if (isArray() || isInterface()) {
+ 669                 instanceFields = NO_FIELDS;
+ 670             } else {
+ 671                 HotSpotResolvedJavaField[] prepend = NO_FIELDS;
+ 672                 if (getSuperclass() != null) {
+ 673                     prepend = (HotSpotResolvedJavaField[]) getSuperclass().getInstanceFields(true);
+ 674                 }
+ 675                 instanceFields = getFields(false, prepend);
+ 676             }
+ 677         }
+ 678         if (!includeSuperclasses &amp;&amp; getSuperclass() != null) {
+ 679             int superClassFieldCount = getSuperclass().getInstanceFields(true).length;
+ 680             if (superClassFieldCount == instanceFields.length) {
+ 681                 // This class does not have any instance fields of its own.
+ 682                 return NO_FIELDS;
+ 683             } else if (superClassFieldCount != 0) {
+ 684                 HotSpotResolvedJavaField[] result = new HotSpotResolvedJavaField[instanceFields.length - superClassFieldCount];
+ 685                 System.arraycopy(instanceFields, superClassFieldCount, result, 0, result.length);
+ 686                 return result;
+ 687             } else {
+ 688                 // The super classes of this class do not have any instance fields.
+ 689             }
+ 690         }
+ 691         return instanceFields;
+ 692     }
+ 693 
+ 694     @Override
+ 695     public ResolvedJavaField[] getStaticFields() {
+ 696         if (isArray()) {
+ 697             return new HotSpotResolvedJavaField[0];
+ 698         } else {
+ 699             return getFields(true, NO_FIELDS);
+ 700         }
+ 701     }
+ 702 
+ 703     /**
+ 704      * Gets the instance or static fields of this class.
+ 705      *
+ 706      * @param retrieveStaticFields specifies whether to return instance or static fields
+ 707      * @param prepend an array to be prepended to the returned result
+ 708      */
+ 709     private HotSpotResolvedJavaField[] getFields(boolean retrieveStaticFields, HotSpotResolvedJavaField[] prepend) {
+ 710         HotSpotVMConfig config = config();
+ 711         final long metaspaceFields = UNSAFE.getAddress(getMetaspaceKlass() + config.instanceKlassFieldsOffset);
+ 712         int metaspaceFieldsLength = UNSAFE.getInt(metaspaceFields + config.arrayU1LengthOffset);
+ 713         int resultCount = 0;
+ 714         int index = 0;
+ 715         for (int i = 0; i &lt; metaspaceFieldsLength; i += config.fieldInfoFieldSlots, index++) {
+ 716             FieldInfo field = new FieldInfo(index);
+ 717             if (field.hasGenericSignature()) {
+ 718                 metaspaceFieldsLength--;
+ 719             }
+ 720 
+ 721             if (field.isStatic() == retrieveStaticFields) {
+ 722                 resultCount++;
+ 723             }
+ 724         }
+ 725 
+ 726         if (resultCount == 0) {
+ 727             return prepend;
+ 728         }
+ 729 
+ 730         int prependLength = prepend.length;
+ 731         resultCount += prependLength;
+ 732 
+ 733         HotSpotResolvedJavaField[] result = new HotSpotResolvedJavaField[resultCount];
+ 734         if (prependLength != 0) {
+ 735             System.arraycopy(prepend, 0, result, 0, prependLength);
+ 736         }
+ 737 
+ 738         int resultIndex = prependLength;
+ 739         for (int i = 0; i &lt; index; ++i) {
+ 740             FieldInfo field = new FieldInfo(i);
+ 741             if (field.isStatic() == retrieveStaticFields) {
+ 742                 int offset = field.getOffset();
+ 743                 HotSpotResolvedJavaField resolvedJavaField = createField(field.getType(), offset, field.getAccessFlags(), i);
+ 744 
+ 745                 // Make sure the result is sorted by offset.
+ 746                 int j;
+ 747                 for (j = resultIndex - 1; j &gt;= prependLength &amp;&amp; result[j].offset() &gt; offset; j--) {
+ 748                     result[j + 1] = result[j];
+ 749                 }
+ 750                 result[j + 1] = resolvedJavaField;
+ 751                 resultIndex++;
+ 752             }
+ 753         }
+ 754 
+ 755         return result;
+ 756     }
+ 757 
+ 758     @Override
+ 759     public Class&lt;?&gt; mirror() {
+ 760         return javaClass;
+ 761     }
+ 762 
+ 763     @Override
+ 764     public String getSourceFileName() {
+ 765         HotSpotVMConfig config = config();
+ 766         final int sourceFileNameIndex = UNSAFE.getChar(getMetaspaceKlass() + config.instanceKlassSourceFileNameIndexOffset);
+ 767         if (sourceFileNameIndex == 0) {
+ 768             return null;
+ 769         }
+ 770         return getConstantPool().lookupUtf8(sourceFileNameIndex);
+ 771     }
+ 772 
+ 773     @Override
+ 774     public Annotation[] getAnnotations() {
+ 775         return mirror().getAnnotations();
+ 776     }
+ 777 
+ 778     @Override
+ 779     public Annotation[] getDeclaredAnnotations() {
+ 780         return mirror().getDeclaredAnnotations();
+ 781     }
+ 782 
+ 783     @Override
+ 784     public &lt;T extends Annotation&gt; T getAnnotation(Class&lt;T&gt; annotationClass) {
+ 785         return mirror().getAnnotation(annotationClass);
+ 786     }
+ 787 
+ 788     /**
+ 789      * Performs a fast-path check that this type is resolved in the context of a given accessing
+ 790      * class. A negative result does not mean this type is not resolved with respect to
+ 791      * {@code accessingClass}. That can only be determined by
+ 792      * {@linkplain HotSpotJVMCIRuntime#lookupType(String, HotSpotResolvedObjectType, boolean)
+ 793      * re-resolving} the type.
+ 794      */
+ 795     public boolean isDefinitelyResolvedWithRespectTo(ResolvedJavaType accessingClass) {
+ 796         assert accessingClass != null;
+ 797         ResolvedJavaType elementType = getElementalType();
+ 798         if (elementType.isPrimitive()) {
+ 799             // Primitive type resolution is context free.
+ 800             return true;
+ 801         }
+ 802         if (elementType.getName().startsWith("Ljava/")) {
+ 803             // Classes in a java.* package can only be defined by the
+ 804             // boot class loader. This is enforced by ClassLoader.preDefineClass()
+ 805             assert mirror().getClassLoader() == null;
+ 806             return true;
+ 807         }
+ 808         ClassLoader thisCl = mirror().getClassLoader();
+ 809         ClassLoader accessingClassCl = ((HotSpotResolvedObjectTypeImpl) accessingClass).mirror().getClassLoader();
+ 810         return thisCl == accessingClassCl;
+ 811     }
+ 812 
+ 813     @Override
+ 814     public ResolvedJavaType resolve(ResolvedJavaType accessingClass) {
+ 815         if (isDefinitelyResolvedWithRespectTo(requireNonNull(accessingClass))) {
+ 816             return this;
+ 817         }
+ 818         HotSpotResolvedObjectTypeImpl accessingType = (HotSpotResolvedObjectTypeImpl) accessingClass;
+ 819         return (ResolvedJavaType) runtime().lookupType(getName(), accessingType, true);
+ 820     }
+ 821 
+ 822     /**
+ 823      * Gets the metaspace Klass boxed in a {@link JavaConstant}.
+ 824      */
+ 825     public Constant klass() {
+ 826         return HotSpotMetaspaceConstantImpl.forMetaspaceObject(this, false);
+ 827     }
+ 828 
+ 829     public boolean isPrimaryType() {
+ 830         return config().secondarySuperCacheOffset != superCheckOffset();
+ 831     }
+ 832 
+ 833     public int superCheckOffset() {
+ 834         HotSpotVMConfig config = config();
+ 835         return UNSAFE.getInt(getMetaspaceKlass() + config.superCheckOffsetOffset);
+ 836     }
+ 837 
+ 838     public long prototypeMarkWord() {
+ 839         HotSpotVMConfig config = config();
+ 840         if (isArray()) {
+ 841             return config.arrayPrototypeMarkWord();
+ 842         } else {
+ 843             return UNSAFE.getAddress(getMetaspaceKlass() + config.prototypeMarkWordOffset);
+ 844         }
+ 845     }
+ 846 
+ 847     @Override
+ 848     public ResolvedJavaField findInstanceFieldWithOffset(long offset, JavaKind expectedEntryKind) {
+ 849         ResolvedJavaField[] declaredFields = getInstanceFields(true);
+ 850         return findFieldWithOffset(offset, expectedEntryKind, declaredFields);
+ 851     }
+ 852 
+ 853     public ResolvedJavaField findStaticFieldWithOffset(long offset, JavaKind expectedEntryKind) {
+ 854         ResolvedJavaField[] declaredFields = getStaticFields();
+ 855         return findFieldWithOffset(offset, expectedEntryKind, declaredFields);
+ 856     }
+ 857 
+ 858     private static ResolvedJavaField findFieldWithOffset(long offset, JavaKind expectedEntryKind, ResolvedJavaField[] declaredFields) {
+ 859         for (ResolvedJavaField field : declaredFields) {
+ 860             HotSpotResolvedJavaField resolvedField = (HotSpotResolvedJavaField) field;
+ 861             long resolvedFieldOffset = resolvedField.offset();
+ 862             // @formatter:off
+ 863             if (ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN  &amp;&amp;
+ 864                             expectedEntryKind.isPrimitive() &amp;&amp;
+ 865                             !expectedEntryKind.equals(JavaKind.Void) &amp;&amp;
+ 866                             resolvedField.getJavaKind().isPrimitive()) {
+ 867                 resolvedFieldOffset +=
+ 868                                 resolvedField.getJavaKind().getByteCount() -
+ 869                                 Math.min(resolvedField.getJavaKind().getByteCount(), 4 + expectedEntryKind.getByteCount());
+ 870             }
+ 871             if (resolvedFieldOffset == offset) {
+ 872                 return field;
+ 873             }
+ 874             // @formatter:on
+ 875         }
+ 876         return null;
+ 877     }
+ 878 
+ 879     @Override
+ 880     public boolean isLocal() {
+ 881         return mirror().isLocalClass();
+ 882     }
+ 883 
+ 884     @Override
+ 885     public boolean isMember() {
+ 886         return mirror().isMemberClass();
+ 887     }
+ 888 
+ 889     @Override
+ 890     public HotSpotResolvedObjectTypeImpl getEnclosingType() {
+ 891         final Class&lt;?&gt; encl = mirror().getEnclosingClass();
+ 892         return encl == null ? null : fromObjectClass(encl);
+ 893     }
+ 894 
+ 895     @Override
+ 896     public ResolvedJavaMethod[] getDeclaredConstructors() {
+ 897         Constructor&lt;?&gt;[] constructors = mirror().getDeclaredConstructors();
+ 898         ResolvedJavaMethod[] result = new ResolvedJavaMethod[constructors.length];
+ 899         for (int i = 0; i &lt; constructors.length; i++) {
+ 900             result[i] = runtime().getHostJVMCIBackend().getMetaAccess().lookupJavaMethod(constructors[i]);
+ 901             assert result[i].isConstructor();
+ 902         }
+ 903         return result;
+ 904     }
+ 905 
+ 906     @Override
+ 907     public ResolvedJavaMethod[] getDeclaredMethods() {
+ 908         Method[] methods = mirror().getDeclaredMethods();
+ 909         ResolvedJavaMethod[] result = new ResolvedJavaMethod[methods.length];
+ 910         for (int i = 0; i &lt; methods.length; i++) {
+ 911             result[i] = runtime().getHostJVMCIBackend().getMetaAccess().lookupJavaMethod(methods[i]);
+ 912             assert !result[i].isConstructor();
+ 913         }
+ 914         return result;
+ 915     }
+ 916 
+ 917     public ResolvedJavaMethod getClassInitializer() {
+ 918         return compilerToVM().getClassInitializer(this);
+ 919     }
+ 920 
+ 921     @Override
+ 922     public String toString() {
+ 923         return "HotSpotType&lt;" + getName() + ", resolved&gt;";
+ 924     }
+ 925 
+ 926     @Override
+ 927     public boolean isCloneableWithAllocation() {
+ 928         return (getAccessFlags() &amp; config().jvmAccIsCloneableFast) != 0;
+ 929     }
+ 930 }
+</pre></body></html>

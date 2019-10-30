@@ -1,0 +1,384 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 1998, 2019, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #ifndef SHARE_COMPILER_COMPILETASK_HPP
+  26 #define SHARE_COMPILER_COMPILETASK_HPP
+  27 
+  28 #include "ci/ciMethod.hpp"
+  29 #include "code/nmethod.hpp"
+  30 #include "compiler/compileLog.hpp"
+  31 #include "memory/allocation.hpp"
+  32 #include "utilities/xmlstream.hpp"
+  33 
+  34 // CompileTask
+  35 //
+  36 // An entry in the compile queue.  It represents a pending or current
+  37 // compilation.
+  38 
+  39 class CompileTask : public CHeapObj&lt;mtCompiler&gt; {
+  40   friend class VMStructs;
+  41   friend class JVMCIVMStructs;
+  42 
+  43  public:
+  44   // Different reasons for a compilation
+  45   // The order is important - Reason_Whitebox and higher can not become
+  46   // stale, see CompileTask::can_become_stale()
+  47   // Also mapped to reason_names[]
+  48   enum CompileReason {
+  49       Reason_None,
+  50       Reason_InvocationCount,  // Simple/StackWalk-policy
+  51       Reason_BackedgeCount,    // Simple/StackWalk-policy
+  52       Reason_Tiered,           // Tiered-policy
+  53       Reason_CTW,              // Compile the world
+  54       Reason_Replay,           // ciReplay
+  55       Reason_Whitebox,         // Whitebox API
+  56       Reason_MustBeCompiled,   // Java callHelper, LinkResolver
+  57       Reason_Bootstrap,        // JVMCI bootstrap
+  58       Reason_Count
+  59   };
+  60 
+  61   static const char* reason_name(CompileTask::CompileReason compile_reason) {
+  62     static const char* reason_names[] = {
+  63       "no_reason",
+  64       "count",
+  65       "backedge_count",
+  66       "tiered",
+  67       "CTW",
+  68       "replay",
+  69       "whitebox",
+  70       "must_be_compiled",
+  71       "bootstrap"
+  72     };
+  73     return reason_names[compile_reason];
+  74   }
+  75 
+  76  private:
+  77   static CompileTask* _task_free_list;
+  78 #ifdef ASSERT
+  79   static int          _num_allocated_tasks;
+  80 #endif
+  81 
+  82   Monitor*     _lock;
+  83   uint         _compile_id;
+  84   Method*      _method;
+  85   jobject      _method_holder;
+  86   int          _osr_bci;
+  87   bool         _is_complete;
+  88   bool         _is_success;
+  89   bool         _is_blocking;
+  90 #if INCLUDE_JVMCI
+  91   bool         _has_waiter;
+  92   // Compiler thread for a blocking JVMCI compilation
+  93   CompilerThread* _jvmci_compiler_thread;
+  94 #endif
+  95   int          _comp_level;
+  96   int          _num_inlined_bytecodes;
+  97   nmethodLocker* _code_handle;  // holder of eventual result
+  98   CompileTask* _next, *_prev;
+  99   bool         _is_free;
+ 100   // Fields used for logging why the compilation was initiated:
+ 101   jlong        _time_queued;  // in units of os::elapsed_counter()
+ 102   Method*      _hot_method;   // which method actually triggered this task
+ 103   jobject      _hot_method_holder;
+ 104   int          _hot_count;    // information about its invocation counter
+ 105   CompileReason _compile_reason;      // more info about the task
+ 106   const char*  _failure_reason;
+<a name="1" id="anc1"></a><span class="new"> 107   // Specifies if _failure_reason is on the C heap.</span>
+<span class="new"> 108   bool         _failure_reason_on_C_heap;</span>
+ 109 
+ 110  public:
+<a name="2" id="anc2"></a><span class="changed"> 111   CompileTask() : _failure_reason(NULL), _failure_reason_on_C_heap(false) {</span>
+ 112     _lock = new Monitor(Mutex::nonleaf+2, "CompileTaskLock");
+ 113   }
+ 114 
+ 115   void initialize(int compile_id, const methodHandle&amp; method, int osr_bci, int comp_level,
+ 116                   const methodHandle&amp; hot_method, int hot_count,
+ 117                   CompileTask::CompileReason compile_reason, bool is_blocking);
+ 118 
+ 119   static CompileTask* allocate();
+ 120   static void         free(CompileTask* task);
+ 121 
+ 122   int          compile_id() const                { return _compile_id; }
+ 123   Method*      method() const                    { return _method; }
+ 124   Method*      hot_method() const                { return _hot_method; }
+ 125   int          osr_bci() const                   { return _osr_bci; }
+ 126   bool         is_complete() const               { return _is_complete; }
+ 127   bool         is_blocking() const               { return _is_blocking; }
+ 128   bool         is_success() const                { return _is_success; }
+ 129   bool         can_become_stale() const          {
+ 130     switch (_compile_reason) {
+ 131       case Reason_BackedgeCount:
+ 132       case Reason_InvocationCount:
+ 133       case Reason_Tiered:
+ 134         return !_is_blocking;
+ 135       default:
+ 136         return false;
+ 137     }
+ 138   }
+ 139 #if INCLUDE_JVMCI
+ 140   bool         has_waiter() const                { return _has_waiter; }
+ 141   void         clear_waiter()                    { _has_waiter = false; }
+ 142   CompilerThread* jvmci_compiler_thread() const  { return _jvmci_compiler_thread; }
+ 143   void         set_jvmci_compiler_thread(CompilerThread* t) {
+ 144     assert(is_blocking(), "must be");
+ 145     assert((t == NULL) != (_jvmci_compiler_thread == NULL), "must be");
+ 146     _jvmci_compiler_thread = t;
+ 147   }
+ 148 #endif
+ 149 
+ 150   nmethodLocker* code_handle() const             { return _code_handle; }
+ 151   void         set_code_handle(nmethodLocker* l) { _code_handle = l; }
+ 152   nmethod*     code() const;                     // _code_handle-&gt;code()
+ 153   void         set_code(nmethod* nm);            // _code_handle-&gt;set_code(nm)
+ 154 
+ 155   Monitor*     lock() const                      { return _lock; }
+ 156 
+ 157   void         mark_complete()                   { _is_complete = true; }
+ 158   void         mark_success()                    { _is_success = true; }
+ 159 
+ 160   int          comp_level()                      { return _comp_level;}
+ 161   void         set_comp_level(int comp_level)    { _comp_level = comp_level;}
+ 162 
+ 163   AbstractCompiler* compiler();
+ 164 
+ 165   int          num_inlined_bytecodes() const     { return _num_inlined_bytecodes; }
+ 166   void         set_num_inlined_bytecodes(int n)  { _num_inlined_bytecodes = n; }
+ 167 
+ 168   CompileTask* next() const                      { return _next; }
+ 169   void         set_next(CompileTask* next)       { _next = next; }
+ 170   CompileTask* prev() const                      { return _prev; }
+ 171   void         set_prev(CompileTask* prev)       { _prev = prev; }
+ 172   bool         is_free() const                   { return _is_free; }
+ 173   void         set_is_free(bool val)             { _is_free = val; }
+ 174 
+ 175   // RedefineClasses support
+ 176   void         metadata_do(void f(Metadata*));
+ 177   void         mark_on_stack();
+ 178 
+ 179 private:
+ 180   static void  print_impl(outputStream* st, Method* method, int compile_id, int comp_level,
+ 181                                       bool is_osr_method = false, int osr_bci = -1, bool is_blocking = false,
+ 182                                       const char* msg = NULL, bool short_form = false, bool cr = true);
+ 183 
+ 184 public:
+ 185   void         print(outputStream* st = tty, const char* msg = NULL, bool short_form = false, bool cr = true);
+ 186   void         print_ul(const char* msg = NULL);
+ 187   static void  print(outputStream* st, const nmethod* nm, const char* msg = NULL, bool short_form = false, bool cr = true) {
+ 188     print_impl(st, nm-&gt;method(), nm-&gt;compile_id(), nm-&gt;comp_level(),
+ 189                            nm-&gt;is_osr_method(), nm-&gt;is_osr_method() ? nm-&gt;osr_entry_bci() : -1, /*is_blocking*/ false,
+ 190                            msg, short_form, cr);
+ 191   }
+ 192   static void  print_ul(const nmethod* nm, const char* msg = NULL);
+ 193 
+ 194   static void  print_inline_indent(int inline_level, outputStream* st = tty);
+ 195 
+ 196   void         print_tty();
+ 197   void         print_line_on_error(outputStream* st, char* buf, int buflen);
+ 198 
+ 199   void         log_task(xmlStream* log);
+ 200   void         log_task_queued();
+ 201   void         log_task_start(CompileLog* log);
+ 202   void         log_task_done(CompileLog* log);
+ 203 
+<a name="3" id="anc3"></a><span class="changed"> 204   void         set_failure_reason(const char* reason, bool on_C_heap = false) {</span>
+ 205     _failure_reason = reason;
+<a name="4" id="anc4"></a><span class="new"> 206     _failure_reason_on_C_heap = on_C_heap;</span>
+ 207   }
+ 208 
+ 209   bool         check_break_at_flags();
+ 210 
+ 211   static void print_inlining_inner(outputStream* st, ciMethod* method, int inline_level, int bci, const char* msg = NULL);
+ 212   static void print_inlining_tty(ciMethod* method, int inline_level, int bci, const char* msg = NULL) {
+ 213     print_inlining_inner(tty, method, inline_level, bci, msg);
+ 214   }
+ 215   static void print_inlining_ul(ciMethod* method, int inline_level, int bci, const char* msg = NULL);
+ 216 };
+ 217 
+ 218 #endif // SHARE_COMPILER_COMPILETASK_HPP
+<a name="5" id="anc5"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="5" type="hidden" /></form></body></html>

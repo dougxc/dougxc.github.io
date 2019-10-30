@@ -1,0 +1,708 @@
+# HG changeset patch
+# User dnsimon
+# Date 1476137300 -7200
+#      Tue Oct 11 00:08:20 2016 +0200
+# Node ID 640e2299e0692a0fce81a7fce006299299633ea6
+# Parent  b1c62e595c4ac0a3256296b8c13d871db9003fe8
+8167180: [JVMCI] Exported elements referring to inaccessible types in jdk.vm.ci
+
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/EmptyEventProvider.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/EmptyEventProvider.java
+rename from src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/EmptyEventProvider.java
+rename to src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/EmptyEventProvider.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/EmptyEventProvider.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/EmptyEventProvider.java
+@@ -20,17 +20,13 @@
+  * or visit www.oracle.com if you need additional information or have any
+  * questions.
+  */
+-package jdk.vm.ci.hotspot.services;
++package jdk.vm.ci.hotspot;
+ 
+ /**
+  * An empty implementation for {@link EventProvider}. This implementation is used when no logging is
+  * requested.
+  */
+-final class EmptyEventProvider extends EventProvider {
+-
+-    EmptyEventProvider() {
+-        super(null);
+-    }
++final class EmptyEventProvider implements EventProvider {
+ 
+     static InternalError shouldNotReachHere() {
+         throw new InternalError("should not reach here");
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/EventProvider.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/EventProvider.java
+rename from src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/EventProvider.java
+rename to src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/EventProvider.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/EventProvider.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/EventProvider.java
+@@ -20,58 +20,36 @@
+  * or visit www.oracle.com if you need additional information or have any
+  * questions.
+  */
+-package jdk.vm.ci.hotspot.services;
++package jdk.vm.ci.hotspot;
+ 
+-import jdk.vm.ci.hotspot.services.EmptyEventProvider.EmptyCompilationEvent;
+-import jdk.vm.ci.hotspot.services.EmptyEventProvider.EmptyCompilerFailureEvent;
++import jdk.vm.ci.hotspot.EmptyEventProvider.EmptyCompilationEvent;
++import jdk.vm.ci.hotspot.EmptyEventProvider.EmptyCompilerFailureEvent;
+ import jdk.vm.ci.services.JVMCIPermission;
+ 
+ /**
+  * Service-provider class for logging compiler related events.
+  */
+-public abstract class EventProvider {
+-
+-    private static Void checkPermission() {
+-        SecurityManager sm = System.getSecurityManager();
+-        if (sm != null) {
+-            sm.checkPermission(new JVMCIPermission());
+-        }
+-        return null;
+-    }
+-
+-    @SuppressWarnings("unused")
+-    EventProvider(Void ignore) {
+-    }
+-
+-    /**
+-     * Initializes a new instance of this class.
+-     *
+-     * @throws SecurityException if a security manager has been installed and it denies
+-     *             {@link JVMCIPermission}
+-     */
+-    protected EventProvider() {
+-        this(checkPermission());
+-    }
++public interface EventProvider {
+ 
+     /**
+      * Creates and returns an empty implementation for {@link EventProvider}. This implementation
+      * can be used when no logging is requested.
+      */
+-    public static EventProvider createEmptyEventProvider() {
++    static EventProvider createEmptyEventProvider() {
+         return new EmptyEventProvider();
+     }
+ 
+     /**
+      * Creates and returns an empty implementation for {@link CompilationEvent}.
+      */
+-    public static CompilationEvent createEmptyCompilationEvent() {
++    static CompilationEvent createEmptyCompilationEvent() {
+         return new EmptyCompilationEvent();
+     }
+ 
+     /**
+      * Creates and returns an empty implementation for {@link CompilationEvent}.
+      */
+-    public static CompilerFailureEvent createEmptyCompilerFailureEvent() {
++    static CompilerFailureEvent createEmptyCompilerFailureEvent() {
+         return new EmptyCompilerFailureEvent();
+     }
+ 
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java
+@@ -26,8 +26,10 @@
+ import jdk.vm.ci.common.JVMCIError;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.Option;
+ import jdk.vm.ci.runtime.JVMCICompiler;
++import jdk.vm.ci.runtime.JVMCICompilerFactory;
+ import jdk.vm.ci.runtime.JVMCIRuntime;
+-import jdk.vm.ci.runtime.services.JVMCICompilerFactory;
++import jdk.vm.ci.services.JVMCIServiceLocator;
++import jdk.vm.ci.services.JVMCIPermission;
+ import jdk.vm.ci.services.Services;
+ 
+ final class HotSpotJVMCICompilerConfig {
+@@ -37,7 +39,7 @@
+      * to perform a compilation. This allows the reflective parts of the JVMCI API to be used
+      * without requiring a compiler implementation to be available.
+      */
+-    private static class DummyCompilerFactory extends JVMCICompilerFactory implements JVMCICompiler {
++    private static class DummyCompilerFactory implements JVMCICompilerFactory, JVMCICompiler {
+ 
+         public HotSpotCompilationRequestResult compileMethod(CompilationRequest request) {
+             throw new JVMCIError("no JVMCI compiler selected");
+@@ -63,15 +65,16 @@
+      * Gets the selected system compiler factory.
+      *
+      * @return the selected system compiler factory
++     * @throws SecurityException if a security manager is present and it denies
++     *             {@link JVMCIPermission} for any {@link JVMCIServiceLocator} loaded by this method
+      */
+     static JVMCICompilerFactory getCompilerFactory() {
+         if (compilerFactory == null) {
+             JVMCICompilerFactory factory = null;
+             String compilerName = Option.Compiler.getString();
+             if (compilerName != null) {
+-                for (JVMCICompilerFactory f : Services.load(JVMCICompilerFactory.class)) {
++                for (JVMCICompilerFactory f : JVMCIServiceLocator.getProviders(JVMCICompilerFactory.class)) {
+                     if (f.getCompilerName().equals(compilerName)) {
+-                        Services.exportJVMCITo(f.getClass());
+                         factory = f;
+                     }
+                 }
+@@ -80,7 +83,7 @@
+                 }
+             } else {
+                 // Auto select a single available compiler
+-                for (JVMCICompilerFactory f : Services.load(JVMCICompilerFactory.class)) {
++                for (JVMCICompilerFactory f : JVMCIServiceLocator.getProviders(JVMCICompilerFactory.class)) {
+                     if (factory == null) {
+                         factory = f;
+                     } else {
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/HotSpotJVMCICompilerFactory.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerFactory.java
+rename from src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/HotSpotJVMCICompilerFactory.java
+rename to src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerFactory.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/HotSpotJVMCICompilerFactory.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerFactory.java
+@@ -20,14 +20,14 @@
+  * or visit www.oracle.com if you need additional information or have any
+  * questions.
+  */
+-package jdk.vm.ci.hotspot.services;
++package jdk.vm.ci.hotspot;
+ 
+-import jdk.vm.ci.runtime.services.JVMCICompilerFactory;
++import jdk.vm.ci.runtime.JVMCICompilerFactory;
+ 
+ /**
+  * HotSpot extensions to {@link JVMCICompilerFactory}.
+  */
+-public abstract class HotSpotJVMCICompilerFactory extends JVMCICompilerFactory {
++public abstract class HotSpotJVMCICompilerFactory implements JVMCICompilerFactory {
+ 
+     /**
+      * Gets 0 or more prefixes identifying classes that should by compiled by C1 in simple mode
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java
+@@ -27,13 +27,11 @@
+ import java.io.IOException;
+ import java.io.OutputStream;
+ import java.io.PrintStream;
+-import java.util.ArrayList;
+ import java.util.Collections;
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Objects;
+-import java.util.ServiceLoader;
+ import java.util.TreeMap;
+ 
+ import jdk.internal.misc.VM;
+@@ -43,16 +41,15 @@
+ import jdk.vm.ci.code.InstalledCode;
+ import jdk.vm.ci.common.InitTimer;
+ import jdk.vm.ci.common.JVMCIError;
+-import jdk.vm.ci.hotspot.services.HotSpotJVMCICompilerFactory;
+-import jdk.vm.ci.hotspot.services.HotSpotJVMCICompilerFactory.CompilationLevel;
+-import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
++import jdk.vm.ci.hotspot.HotSpotJVMCICompilerFactory.CompilationLevel;
+ import jdk.vm.ci.meta.JavaKind;
+ import jdk.vm.ci.meta.JavaType;
+ import jdk.vm.ci.meta.ResolvedJavaType;
+ import jdk.vm.ci.runtime.JVMCI;
+ import jdk.vm.ci.runtime.JVMCIBackend;
+ import jdk.vm.ci.runtime.JVMCICompiler;
+-import jdk.vm.ci.runtime.services.JVMCICompilerFactory;
++import jdk.vm.ci.runtime.JVMCICompilerFactory;
++import jdk.vm.ci.services.JVMCIServiceLocator;
+ import jdk.vm.ci.services.Services;
+ 
+ /**
+@@ -246,11 +243,7 @@
+         if (vmEventListeners == null) {
+             synchronized (this) {
+                 if (vmEventListeners == null) {
+-                    List<HotSpotVMEventListener> listeners = new ArrayList<>();
+-                    for (HotSpotVMEventListener vmEventListener : ServiceLoader.load(HotSpotVMEventListener.class)) {
+-                        listeners.add(vmEventListener);
+-                    }
+-                    vmEventListeners = listeners;
++                    vmEventListeners = JVMCIServiceLocator.getProviders(HotSpotVMEventListener.class);
+                 }
+             }
+         }
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/HotSpotVMEventListener.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMEventListener.java
+rename from src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/HotSpotVMEventListener.java
+rename to src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMEventListener.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/HotSpotVMEventListener.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMEventListener.java
+@@ -20,59 +20,35 @@
+  * or visit www.oracle.com if you need additional information or have any
+  * questions.
+  */
+-package jdk.vm.ci.hotspot.services;
++package jdk.vm.ci.hotspot;
+ 
+ import jdk.vm.ci.code.CompiledCode;
+ import jdk.vm.ci.code.InstalledCode;
+-import jdk.vm.ci.hotspot.HotSpotCodeCacheProvider;
+-import jdk.vm.ci.services.JVMCIPermission;
+ 
+ /**
+- * Service-provider class for responding to VM events.
++ * Listener for responding to VM events.
+  */
+-public abstract class HotSpotVMEventListener {
+-
+-    private static Void checkPermission() {
+-        SecurityManager sm = System.getSecurityManager();
+-        if (sm != null) {
+-            sm.checkPermission(new JVMCIPermission());
+-        }
+-        return null;
+-    }
+-
+-    @SuppressWarnings("unused")
+-    HotSpotVMEventListener(Void ignore) {
+-    }
+-
+-    /**
+-     * Initializes a new instance of this class.
+-     *
+-     * @throws SecurityException if a security manager has been installed and it denies
+-     *             {@link JVMCIPermission}
+-     */
+-    protected HotSpotVMEventListener() {
+-        this(checkPermission());
+-    }
++public interface HotSpotVMEventListener {
+ 
+     /**
+      * Notifies this client that the VM is shutting down.
+      */
+-    public void notifyShutdown() {
++    default void notifyShutdown() {
+     }
+ 
+     /**
+      * Notify on successful install into the code cache.
+      *
+-     * @param hotSpotCodeCacheProvider
+-     * @param installedCode
+-     * @param compiledCode
++     * @param hotSpotCodeCacheProvider the code cache into which the code was installed
++     * @param installedCode the code that was installed
++     * @param compiledCode the compiled code from which {@code installedCode} was produced
+      */
+-    public void notifyInstall(HotSpotCodeCacheProvider hotSpotCodeCacheProvider, InstalledCode installedCode, CompiledCode compiledCode) {
++    default void notifyInstall(HotSpotCodeCacheProvider hotSpotCodeCacheProvider, InstalledCode installedCode, CompiledCode compiledCode) {
+     }
+ 
+     /**
+      * Notify on completion of a bootstrap.
+      */
+-    public void notifyBootstrapFinished() {
++    default void notifyBootstrapFinished() {
+     }
+ }
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/services/JVMCICompilerFactory.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/JVMCICompilerFactory.java
+rename from src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/services/JVMCICompilerFactory.java
+rename to src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/JVMCICompilerFactory.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/services/JVMCICompilerFactory.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/JVMCICompilerFactory.java
+@@ -20,64 +20,38 @@
+  * or visit www.oracle.com if you need additional information or have any
+  * questions.
+  */
+-package jdk.vm.ci.runtime.services;
++package jdk.vm.ci.runtime;
+ 
+ import java.io.PrintStream;
+ 
+-import jdk.vm.ci.runtime.JVMCICompiler;
+-import jdk.vm.ci.runtime.JVMCIRuntime;
+-import jdk.vm.ci.services.JVMCIPermission;
+-
+ /**
+- * Service-provider class for creating JVMCI compilers.
++ * Factory for creating JVMCI compilers.
+  */
+-public abstract class JVMCICompilerFactory {
+-
+-    private static Void checkPermission() {
+-        SecurityManager sm = System.getSecurityManager();
+-        if (sm != null) {
+-            sm.checkPermission(new JVMCIPermission());
+-        }
+-        return null;
+-    }
+-
+-    @SuppressWarnings("unused")
+-    private JVMCICompilerFactory(Void ignore) {
+-    }
+-
+-    /**
+-     * Initializes a new instance of this class.
+-     *
+-     * @throws SecurityException if a security manager has been installed and it denies
+-     *             {@link JVMCIPermission}
+-     */
+-    protected JVMCICompilerFactory() {
+-        this(checkPermission());
+-    }
++public interface JVMCICompilerFactory {
+ 
+     /**
+      * Get the name of this compiler. The name is used by JVMCI to determine which factory to use.
+      */
+-    public abstract String getCompilerName();
++    String getCompilerName();
+ 
+     /**
+      * Notifies this object that it has been selected to {@linkplain #createCompiler(JVMCIRuntime)
+      * create} a compiler and it should now perform any heavy weight initialization that it deferred
+      * during construction.
+      */
+-    public void onSelection() {
++    default void onSelection() {
+     }
+ 
+     /**
+      * Create a new instance of a {@link JVMCICompiler}.
+      */
+-    public abstract JVMCICompiler createCompiler(JVMCIRuntime runtime);
++    JVMCICompiler createCompiler(JVMCIRuntime runtime);
+ 
+     /**
+      * Prints a description of the properties used to configure this compiler.
+      *
+      * @param out where to print the message
+      */
+-    public void printProperties(PrintStream out) {
++    default void printProperties(PrintStream out) {
+     }
+ }
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.services/src/jdk/vm/ci/services/JVMCIServiceLocator.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.services/src/jdk/vm/ci/services/JVMCIServiceLocator.java
+new file mode 100644
+--- /dev/null
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.services/src/jdk/vm/ci/services/JVMCIServiceLocator.java
+@@ -0,0 +1,83 @@
++/*
++ * Copyright (c) 2016, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package jdk.vm.ci.services;
++
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * Service-provider class for the runtime to locate providers of JVMCI services where the latter are
++ * not in packages exported by the JVMCI module. As part of instantiating
++ * {@link JVMCIServiceLocator}, all JVMCI packages will be {@linkplain Services#exportJVMCITo(Class)
++ * exported} to the module defining the class of the instantiated object.
++ *
++ * While the {@link #getProvider(Class)} method can be used directly, it's usually easier to use
++ * {@link #getProviders(Class)}.
++ */
++public abstract class JVMCIServiceLocator {
++
++    private static Void checkPermission() {
++        SecurityManager sm = System.getSecurityManager();
++        if (sm != null) {
++            sm.checkPermission(new JVMCIPermission());
++        }
++        return null;
++    }
++
++    @SuppressWarnings("unused")
++    private JVMCIServiceLocator(Void ignore) {
++    }
++
++    /**
++     * Creates a capability for accessing JVMCI. Once successfully instantiated, JVMCI exports all
++     * its packages to the module defining the type of this object.
++     *
++     * @throws SecurityException if a security manager has been installed and it denies
++     *             {@link JVMCIPermission}
++     */
++    protected JVMCIServiceLocator() {
++        this(checkPermission());
++        Services.exportJVMCITo(getClass());
++    }
++
++    /**
++     * Gets the provider of the service defined by {@code service} or {@code null} if this object
++     * does not have a provider for {@code service}.
++     */
++    public abstract <S> S getProvider(Class<S> service);
++
++    /**
++     * Gets the providers of the service defined by {@code service} by querying the
++     * {@link JVMCIServiceLocator} providers obtained by {@link Services#load(Class)}.
++     */
++    public static <S> List<S> getProviders(Class<S> service) {
++        List<S> providers = new ArrayList<>();
++        for (JVMCIServiceLocator access : Services.load(JVMCIServiceLocator.class)) {
++            S provider = access.getProvider(service);
++            if (provider != null) {
++                providers.add(provider);
++            }
++        }
++        return providers;
++    }
++}
+diff --git a/src/jdk.vm.ci/share/classes/module-info.java b/src/jdk.vm.ci/share/classes/module-info.java
+--- a/src/jdk.vm.ci/share/classes/module-info.java
++++ b/src/jdk.vm.ci/share/classes/module-info.java
+@@ -25,12 +25,9 @@
+ 
+ module jdk.vm.ci {
+     exports jdk.vm.ci.services;
+-    exports jdk.vm.ci.runtime.services;
+-    exports jdk.vm.ci.hotspot.services;
+ 
+-    uses jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
++    uses jdk.vm.ci.services.JVMCIServiceLocator;
+     uses jdk.vm.ci.hotspot.HotSpotJVMCIBackendFactory;
+-    uses jdk.vm.ci.runtime.services.JVMCICompilerFactory;
+ 
+     provides jdk.vm.ci.hotspot.HotSpotJVMCIBackendFactory with
+         jdk.vm.ci.hotspot.aarch64.AArch64HotSpotJVMCIBackendFactory;
+diff --git a/test/compiler/jvmci/common/JVMCIHelpers.java b/test/compiler/jvmci/common/JVMCIHelpers.java
+--- a/test/compiler/jvmci/common/JVMCIHelpers.java
++++ b/test/compiler/jvmci/common/JVMCIHelpers.java
+@@ -25,17 +25,29 @@
+ 
+ import jdk.vm.ci.code.CompilationRequest;
+ import jdk.vm.ci.code.CompilationRequestResult;
+-import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
++import jdk.vm.ci.hotspot.HotSpotVMEventListener;
++import jdk.vm.ci.services.JVMCIServiceLocator;
+ import jdk.vm.ci.runtime.JVMCICompiler;
+ import jdk.vm.ci.runtime.JVMCIRuntime;
+-import jdk.vm.ci.runtime.services.JVMCICompilerFactory;
++import jdk.vm.ci.runtime.JVMCICompilerFactory;
+ 
+ /*
+  * A stub classes to be able to use jvmci
+  */
+-public class JVMCIHelpers {
++public class JVMCIHelpers extends JVMCIServiceLocator {
+ 
+-    public static class EmptyVMEventListener extends HotSpotVMEventListener {
++    @Override
++    public <S> S getProvider(Class<S> service) {
++        if (service == JVMCICompilerFactory.class) {
++            return service.cast(new EmptyCompilerFactory());
++        }
++        if (service == HotSpotVMEventListener.class) {
++            return service.cast(new EmptyVMEventListener());
++        }
++        return null;
++    }
++
++    public static class EmptyVMEventListener implements HotSpotVMEventListener {
+         // just empty, using default interface methods
+     }
+ 
+@@ -54,7 +66,7 @@
+         }
+     }
+ 
+-    public static class EmptyCompilerFactory extends JVMCICompilerFactory {
++    public static class EmptyCompilerFactory implements JVMCICompilerFactory {
+ 
+         @Override
+         public String getCompilerName() {
+diff --git a/test/compiler/jvmci/common/services/jdk.vm.ci.hotspot.services.HotSpotVMEventListener b/test/compiler/jvmci/common/services/jdk.vm.ci.hotspot.services.HotSpotVMEventListener
+deleted file mode 100644
+--- a/test/compiler/jvmci/common/services/jdk.vm.ci.hotspot.services.HotSpotVMEventListener
++++ /dev/null
+@@ -1,1 +0,0 @@
+-compiler.jvmci.common.JVMCIHelpers$EmptyVMEventListener
+diff --git a/test/compiler/jvmci/common/services/jdk.vm.ci.runtime.JVMCICompiler b/test/compiler/jvmci/common/services/jdk.vm.ci.runtime.JVMCICompiler
+deleted file mode 100644
+--- a/test/compiler/jvmci/common/services/jdk.vm.ci.runtime.JVMCICompiler
++++ /dev/null
+@@ -1,1 +0,0 @@
+-compiler.jvmci.common.JVMCIHelpers$EmptyHotspotCompiler
+diff --git a/test/compiler/jvmci/common/services/jdk.vm.ci.runtime.services.JVMCICompilerFactory b/test/compiler/jvmci/common/services/jdk.vm.ci.runtime.services.JVMCICompilerFactory
+deleted file mode 100644
+--- a/test/compiler/jvmci/common/services/jdk.vm.ci.runtime.services.JVMCICompilerFactory
++++ /dev/null
+@@ -1,1 +0,0 @@
+-compiler.jvmci.common.JVMCIHelpers$EmptyCompilerFactory
+diff --git a/test/compiler/jvmci/events/JvmciNotifyBootstrapFinishedEventTest.config b/test/compiler/jvmci/events/JvmciNotifyBootstrapFinishedEventTest.config
+--- a/test/compiler/jvmci/events/JvmciNotifyBootstrapFinishedEventTest.config
++++ b/test/compiler/jvmci/events/JvmciNotifyBootstrapFinishedEventTest.config
+@@ -1,1 +1,2 @@
+ compiler.jvmci.events.JvmciNotifyBootstrapFinishedEventTest
++compiler.jvmci.common.JVMCIHelpers
+diff --git a/test/compiler/jvmci/events/JvmciNotifyBootstrapFinishedEventTest.java b/test/compiler/jvmci/events/JvmciNotifyBootstrapFinishedEventTest.java
+--- a/test/compiler/jvmci/events/JvmciNotifyBootstrapFinishedEventTest.java
++++ b/test/compiler/jvmci/events/JvmciNotifyBootstrapFinishedEventTest.java
+@@ -37,9 +37,8 @@
+  *
+  * @build jdk.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper
+  * @build compiler.jvmci.common.JVMCIHelpers
+- * @run driver jdk.test.lib.FileInstaller ../common/services/ ./META-INF/services/
+  * @run driver jdk.test.lib.FileInstaller ./JvmciNotifyBootstrapFinishedEventTest.config
+- *     ./META-INF/services/jdk.vm.ci.hotspot.services.HotSpotVMEventListener
++ *     ./META-INF/services/jdk.vm.ci.services.JVMCIServiceLocator
+  * @run driver ClassFileInstaller
+  *      compiler.jvmci.common.JVMCIHelpers$EmptyHotspotCompiler
+  *      compiler.jvmci.common.JVMCIHelpers$EmptyCompilerFactory
+@@ -60,9 +59,10 @@
+ package compiler.jvmci.events;
+ 
+ import jdk.test.lib.Asserts;
+-import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
++import jdk.vm.ci.services.JVMCIServiceLocator;
++import jdk.vm.ci.hotspot.HotSpotVMEventListener;
+ 
+-public class JvmciNotifyBootstrapFinishedEventTest extends HotSpotVMEventListener {
++public class JvmciNotifyBootstrapFinishedEventTest extends JVMCIServiceLocator implements HotSpotVMEventListener {
+     private static final boolean BOOTSTRAP = Boolean
+             .getBoolean("compiler.jvmci.events.JvmciNotifyBootstrapFinishedEventTest.bootstrap");
+     private static volatile int gotBoostrapNotification = 0;
+@@ -76,6 +76,14 @@
+     }
+ 
+     @Override
++    public <S> S getProvider(Class<S> service) {
++        if (service == HotSpotVMEventListener.class) {
++            return service.cast(this);
++        }
++        return null;
++    }
++
++    @Override
+     public void notifyBootstrapFinished() {
+         gotBoostrapNotification++;
+     }
+diff --git a/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.config b/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.config
+--- a/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.config
++++ b/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.config
+@@ -1,1 +1,2 @@
+ compiler.jvmci.events.JvmciNotifyInstallEventTest
++compiler.jvmci.common.JVMCIHelpers
+diff --git a/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.java b/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.java
+--- a/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.java
++++ b/test/compiler/jvmci/events/JvmciNotifyInstallEventTest.java
+@@ -38,9 +38,8 @@
+  *
+  * @build jdk.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper
+  * @build compiler.jvmci.common.JVMCIHelpers
+- * @run driver jdk.test.lib.FileInstaller ../common/services/ ./META-INF/services/
+  * @run driver jdk.test.lib.FileInstaller ./JvmciNotifyInstallEventTest.config
+- *     ./META-INF/services/jdk.vm.ci.hotspot.services.HotSpotVMEventListener
++ *     ./META-INF/services/jdk.vm.ci.services.JVMCIServiceLocator
+  * @run driver ClassFileInstaller
+  *      compiler.jvmci.common.JVMCIHelpers$EmptyHotspotCompiler
+  *      compiler.jvmci.common.JVMCIHelpers$EmptyCompilerFactory
+@@ -73,6 +72,7 @@
+ import compiler.jvmci.common.testcases.SimpleClass;
+ import jdk.test.lib.Asserts;
+ import jdk.test.lib.Utils;
++import jdk.vm.ci.services.JVMCIServiceLocator;
+ import jdk.vm.ci.code.CompiledCode;
+ import jdk.vm.ci.code.InstalledCode;
+ import jdk.vm.ci.code.site.DataPatch;
+@@ -82,13 +82,13 @@
+ import jdk.vm.ci.hotspot.HotSpotCompiledCode.Comment;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
+ import jdk.vm.ci.hotspot.HotSpotResolvedJavaMethod;
+-import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
++import jdk.vm.ci.hotspot.HotSpotVMEventListener;
+ import jdk.vm.ci.meta.Assumptions.Assumption;
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+ 
+ import java.lang.reflect.Method;
+ 
+-public class JvmciNotifyInstallEventTest extends HotSpotVMEventListener {
++public class JvmciNotifyInstallEventTest extends JVMCIServiceLocator implements HotSpotVMEventListener {
+     private static final String METHOD_NAME = "testMethod";
+     private static final boolean FAIL_ON_INIT = !Boolean.getBoolean(
+             "compiler.jvmci.events.JvmciNotifyInstallEventTest.failoninit");
+@@ -98,6 +98,14 @@
+         new JvmciNotifyInstallEventTest().runTest();
+     }
+ 
++    @Override
++    public <S> S getProvider(Class<S> service) {
++        if (service == HotSpotVMEventListener.class) {
++            return service.cast(this);
++        }
++        return null;
++    }
++
+     private void runTest() {
+         if (gotInstallNotification != 0) {
+             throw new Error("Got install notification before test actions");
+diff --git a/test/compiler/jvmci/events/JvmciShutdownEventListener.java b/test/compiler/jvmci/events/JvmciShutdownEventListener.java
+--- a/test/compiler/jvmci/events/JvmciShutdownEventListener.java
++++ b/test/compiler/jvmci/events/JvmciShutdownEventListener.java
+@@ -23,10 +23,11 @@
+ 
+ package compiler.jvmci.events;
+ 
++import jdk.vm.ci.services.JVMCIServiceLocator;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
+-import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
++import jdk.vm.ci.hotspot.HotSpotVMEventListener;
+ 
+-public class JvmciShutdownEventListener extends HotSpotVMEventListener {
++public class JvmciShutdownEventListener extends JVMCIServiceLocator implements HotSpotVMEventListener {
+     public static final String MESSAGE = "Shutdown notified";
+     public static final String GOT_INTERNAL_ERROR = "Got internal error";
+ 
+@@ -39,6 +40,14 @@
+     }
+ 
+     @Override
++    public <S> S getProvider(Class<S> service) {
++        if (service == HotSpotVMEventListener.class) {
++            return service.cast(this);
++        }
++        return null;
++    }
++
++    @Override
+     public void notifyShutdown() {
+         System.out.println(MESSAGE);
+     }
+diff --git a/test/compiler/jvmci/events/JvmciShutdownEventTest.config b/test/compiler/jvmci/events/JvmciShutdownEventTest.config
+--- a/test/compiler/jvmci/events/JvmciShutdownEventTest.config
++++ b/test/compiler/jvmci/events/JvmciShutdownEventTest.config
+@@ -1,1 +1,2 @@
+ compiler.jvmci.events.JvmciShutdownEventListener
++compiler.jvmci.common.JVMCIHelpers
+diff --git a/test/compiler/jvmci/events/JvmciShutdownEventTest.java b/test/compiler/jvmci/events/JvmciShutdownEventTest.java
+--- a/test/compiler/jvmci/events/JvmciShutdownEventTest.java
++++ b/test/compiler/jvmci/events/JvmciShutdownEventTest.java
+@@ -34,9 +34,8 @@
+  *
+  * @build compiler.jvmci.common.JVMCIHelpers
+  *        compiler.jvmci.events.JvmciShutdownEventListener
+- * @run driver jdk.test.lib.FileInstaller ../common/services/ ./META-INF/services/
+  * @run driver jdk.test.lib.FileInstaller ./JvmciShutdownEventTest.config
+- *     ./META-INF/services/jdk.vm.ci.hotspot.services.HotSpotVMEventListener
++ *     ./META-INF/services/jdk.vm.ci.services.JVMCIServiceLocator
+  * @run driver ClassFileInstaller
+  *      compiler.jvmci.common.JVMCIHelpers$EmptyHotspotCompiler
+  *      compiler.jvmci.common.JVMCIHelpers$EmptyCompilerFactory

@@ -1,0 +1,56 @@
+--- old/src/share/vm/jvmci/jvmciCompilerToVM.cpp	2016-08-18 18:47:21.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciCompilerToVM.cpp	2016-08-18 18:47:21.000000000 +0200
+@@ -220,7 +220,7 @@
+     VMStructEntry vmField = JVMCIVMStructs::localHotSpotVMStructs[i];
+     instanceHandle vmFieldObj = InstanceKlass::cast(VMField::klass())->allocate_instance_handle(CHECK_NULL);
+     size_t name_buf_len = strlen(vmField.typeName) + strlen(vmField.fieldName) + 2 /* "::" */;
+-    char* name_buf = NEW_RESOURCE_ARRAY(char, name_buf_len + 1);
++    char* name_buf = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, char, name_buf_len + 1);
+     sprintf(name_buf, "%s::%s", vmField.typeName, vmField.fieldName);
+     Handle name = java_lang_String::create_from_str(name_buf, CHECK_NULL);
+     Handle type = java_lang_String::create_from_str(vmField.typeString, CHECK_NULL);
+@@ -338,12 +338,43 @@
+     vmFlags->obj_at_put(i, vmFlagObj());
+   }
+ 
+-  objArrayOop data = oopFactory::new_objArray(SystemDictionary::Object_klass(), 5, CHECK_NULL);
++  objArrayHandle vmIntrinsics = oopFactory::new_objArray(VMIntrinsicMethod::klass(), (vmIntrinsics::ID_LIMIT - 1), CHECK_NULL);
++  int index = 0;
++  vmSymbols::SID prev_declaringClass_sid = vmSymbols::NO_SID;
++  vmSymbols::SID prev_name_sid = vmSymbols::NO_SID;
++  vmSymbols::SID prev_descriptor_sid = vmSymbols::NO_SID;
++#define VM_INTRINSIC_SYMBOL(n, var) {                                     \
++    vmSymbols::SID sid = vmSymbols::VM_SYMBOL_ENUM_NAME(n);               \
++    if (prev_##var##_sid == sid) {                                        \
++      Handle s = VMIntrinsicMethod::var(vmIntrinsics->obj_at(index - 1)); \
++      VMIntrinsicMethod::set_##var(vmIntrinsicMethod, s());               \
++    } else {                                                              \
++    	prev_##var##_sid = sid;                                             \
++      Handle s = java_lang_String::create_from_symbol(vmSymbols::symbol_at(sid), THREAD); \
++      VMIntrinsicMethod::set_##var(vmIntrinsicMethod, s());               \
++    }                                                                     \
++  }
++#define VM_INTRINSIC_INFO(id, kls, nm, sig, ignore_fcode) {         \
++    instanceHandle vmIntrinsicMethod = InstanceKlass::cast(VMIntrinsicMethod::klass())->allocate_instance_handle(CHECK_NULL); \
++		VM_INTRINSIC_SYMBOL(kls, declaringClass)                        \
++    VM_INTRINSIC_SYMBOL(nm, name)                                   \
++    VM_INTRINSIC_SYMBOL(sig, descriptor)                            \
++    VMIntrinsicMethod::set_id(vmIntrinsicMethod, vmIntrinsics::id); \
++    vmIntrinsics->obj_at_put(index++, vmIntrinsicMethod());         \
++  }
++
++  VM_INTRINSICS_DO(VM_INTRINSIC_INFO, VM_SYMBOL_IGNORE, VM_SYMBOL_IGNORE, VM_SYMBOL_IGNORE, VM_ALIAS_IGNORE)
++#undef VM_INTRINSIC_SYMBOL
++#undef VM_INTRINSIC_INFO
++  assert(index == vmIntrinsics::ID_LIMIT - 1, "must be");
++
++  objArrayOop data = oopFactory::new_objArray(SystemDictionary::Object_klass(), 6, CHECK_NULL);
+   data->obj_at_put(0, vmFields());
+   data->obj_at_put(1, vmTypes());
+   data->obj_at_put(2, vmConstants());
+   data->obj_at_put(3, vmAddresses());
+   data->obj_at_put(4, vmFlags());
++  data->obj_at_put(5, vmIntrinsics());
+ 
+   return (jobjectArray) JNIHandles::make_local(THREAD, data);
+ #undef BOXED_LONG

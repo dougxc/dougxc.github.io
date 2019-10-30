@@ -1,0 +1,623 @@
+--- old/src/share/vm/c1/c1_GraphBuilder.cpp	2014-01-20 23:43:38.341523789 +0100
++++ new/src/share/vm/c1/c1_GraphBuilder.cpp	2014-01-20 23:43:38.285523788 +0100
+@@ -1621,6 +1621,7 @@
+                   constant = new Constant(as_ValueType(field_val));
+                   // Add a dependence for invalidation of the optimization.
+                   if (!call_site->is_constant_call_site()) {
++                    VM_ENTRY_MARK;
+                     dependency_recorder()->assert_call_site_target_value(call_site, target);
+                   }
+                 }
+--- old/src/share/vm/ci/ciKlass.hpp	2014-01-20 23:43:38.617523787 +0100
++++ new/src/share/vm/ci/ciKlass.hpp	2014-01-20 23:43:38.557523787 +0100
+@@ -43,6 +43,7 @@
+   friend class ciMethod;
+   friend class ciMethodData;
+   friend class ciObjArrayKlass;
++  friend class Dependencies;
+ 
+ private:
+   ciSymbol* _name;
+--- old/src/share/vm/ci/ciMethod.hpp	2014-01-20 23:43:38.833523785 +0100
++++ new/src/share/vm/ci/ciMethod.hpp	2014-01-20 23:43:38.781523784 +0100
+@@ -52,6 +52,7 @@
+   friend class ciBytecodeStream;
+   friend class ciMethodHandle;
+   friend class ciReplay;
++  friend class Dependencies;
+ 
+  private:
+   // General method information.
+--- old/src/share/vm/code/dependencies.cpp	2014-01-20 23:43:39.069523782 +0100
++++ new/src/share/vm/code/dependencies.cpp	2014-01-20 23:43:39.009523782 +0100
+@@ -27,9 +27,11 @@
+ #include "ci/ciEnv.hpp"
+ #include "ci/ciKlass.hpp"
+ #include "ci/ciMethod.hpp"
++#include "ci/ciUtilities.hpp"
+ #include "code/dependencies.hpp"
+ #include "compiler/compileLog.hpp"
+ #include "oops/oop.inline.hpp"
++#include "oops/objArrayKlass.hpp"
+ #include "runtime/handles.hpp"
+ #include "runtime/handles.inline.hpp"
+ #include "utilities/copy.hpp"
+@@ -52,7 +54,7 @@
+   _dep_seen = new(arena) GrowableArray<int>(arena, 500, 0, 0);
+   DEBUG_ONLY(_deps[end_marker] = NULL);
+   for (int i = (int)FIRST_TYPE; i < (int)TYPE_LIMIT; i++) {
+-    _deps[i] = new(arena) GrowableArray<ciBaseObject*>(arena, 10, 0, 0);
++    _deps[i] = new(arena) GrowableArray<DepValue>(arena, 10, 0, DepValue());
+   }
+   _content_bytes = NULL;
+   _size_in_bytes = (size_t)-1;
+@@ -60,86 +62,91 @@
+   assert(TYPE_LIMIT <= (1<<LG2_TYPE_LIMIT), "sanity");
+ }
+ 
+-void Dependencies::assert_evol_method(ciMethod* m) {
+-  assert_common_1(evol_method, m);
++void Dependencies::assert_evol_method(Method* m) {
++  assert_common_1(evol_method, DepValue(_oop_recorder, m));
+ }
+ 
+-void Dependencies::assert_leaf_type(ciKlass* ctxk) {
+-  if (ctxk->is_array_klass()) {
++void Dependencies::assert_leaf_type(Klass* ctxk) {
++  if (ctxk->oop_is_array()) {
+     // As a special case, support this assertion on an array type,
+     // which reduces to an assertion on its element type.
+     // Note that this cannot be done with assertions that
+     // relate to concreteness or abstractness.
+-    ciType* elemt = ctxk->as_array_klass()->base_element_type();
+-    if (!elemt->is_instance_klass())  return;   // Ex:  int[][]
+-    ctxk = elemt->as_instance_klass();
+-    //if (ctxk->is_final())  return;            // Ex:  String[][]
++    BasicType elemt = ArrayKlass::cast(ctxk)->element_type();
++    if (is_java_primitive(elemt))  return;   // Ex:  int[][]
++    ctxk = ObjArrayKlass::cast(ctxk)->bottom_klass();
++    //if (ctxk->is_final())  return;         // Ex:  String[][]
+   }
+   check_ctxk(ctxk);
+-  assert_common_1(leaf_type, ctxk);
++  assert_common_1(leaf_type, DepValue(_oop_recorder, ctxk));
+ }
+ 
+-void Dependencies::assert_abstract_with_unique_concrete_subtype(ciKlass* ctxk, ciKlass* conck) {
++void Dependencies::assert_abstract_with_unique_concrete_subtype(Klass* ctxk, Klass* conck) {
+   check_ctxk_abstract(ctxk);
+-  assert_common_2(abstract_with_unique_concrete_subtype, ctxk, conck);
++  DepValue ctxk_dv(_oop_recorder, ctxk);
++  assert_common_2(abstract_with_unique_concrete_subtype, ctxk_dv, DepValue(_oop_recorder, conck, &ctxk_dv));
+ }
+ 
+-void Dependencies::assert_abstract_with_no_concrete_subtype(ciKlass* ctxk) {
++void Dependencies::assert_abstract_with_no_concrete_subtype(Klass* ctxk) {
+   check_ctxk_abstract(ctxk);
+-  assert_common_1(abstract_with_no_concrete_subtype, ctxk);
++  assert_common_1(abstract_with_no_concrete_subtype, DepValue(_oop_recorder, ctxk));
+ }
+ 
+-void Dependencies::assert_concrete_with_no_concrete_subtype(ciKlass* ctxk) {
++void Dependencies::assert_concrete_with_no_concrete_subtype(Klass* ctxk) {
+   check_ctxk_concrete(ctxk);
+-  assert_common_1(concrete_with_no_concrete_subtype, ctxk);
++  assert_common_1(concrete_with_no_concrete_subtype, DepValue(_oop_recorder, ctxk));
+ }
+ 
+-void Dependencies::assert_unique_concrete_method(ciKlass* ctxk, ciMethod* uniqm) {
++void Dependencies::assert_unique_concrete_method(Klass* ctxk, Method* uniqm) {
+   check_ctxk(ctxk);
+-  assert_common_2(unique_concrete_method, ctxk, uniqm);
++  assert_common_2(unique_concrete_method, DepValue(_oop_recorder, ctxk), DepValue(_oop_recorder, uniqm));
+ }
+ 
+-void Dependencies::assert_abstract_with_exclusive_concrete_subtypes(ciKlass* ctxk, ciKlass* k1, ciKlass* k2) {
++void Dependencies::assert_abstract_with_exclusive_concrete_subtypes(Klass* ctxk, Klass* k1, Klass* k2) {
+   check_ctxk(ctxk);
+-  assert_common_3(abstract_with_exclusive_concrete_subtypes_2, ctxk, k1, k2);
++  DepValue k1_dv(_oop_recorder, k1);
++  assert_common_3(abstract_with_exclusive_concrete_subtypes_2, ctxk, k1_dv, DepValue(_oop_recorder, k2, &k1_dv));
+ }
+ 
+-void Dependencies::assert_exclusive_concrete_methods(ciKlass* ctxk, ciMethod* m1, ciMethod* m2) {
++void Dependencies::assert_exclusive_concrete_methods(Klass* ctxk, Method* m1, Method* m2) {
+   check_ctxk(ctxk);
+-  assert_common_3(exclusive_concrete_methods_2, ctxk, m1, m2);
++  DepValue m1_dv(_oop_recorder, m1);
++  assert_common_3(exclusive_concrete_methods_2, ctxk, m1_dv, DepValue(_oop_recorder, m2, &m1_dv));
+ }
+ 
+-void Dependencies::assert_has_no_finalizable_subclasses(ciKlass* ctxk) {
++void Dependencies::assert_has_no_finalizable_subclasses(Klass* ctxk) {
+   check_ctxk(ctxk);
+-  assert_common_1(no_finalizable_subclasses, ctxk);
++  assert_common_1(no_finalizable_subclasses, DepValue(_oop_recorder, ctxk));
+ }
+ 
+-void Dependencies::assert_call_site_target_value(ciCallSite* call_site, ciMethodHandle* method_handle) {
+-  check_ctxk(call_site->klass());
+-  assert_common_2(call_site_target_value, call_site, method_handle);
++void Dependencies::assert_call_site_target_value(jobject call_site, jobject method_handle) {
++  ASSERT_IN_VM; // No GC can occur between resolving call_site and getting its klass
++  Klass* ctxk = JNIHandles::resolve(call_site)->klass();
++  check_ctxk(ctxk);
++  assert_common_2(call_site_target_value, DepValue(_oop_recorder, call_site), DepValue(_oop_recorder, method_handle));
+ }
+ 
+ // Helper function.  If we are adding a new dep. under ctxk2,
+ // try to find an old dep. under a broader* ctxk1.  If there is
+ //
+-bool Dependencies::maybe_merge_ctxk(GrowableArray<ciBaseObject*>* deps,
+-                                    int ctxk_i, ciKlass* ctxk2) {
+-  ciKlass* ctxk1 = deps->at(ctxk_i)->as_metadata()->as_klass();
++bool Dependencies::maybe_merge_ctxk(GrowableArray<DepValue>* deps,
++                                    int ctxk_i, Klass* ctxk2) {
++  Klass* ctxk1 = deps->at(ctxk_i).as_klass(_oop_recorder);
+   if (ctxk2->is_subtype_of(ctxk1)) {
+     return true;  // success, and no need to change
+   } else if (ctxk1->is_subtype_of(ctxk2)) {
+     // new context class fully subsumes previous one
+-    deps->at_put(ctxk_i, ctxk2);
++    deps->at_put(ctxk_i, DepValue(_oop_recorder, ctxk2));
+     return true;
+   } else {
+     return false;
+   }
+ }
+ 
+-void Dependencies::assert_common_1(DepType dept, ciBaseObject* x) {
++void Dependencies::assert_common_1(DepType dept, DepValue x) {
+   assert(dep_args(dept) == 1, "sanity");
+   log_dependency(dept, x);
+-  GrowableArray<ciBaseObject*>* deps = _deps[dept];
++  GrowableArray<DepValue>* deps = _deps[dept];
+ 
+   // see if the same (or a similar) dep is already recorded
+   if (note_dep_seen(dept, x)) {
+@@ -150,10 +157,10 @@
+ }
+ 
+ void Dependencies::assert_common_2(DepType dept,
+-                                   ciBaseObject* x0, ciBaseObject* x1) {
++                                   DepValue x0, DepValue x1) {
+   assert(dep_args(dept) == 2, "sanity");
+   log_dependency(dept, x0, x1);
+-  GrowableArray<ciBaseObject*>* deps = _deps[dept];
++  GrowableArray<DepValue>* deps = _deps[dept];
+ 
+   // see if the same (or a similar) dep is already recorded
+   bool has_ctxk = has_explicit_context_arg(dept);
+@@ -163,9 +170,9 @@
+       // look in this bucket for redundant assertions
+       const int stride = 2;
+       for (int i = deps->length(); (i -= stride) >= 0; ) {
+-        ciBaseObject* y1 = deps->at(i+1);
++        DepValue y1 = deps->at(i+1);
+         if (x1 == y1) {  // same subject; check the context
+-          if (maybe_merge_ctxk(deps, i+0, x0->as_metadata()->as_klass())) {
++          if (maybe_merge_ctxk(deps, i+0, x0.as_klass(_oop_recorder))) {
+             return;
+           }
+         }
+@@ -177,8 +184,8 @@
+       // look in this bucket for redundant assertions
+       const int stride = 2;
+       for (int i = deps->length(); (i -= stride) >= 0; ) {
+-        ciBaseObject* y0 = deps->at(i+0);
+-        ciBaseObject* y1 = deps->at(i+1);
++        DepValue y0 = deps->at(i+0);
++        DepValue y1 = deps->at(i+1);
+         if (x0 == y0 && x1 == y1) {
+           return;
+         }
+@@ -192,31 +199,31 @@
+ }
+ 
+ void Dependencies::assert_common_3(DepType dept,
+-                                   ciKlass* ctxk, ciBaseObject* x, ciBaseObject* x2) {
++                                   Klass* ctxk, DepValue x, DepValue x2) {
+   assert(dep_context_arg(dept) == 0, "sanity");
+   assert(dep_args(dept) == 3, "sanity");
+-  log_dependency(dept, ctxk, x, x2);
+-  GrowableArray<ciBaseObject*>* deps = _deps[dept];
++  log_dependency(dept, DepValue(_oop_recorder, ctxk), x, x2);
++  GrowableArray<DepValue>* deps = _deps[dept];
+ 
+   // try to normalize an unordered pair:
+   bool swap = false;
+   switch (dept) {
+   case abstract_with_exclusive_concrete_subtypes_2:
+-    swap = (x->ident() > x2->ident() && x->as_metadata()->as_klass() != ctxk);
++    swap = (x.index() > x2.index() && x.as_klass(_oop_recorder) != ctxk);
+     break;
+   case exclusive_concrete_methods_2:
+-    swap = (x->ident() > x2->ident() && x->as_metadata()->as_method()->holder() != ctxk);
++    swap = (x.index() > x2.index() && x.as_method(_oop_recorder)->method_holder() != ctxk);
+     break;
+   }
+-  if (swap) { ciBaseObject* t = x; x = x2; x2 = t; }
++  if (swap) { DepValue t = x; x = x2; x2 = t; }
+ 
+   // see if the same (or a similar) dep is already recorded
+   if (note_dep_seen(dept, x) && note_dep_seen(dept, x2)) {
+     // look in this bucket for redundant assertions
+     const int stride = 3;
+     for (int i = deps->length(); (i -= stride) >= 0; ) {
+-      ciBaseObject* y  = deps->at(i+1);
+-      ciBaseObject* y2 = deps->at(i+2);
++      DepValue y  = deps->at(i+1);
++      DepValue y2 = deps->at(i+2);
+       if (x == y && x2 == y2) {  // same subjects; check the context
+         if (maybe_merge_ctxk(deps, i+0, ctxk)) {
+           return;
+@@ -225,7 +232,7 @@
+     }
+   }
+   // append the assertion in the correct bucket:
+-  deps->append(ctxk);
++  deps->append(DepValue(_oop_recorder, ctxk));
+   deps->append(x);
+   deps->append(x2);
+ }
+@@ -242,24 +249,24 @@
+   assert(size_in_bytes() % sizeof(HeapWord) == 0, "copy by words");
+ }
+ 
+-static int sort_dep(ciBaseObject** p1, ciBaseObject** p2, int narg) {
++static int sort_dep(Dependencies::DepValue* p1, Dependencies::DepValue* p2, int narg) {
+   for (int i = 0; i < narg; i++) {
+-    int diff = p1[i]->ident() - p2[i]->ident();
++    int diff = p1[i].sort_key() - p2[i].sort_key();
+     if (diff != 0)  return diff;
+   }
+   return 0;
+ }
+-static int sort_dep_arg_1(ciBaseObject** p1, ciBaseObject** p2)
++static int sort_dep_arg_1(Dependencies::DepValue* p1, Dependencies::DepValue* p2)
+ { return sort_dep(p1, p2, 1); }
+-static int sort_dep_arg_2(ciBaseObject** p1, ciBaseObject** p2)
++static int sort_dep_arg_2(Dependencies::DepValue* p1, Dependencies::DepValue* p2)
+ { return sort_dep(p1, p2, 2); }
+-static int sort_dep_arg_3(ciBaseObject** p1, ciBaseObject** p2)
++static int sort_dep_arg_3(Dependencies::DepValue* p1, Dependencies::DepValue* p2)
+ { return sort_dep(p1, p2, 3); }
+ 
+ void Dependencies::sort_all_deps() {
+   for (int deptv = (int)FIRST_TYPE; deptv < (int)TYPE_LIMIT; deptv++) {
+     DepType dept = (DepType)deptv;
+-    GrowableArray<ciBaseObject*>* deps = _deps[dept];
++    GrowableArray<DepValue>* deps = _deps[dept];
+     if (deps->length() <= 1)  continue;
+     switch (dep_args(dept)) {
+     case 1: deps->sort(sort_dep_arg_1, 1); break;
+@@ -274,19 +281,19 @@
+   size_t est_size = 100;
+   for (int deptv = (int)FIRST_TYPE; deptv < (int)TYPE_LIMIT; deptv++) {
+     DepType dept = (DepType)deptv;
+-    GrowableArray<ciBaseObject*>* deps = _deps[dept];
++    GrowableArray<DepValue>* deps = _deps[dept];
+     est_size += deps->length()*2;  // tags and argument(s)
+   }
+   return est_size;
+ }
+ 
+-ciKlass* Dependencies::ctxk_encoded_as_null(DepType dept, ciBaseObject* x) {
++Klass* Dependencies::ctxk_encoded_as_null(OopRecorder* oop_recorder, DepType dept, DepValue x) {
+   switch (dept) {
+   case abstract_with_exclusive_concrete_subtypes_2:
+-    return x->as_metadata()->as_klass();
++    return x.as_klass(oop_recorder);
+   case unique_concrete_method:
+   case exclusive_concrete_methods_2:
+-    return x->as_metadata()->as_method()->holder();
++    return x.as_method(oop_recorder)->method_holder();
+   }
+   return NULL;  // let NULL be NULL
+ }
+@@ -313,7 +320,7 @@
+ 
+   for (int deptv = (int)FIRST_TYPE; deptv < (int)TYPE_LIMIT; deptv++) {
+     DepType dept = (DepType)deptv;
+-    GrowableArray<ciBaseObject*>* deps = _deps[dept];
++    GrowableArray<DepValue>* deps = _deps[dept];
+     if (deps->length() == 0)  continue;
+     int stride = dep_args(dept);
+     int ctxkj  = dep_context_arg(dept);  // -1 if no context arg
+@@ -322,9 +329,9 @@
+       jbyte code_byte = (jbyte)dept;
+       int skipj = -1;
+       if (ctxkj >= 0 && ctxkj+1 < stride) {
+-        ciKlass*  ctxk = deps->at(i+ctxkj+0)->as_metadata()->as_klass();
+-        ciBaseObject* x     = deps->at(i+ctxkj+1);  // following argument
+-        if (ctxk == ctxk_encoded_as_null(dept, x)) {
++        Klass*  ctxk = deps->at(i+ctxkj+0).as_klass(_oop_recorder);
++        DepValue x     = deps->at(i+ctxkj+1);  // following argument
++        if (ctxk == ctxk_encoded_as_null(_oop_recorder, dept, x)) {
+           skipj = ctxkj;  // we win:  maybe one less oop to keep track of
+           code_byte |= default_context_type_bit;
+         }
+@@ -332,14 +339,8 @@
+       bytes.write_byte(code_byte);
+       for (int j = 0; j < stride; j++) {
+         if (j == skipj)  continue;
+-        ciBaseObject* v = deps->at(i+j);
+-        int idx;
+-        if (v->is_object()) {
+-          idx = _oop_recorder->find_index(v->as_object()->constant_encoding());
+-        } else {
+-          ciMetadata* meta = v->as_metadata();
+-          idx = _oop_recorder->find_index(meta->constant_encoding());
+-        }
++        DepValue v = deps->at(i+j);
++        int idx = v.index();
+         bytes.write_int(idx);
+       }
+     }
+@@ -406,10 +407,10 @@
+ // for the sake of the compiler log, print out current dependencies:
+ void Dependencies::log_all_dependencies() {
+   if (log() == NULL)  return;
+-  ciBaseObject* args[max_arg_count];
++  DepValue args[max_arg_count];
+   for (int deptv = (int)FIRST_TYPE; deptv < (int)TYPE_LIMIT; deptv++) {
+     DepType dept = (DepType)deptv;
+-    GrowableArray<ciBaseObject*>* deps = _deps[dept];
++    GrowableArray<DepValue>* deps = _deps[dept];
+     if (deps->length() == 0)  continue;
+     int stride = dep_args(dept);
+     for (int i = 0; i < deps->length(); i += stride) {
+@@ -423,6 +424,26 @@
+ }
+ 
+ void Dependencies::write_dependency_to(CompileLog* log,
++                                       DepType dept,
++                                       int nargs, DepValue args[],
++                                       Klass* witness) {
++  if (log == NULL) {
++    return;
++  }
++  ciEnv* env = ciEnv::current();
++  ciBaseObject* ciargs[max_arg_count];
++  assert(nargs <= max_arg_count, "oob");
++  for (int j = 0; j < nargs; j++) {
++    if (args[j].is_object()) {
++      ciargs[j] = env->get_object(JNIHandles::resolve(args[j].as_object(_oop_recorder)));
++    } else {
++      ciargs[j] = env->get_metadata(args[j].as_metadata(_oop_recorder));
++    }
++  }
++  Dependencies::write_dependency_to(log, dept, nargs, ciargs, witness);
++}
++
++void Dependencies::write_dependency_to(CompileLog* log,
+                                        DepType dept,
+                                        int nargs, DepArgument args[],
+                                        Klass* witness) {
+--- old/src/share/vm/code/dependencies.hpp	2014-01-20 23:43:39.341523780 +0100
++++ new/src/share/vm/code/dependencies.hpp	2014-01-20 23:43:39.281523780 +0100
+@@ -27,6 +27,7 @@
+ 
+ #include "ci/ciCallSite.hpp"
+ #include "ci/ciKlass.hpp"
++#include "ci/ciMethod.hpp"
+ #include "ci/ciMethodHandle.hpp"
+ #include "classfile/systemDictionary.hpp"
+ #include "code/compressedStream.hpp"
+@@ -200,10 +201,53 @@
+ 
+   static void check_valid_dependency_type(DepType dept);
+ 
++  // A Metadata* or object value recorded in an OopRecorder
++  class DepValue VALUE_OBJ_CLASS_SPEC {
++   private:
++    // Unique identifier of the value within the associated OopRecorder that
++    // encodes both the category of the value (0: invalid, positive: metadata, negative: object)
++    // and the index within a category specific array (metadata: index + 1, object: -(index + 1))
++    int _id;
++
++   public:
++    DepValue() : _id(0) {}
++    DepValue(OopRecorder* rec, Metadata* metadata, DepValue* candidate = NULL) {
++      assert(candidate == NULL || candidate->is_metadata(), "candidate must be NULL or metadata");
++      if (candidate != NULL && candidate->as_metadata(rec) == metadata) {
++        _id = candidate->_id;
++      } else {
++        _id = rec->find_index(metadata) + 1;
++      }
++    }
++    DepValue(OopRecorder* rec, jobject obj, DepValue* candidate = NULL) {
++      assert(candidate == NULL || candidate->is_object(), "candidate must be NULL or jobject");
++      if (candidate != NULL && candidate->as_object(rec) == obj) {
++        _id = candidate->_id;
++      } else {
++        _id = -(rec->find_index(obj) + 1);
++      }
++    }
++
++    // Used to sort values in ascending order of index() with metadata values preceding object values
++    int sort_key() const { return -_id; }
++
++    bool operator == (const DepValue& other) const   { return other._id == _id; }
++
++    bool is_valid() const             { return _id != 0; }
++    int  index() const                { assert(is_valid(), "must be"); return _id < 0 ? -(_id + 1) : _id - 1; }
++    bool is_metadata() const          { assert(is_valid(), "must be"); return _id > 0; }
++    bool is_object() const            { assert(is_valid(), "must be"); return _id < 0; }
++
++    Metadata*  as_metadata(OopRecorder* rec) const    { assert(is_metadata(), "must be"); return rec->metadata_at(index()); }
++    Klass*     as_klass(OopRecorder* rec) const       { assert(as_metadata(rec)->is_klass(), "must be"); return (Klass*) as_metadata(rec); }
++    Method*    as_method(OopRecorder* rec) const      { assert(as_metadata(rec)->is_method(), "must be"); return (Method*) as_metadata(rec); }
++    jobject    as_object(OopRecorder* rec) const      { assert(is_object(), "must be"); return rec->oop_at(index()); }
++  };
++
+  private:
+   // State for writing a new set of dependencies:
+-  GrowableArray<int>*       _dep_seen;  // (seen[h->ident] & (1<<dept))
+-  GrowableArray<ciBaseObject*>*  _deps[TYPE_LIMIT];
++  GrowableArray<int>*       _dep_seen;
++  GrowableArray<DepValue>*  _deps[TYPE_LIMIT];
+ 
+   static const char* _dep_name[TYPE_LIMIT];
+   static int         _dep_args[TYPE_LIMIT];
+@@ -212,9 +256,10 @@
+     return (int)dept >= 0 && dept < TYPE_LIMIT && ((1<<dept) & mask) != 0;
+   }
+ 
+-  bool note_dep_seen(int dept, ciBaseObject* x) {
++  bool note_dep_seen(int dept, DepValue x) {
+     assert(dept < BitsPerInt, "oob");
+-    int x_id = x->ident();
++    // place metadata deps at even indexes, object deps at odd indexes
++    int x_id = x.is_metadata() ? x.index() * 2 : (x.index() * 2) + 1;
+     assert(_dep_seen != NULL, "deps must be writable");
+     int seen = _dep_seen->at_grow(x_id, 0);
+     _dep_seen->at_put(x_id, seen | (1<<dept));
+@@ -222,8 +267,8 @@
+     return (seen & (1<<dept)) != 0;
+   }
+ 
+-  bool maybe_merge_ctxk(GrowableArray<ciBaseObject*>* deps,
+-                        int ctxk_i, ciKlass* ctxk);
++  bool maybe_merge_ctxk(GrowableArray<DepValue>* deps,
++                        int ctxk_i, Klass* ctxk);
+ 
+   void sort_all_deps();
+   size_t estimate_size_in_bytes();
+@@ -249,33 +294,66 @@
+  private:
+   // Check for a valid context type.
+   // Enforce the restriction against array types.
+-  static void check_ctxk(ciKlass* ctxk) {
+-    assert(ctxk->is_instance_klass(), "java types only");
++  static void check_ctxk(Klass* ctxk) {
++    assert(ctxk->oop_is_instance(), "java types only");
+   }
+-  static void check_ctxk_concrete(ciKlass* ctxk) {
+-    assert(is_concrete_klass(ctxk->as_instance_klass()), "must be concrete");
++  static void check_ctxk_concrete(Klass* ctxk) {
++    check_ctxk(ctxk);
++    assert(!ctxk->is_abstract(), "must be abstract");
+   }
+-  static void check_ctxk_abstract(ciKlass* ctxk) {
++  static void check_ctxk_abstract(Klass* ctxk) {
+     check_ctxk(ctxk);
+-    assert(!is_concrete_klass(ctxk->as_instance_klass()), "must be abstract");
++    assert(ctxk->is_abstract(), "must be abstract");
+   }
+ 
+-  void assert_common_1(DepType dept, ciBaseObject* x);
+-  void assert_common_2(DepType dept, ciBaseObject* x0, ciBaseObject* x1);
+-  void assert_common_3(DepType dept, ciKlass* ctxk, ciBaseObject* x1, ciBaseObject* x2);
++  void assert_common_1(DepType dept, DepValue x);
++  void assert_common_2(DepType dept, DepValue x0, DepValue x1);
++  void assert_common_3(DepType dept, Klass* ctxk, DepValue x1, DepValue x2);
+ 
+  public:
+   // Adding assertions to a new dependency set at compile time:
+-  void assert_evol_method(ciMethod* m);
+-  void assert_leaf_type(ciKlass* ctxk);
+-  void assert_abstract_with_unique_concrete_subtype(ciKlass* ctxk, ciKlass* conck);
+-  void assert_abstract_with_no_concrete_subtype(ciKlass* ctxk);
+-  void assert_concrete_with_no_concrete_subtype(ciKlass* ctxk);
+-  void assert_unique_concrete_method(ciKlass* ctxk, ciMethod* uniqm);
+-  void assert_abstract_with_exclusive_concrete_subtypes(ciKlass* ctxk, ciKlass* k1, ciKlass* k2);
+-  void assert_exclusive_concrete_methods(ciKlass* ctxk, ciMethod* m1, ciMethod* m2);
+-  void assert_has_no_finalizable_subclasses(ciKlass* ctxk);
+-  void assert_call_site_target_value(ciCallSite* call_site, ciMethodHandle* method_handle);
++  void assert_evol_method(Method* m);
++  void assert_leaf_type(Klass* ctxk);
++  void assert_abstract_with_unique_concrete_subtype(Klass* ctxk, Klass* conck);
++  void assert_abstract_with_no_concrete_subtype(Klass* ctxk);
++  void assert_concrete_with_no_concrete_subtype(Klass* ctxk);
++  void assert_unique_concrete_method(Klass* ctxk, Method* uniqm);
++  void assert_abstract_with_exclusive_concrete_subtypes(Klass* ctxk, Klass* k1, Klass* k2);
++  void assert_exclusive_concrete_methods(Klass* ctxk, Method* m1, Method* m2);
++  void assert_has_no_finalizable_subclasses(Klass* ctxk);
++  void assert_call_site_target_value(jobject call_site, jobject method_handle);
++
++  // Wrappers for the above in terms of ci classes:
++  void assert_evol_method(ciMethod* m) {
++    assert_evol_method(m->get_Method());
++  }
++  void assert_leaf_type(ciKlass* ctxk) {
++    assert_leaf_type(ctxk->get_Klass());
++  }
++  void assert_abstract_with_unique_concrete_subtype(ciKlass* ctxk, ciKlass* conck) {
++    assert_abstract_with_unique_concrete_subtype(ctxk->get_Klass(), conck->get_Klass());
++  }
++  void assert_abstract_with_no_concrete_subtype(ciKlass* ctxk) {
++    assert_abstract_with_no_concrete_subtype(ctxk->get_Klass());
++  }
++  void assert_concrete_with_no_concrete_subtype(ciKlass* ctxk) {
++    assert_concrete_with_no_concrete_subtype(ctxk->get_Klass());
++  }
++  void assert_unique_concrete_method(ciKlass* ctxk, ciMethod* uniqm) {
++    assert_unique_concrete_method(ctxk->get_Klass(), uniqm->get_Method());
++  }
++  void assert_abstract_with_exclusive_concrete_subtypes(ciKlass* ctxk, ciKlass* k1, ciKlass* k2) {
++    assert_abstract_with_exclusive_concrete_subtypes(ctxk->get_Klass(), k1->get_Klass(), k2->get_Klass());
++  }
++  void assert_exclusive_concrete_methods(ciKlass* ctxk, ciMethod* m1, ciMethod* m2) {
++    assert_exclusive_concrete_methods(ctxk->get_Klass(), m1->get_Method(), m2->get_Method());
++  }
++  void assert_has_no_finalizable_subclasses(ciKlass* ctxk) {
++    assert_has_no_finalizable_subclasses(ctxk->get_Klass());
++  }
++  void assert_call_site_target_value(ciCallSite* call_site, ciMethodHandle* method_handle) {
++    assert_call_site_target_value(call_site->constant_encoding(), method_handle->constant_encoding());
++  }
+ 
+   // Define whether a given method or type is concrete.
+   // These methods define the term "concrete" as used in this module.
+@@ -368,15 +446,15 @@
+   void copy_to(nmethod* nm);
+ 
+   void log_all_dependencies();
+-  void log_dependency(DepType dept, int nargs, ciBaseObject* args[]) {
++  void log_dependency(DepType dept, int nargs, DepValue args[]) {
+     write_dependency_to(log(), dept, nargs, args);
+   }
+   void log_dependency(DepType dept,
+-                      ciBaseObject* x0,
+-                      ciBaseObject* x1 = NULL,
+-                      ciBaseObject* x2 = NULL) {
++                      DepValue x0,
++                      DepValue x1 = DepValue(),
++                      DepValue x2 = DepValue()) {
+     if (log() == NULL)  return;
+-    ciBaseObject* args[max_arg_count];
++    DepValue args[max_arg_count];
+     args[0] = x0;
+     args[1] = x1;
+     args[2] = x2;
+@@ -412,6 +490,10 @@
+                                   DepType dept,
+                                   int nargs, DepArgument args[],
+                                   Klass* witness = NULL);
++         void write_dependency_to(CompileLog* log,
++                                  DepType dept,
++                                  int nargs, DepValue args[],
++                                  Klass* witness = NULL);
+   static void write_dependency_to(xmlStream* xtty,
+                                   DepType dept,
+                                   int nargs, DepArgument args[],
+@@ -422,7 +504,7 @@
+ 
+  private:
+   // helper for encoding common context types as zero:
+-  static ciKlass* ctxk_encoded_as_null(DepType dept, ciBaseObject* x);
++  static Klass* ctxk_encoded_as_null(OopRecorder* oop_recorder, DepType dept, DepValue x);
+ 
+   static Klass* ctxk_encoded_as_null(DepType dept, Metadata* x);
+ 
+--- old/src/share/vm/opto/memnode.cpp	2014-01-20 23:43:39.593523778 +0100
++++ new/src/share/vm/opto/memnode.cpp	2014-01-20 23:43:39.529523778 +0100
+@@ -1763,6 +1763,7 @@
+             }
+             // Add a dependence for invalidation of the optimization.
+             if (!call_site->is_constant_call_site()) {
++              VM_ENTRY_MARK;
+               C->dependencies()->assert_call_site_target_value(call_site, target);
+             }
+             return t;

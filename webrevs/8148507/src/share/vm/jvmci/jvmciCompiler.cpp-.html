@@ -1,0 +1,310 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>Old src/share/vm/jvmci/jvmciCompiler.cpp</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2011, 2015, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 
+  24 #include "precompiled.hpp"
+  25 #include "memory/oopFactory.hpp"
+  26 #include "oops/oop.inline.hpp"
+  27 #include "runtime/javaCalls.hpp"
+  28 #include "runtime/handles.hpp"
+  29 #include "jvmci/jvmciJavaClasses.hpp"
+  30 #include "jvmci/jvmciCompiler.hpp"
+  31 #include "jvmci/jvmciEnv.hpp"
+  32 #include "jvmci/jvmciRuntime.hpp"
+  33 #include "runtime/compilationPolicy.hpp"
+  34 #include "runtime/globals_extension.hpp"
+  35 
+  36 JVMCICompiler* JVMCICompiler::_instance = NULL;
+  37 elapsedTimer JVMCICompiler::_codeInstallTimer;
+  38 
+  39 JVMCICompiler::JVMCICompiler() : AbstractCompiler(jvmci) {
+  40   _bootstrapping = false;
+  41   _methodsCompiled = 0;
+  42   assert(_instance == NULL, "only one instance allowed");
+  43   _instance = this;
+  44 }
+  45 
+  46 // Initialization
+  47 void JVMCICompiler::initialize() {
+  48   if (!UseCompiler || !EnableJVMCI || !UseJVMCICompiler || !should_perform_init()) {
+  49     return;
+  50   }
+  51 
+  52   set_state(initialized);
+  53 
+  54   // JVMCI is considered as application code so we need to
+  55   // stop the VM deferring compilation now.
+  56   CompilationPolicy::completed_vm_startup();
+  57 }
+  58 
+  59 void JVMCICompiler::bootstrap() {
+  60   if (Arguments::mode() == Arguments::_int) {
+  61     // Nothing to do in -Xint mode
+  62     return;
+  63   }
+  64 #ifndef PRODUCT
+  65   // We turn off CompileTheWorld so that compilation requests are not
+  66   // ignored during bootstrap or that JVMCI can be compiled by C1/C2.
+  67   FlagSetting ctwOff(CompileTheWorld, false);
+  68 #endif
+  69 
+  70   JavaThread* THREAD = JavaThread::current();
+  71   _bootstrapping = true;
+  72   ResourceMark rm;
+  73   HandleMark hm;
+  74   if (PrintBootstrap) {
+  75     tty-&gt;print("Bootstrapping JVMCI");
+  76   }
+  77   jlong start = os::javaTimeMillis();
+  78 
+  79   Array&lt;Method*&gt;* objectMethods = SystemDictionary::Object_klass()-&gt;methods();
+  80   // Initialize compile queue with a selected set of methods.
+  81   int len = objectMethods-&gt;length();
+  82   for (int i = 0; i &lt; len; i++) {
+  83     methodHandle mh = objectMethods-&gt;at(i);
+  84     if (!mh-&gt;is_native() &amp;&amp; !mh-&gt;is_static() &amp;&amp; !mh-&gt;is_initializer()) {
+  85       ResourceMark rm;
+  86       int hot_count = 10; // TODO: what's the appropriate value?
+  87       CompileBroker::compile_method(mh, InvocationEntryBci, CompLevel_full_optimization, mh, hot_count, "bootstrap", THREAD);
+  88     }
+  89   }
+  90 
+  91   int qsize;
+  92   bool first_round = true;
+  93   int z = 0;
+  94   do {
+  95     // Loop until there is something in the queue.
+  96     do {
+  97       os::sleep(THREAD, 100, true);
+  98       qsize = CompileBroker::queue_size(CompLevel_full_optimization);
+  99     } while (first_round &amp;&amp; qsize == 0);
+ 100     first_round = false;
+ 101     if (PrintBootstrap) {
+ 102       while (z &lt; (_methodsCompiled / 100)) {
+ 103         ++z;
+ 104         tty-&gt;print_raw(".");
+ 105       }
+ 106     }
+ 107   } while (qsize != 0);
+ 108 
+ 109   if (PrintBootstrap) {
+ 110     tty-&gt;print_cr(" in " JLONG_FORMAT " ms (compiled %d methods)", os::javaTimeMillis() - start, _methodsCompiled);
+ 111   }
+ 112   _bootstrapping = false;
+ 113 }
+ 114 
+ 115 #define CHECK_ABORT THREAD); \
+ 116 if (HAS_PENDING_EXCEPTION) { \
+ 117   char buf[256]; \
+ 118   jio_snprintf(buf, 256, "Uncaught exception at %s:%d", __FILE__, __LINE__); \
+ 119   JVMCICompiler::abort_on_pending_exception(PENDING_EXCEPTION, buf); \
+ 120   return; \
+ 121 } \
+ 122 (void)(0
+ 123 
+ 124 void JVMCICompiler::compile_method(const methodHandle&amp; method, int entry_bci, JVMCIEnv* env) {
+ 125   JVMCI_EXCEPTION_CONTEXT
+ 126 
+ 127   bool is_osr = entry_bci != InvocationEntryBci;
+ 128   if (_bootstrapping &amp;&amp; is_osr) {
+ 129       // no OSR compilations during bootstrap - the compiler is just too slow at this point,
+ 130       // and we know that there are no endless loops
+ 131       return;
+ 132   }
+ 133 
+ 134   JVMCIRuntime::initialize_well_known_classes(CHECK_ABORT);
+ 135 
+ 136   HandleMark hm;
+ 137   Handle receiver = JVMCIRuntime::get_HotSpotJVMCIRuntime(CHECK_ABORT);
+ 138 
+ 139   JavaValue method_result(T_OBJECT);
+ 140   JavaCallArguments args;
+ 141   args.push_long((jlong) (address) method());
+ 142   JavaCalls::call_static(&amp;method_result, SystemDictionary::HotSpotResolvedJavaMethodImpl_klass(),
+ 143                          vmSymbols::fromMetaspace_name(), vmSymbols::method_fromMetaspace_signature(), &amp;args, THREAD);
+ 144 
+ 145   JavaValue result(T_OBJECT);
+ 146   if (!HAS_PENDING_EXCEPTION) {
+ 147     JavaCallArguments args;
+ 148     args.push_oop(receiver);
+ 149     args.push_oop((oop)method_result.get_jobject());
+ 150     args.push_int(entry_bci);
+ 151     args.push_long((jlong) (address) env);
+ 152     args.push_int(env-&gt;task()-&gt;compile_id());
+ 153     JavaCalls::call_special(&amp;result, receiver-&gt;klass(),
+ 154                             vmSymbols::compileMethod_name(), vmSymbols::compileMethod_signature(), &amp;args, THREAD);
+ 155   }
+ 156 
+ 157   // An uncaught exception was thrown during compilation.  Generally these
+ 158   // should be handled by the Java code in some useful way but if they leak
+ 159   // through to here report them instead of dying or silently ignoring them.
+ 160   if (HAS_PENDING_EXCEPTION) {
+ 161     Handle exception(THREAD, PENDING_EXCEPTION);
+ 162     CLEAR_PENDING_EXCEPTION;
+ 163 
+ 164     java_lang_Throwable::java_printStackTrace(exception, THREAD);
+ 165 
+ 166     env-&gt;set_failure("exception throw", false);
+ 167   } else {
+ 168     oop result_object = (oop) result.get_jobject();
+ 169     if (result_object != NULL) {
+ 170       oop failure_message = CompilationRequestResult::failureMessage(result_object);
+ 171       if (failure_message != NULL) {
+ 172         const char* failure_reason = java_lang_String::as_utf8_string(failure_message);
+ 173         env-&gt;set_failure(failure_reason, CompilationRequestResult::retry(result_object) != 0);
+ 174       } else {
+ 175         if (env-&gt;task()-&gt;code() == NULL) {
+ 176           env-&gt;set_failure("no nmethod produced", true);
+ 177         } else {
+ 178           env-&gt;task()-&gt;set_num_inlined_bytecodes(CompilationRequestResult::inlinedBytecodes(result_object));
+ 179           _methodsCompiled++;
+ 180         }
+ 181       }
+ 182     } else {
+ 183       assert(false, "JVMCICompiler.compileMethod should always return non-null");
+ 184     }
+ 185   }
+ 186 }
+ 187 
+ 188 /**
+ 189  * Aborts the VM due to an unexpected exception.
+ 190  */
+ 191 void JVMCICompiler::abort_on_pending_exception(Handle exception, const char* message, bool dump_core) {
+ 192   Thread* THREAD = Thread::current();
+ 193   CLEAR_PENDING_EXCEPTION;
+ 194 
+ 195   java_lang_Throwable::java_printStackTrace(exception, THREAD);
+ 196 
+ 197   // Give other aborting threads to also print their stack traces.
+ 198   // This can be very useful when debugging class initialization
+ 199   // failures.
+ 200   assert(THREAD-&gt;is_Java_thread(), "compiler threads should be Java threads");
+ 201   const bool interruptible = true;
+ 202   os::sleep(THREAD, 200, interruptible);
+ 203 
+ 204   vm_abort(dump_core);
+ 205 }
+ 206 
+ 207 // Compilation entry point for methods
+ 208 void JVMCICompiler::compile_method(ciEnv* env, ciMethod* target, int entry_bci, DirectiveSet* directive) {
+ 209   ShouldNotReachHere();
+ 210 }
+ 211 
+ 212 bool JVMCICompiler::is_trivial(Method* method) {
+ 213   if (_bootstrapping) {
+ 214     return false;
+ 215   }
+ 216   return JVMCIRuntime::treat_as_trivial(method);
+ 217 }
+ 218 
+ 219 // Print compilation timers and statistics
+ 220 void JVMCICompiler::print_timers() {
+ 221   print_compilation_timers();
+ 222 }
+ 223 
+ 224 // Print compilation timers and statistics
+ 225 void JVMCICompiler::print_compilation_timers() {
+ 226   TRACE_jvmci_1("JVMCICompiler::print_timers");
+ 227   tty-&gt;print_cr("       JVMCI code install time:        %6.3f s",    _codeInstallTimer.seconds());
+ 228 }
+</pre></body></html>

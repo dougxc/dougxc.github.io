@@ -1,0 +1,197 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>hotspot Udiff src/share/vm/compiler/compileBroker.cpp</title>
+
+<style type="text/css" media="screen">
+span.new {
+    color: blue;
+    font-weight: normal;
+}
+</style>
+
+</head>
+<body id="SUNWwebrev">
+<h2>src/share/vm/compiler/compileBroker.cpp</h2>
+        <a class="print" href="javascript:print()">Print this page</a>
+<pre></pre>
+        <pre>
+</pre><hr /><pre>
+<span class="newmarker">@@ -235,14 +235,31 @@</span>
+   if (log != NULL)  task-&gt;log_task_done(log);
+   thread-&gt;set_task(NULL);
+   task-&gt;set_code_handle(NULL);
+   thread-&gt;set_env(NULL);
+   if (task-&gt;is_blocking()) {
+<span class="new">+    bool free_task = false;</span>
+<span class="new">+    {</span>
+     MutexLocker notifier(task-&gt;lock(), thread);
+     task-&gt;mark_complete();
+<span class="removed">-    // Notify the waiting thread that the compilation has completed.</span>
+<span class="new">+#if INCLUDE_JVMCI</span>
+<span class="new">+      if (CompileBroker::compiler(task-&gt;comp_level())-&gt;is_jvmci() &amp;&amp;</span>
+<span class="new">+        !task-&gt;has_waiter()) {</span>
+<span class="new">+        // The waiting thread timed out and thus did not free the task.</span>
+<span class="new">+        free_task = true;</span>
+<span class="new">+      }</span>
+<span class="new">+#endif</span>
+<span class="new">+      if (!free_task) {</span>
+<span class="new">+        // Notify the waiting thread that the compilation has completed</span>
+<span class="new">+        // so that it can free the task.</span>
+     task-&gt;lock()-&gt;notify_all();
+<span class="new">+      }</span>
+<span class="new">+    }</span>
+<span class="new">+    if (free_task) {</span>
+<span class="new">+      // The task can only be freed once the task lock is released.</span>
+<span class="new">+      CompileTask::free(task);</span>
+<span class="new">+    }</span>
+   } else {
+     task-&gt;mark_complete();
+ 
+     // By convention, the compiling thread is responsible for
+     // recycling a non-blocking CompileTask.
+</pre><hr /><pre>
+<span class="newmarker">@@ -1300,10 +1317,15 @@</span>
+                        blocking);
+   queue-&gt;add(new_task);
+   return new_task;
+ }
+ 
+<span class="new">+// 1 second should be long enough to complete most JVMCI compilations</span>
+<span class="new">+// and not too long to stall a blocking JVMCI compilation that</span>
+<span class="new">+// is trying to acquire a lock held by the app thread that submitted the</span>
+<span class="new">+// compilation.</span>
+<span class="new">+static const long BLOCKING_JVMCI_COMPILATION_TIMEOUT = 1000;</span>
+ 
+ /**
+  *  Wait for the compilation task to complete.
+  */
+ void CompileBroker::wait_for_completion(CompileTask* task) {
+</pre><hr /><pre>
+<span class="newmarker">@@ -1316,19 +1338,35 @@</span>
+ 
+   JavaThread* thread = JavaThread::current();
+   thread-&gt;set_blocked_on_compilation(true);
+ 
+   methodHandle method(thread, task-&gt;method());
+<span class="new">+  bool free_task;</span>
+<span class="new">+#if INCLUDE_JVMCI</span>
+<span class="new">+  if (compiler(task-&gt;comp_level())-&gt;is_jvmci()) {</span>
+<span class="new">+    MutexLocker waiter(task-&gt;lock(), thread);</span>
+<span class="new">+    // No need to check if compilation has completed - just</span>
+<span class="new">+    // rely on the time out. The JVMCI compiler thread will</span>
+<span class="new">+    // recycle the CompileTask.</span>
+<span class="new">+    task-&gt;lock()-&gt;wait(!Mutex::_no_safepoint_check_flag, BLOCKING_JVMCI_COMPILATION_TIMEOUT);</span>
+<span class="new">+    // If the compilation completes while has_waiter is true then</span>
+<span class="new">+    // this thread is responsible for freeing the task.  Otherwise</span>
+<span class="new">+    // the compiler thread will free the task.</span>
+<span class="new">+    task-&gt;clear_waiter();</span>
+<span class="new">+    free_task = task-&gt;is_complete();</span>
+<span class="new">+  } else</span>
+<span class="new">+#endif</span>
+   {
+     MutexLocker waiter(task-&gt;lock(), thread);
+<span class="removed">-</span>
+<span class="new">+    free_task = true;</span>
+     while (!task-&gt;is_complete() &amp;&amp; !is_compilation_disabled_forever()) {
+       task-&gt;lock()-&gt;wait();
+     }
+   }
+ 
+   thread-&gt;set_blocked_on_compilation(false);
+<span class="new">+  if (free_task) {</span>
+   if (is_compilation_disabled_forever()) {
+     CompileTask::free(task);
+     return;
+   }
+ 
+</pre><hr /><pre>
+<span class="newmarker">@@ -1340,10 +1378,11 @@</span>
+   // By convention, the waiter is responsible for recycling a
+   // blocking CompileTask. Since there is only one waiter ever
+   // waiting on a CompileTask, we know that no one else will
+   // be using this CompileTask; we can free it.
+   CompileTask::free(task);
+<span class="new">+  }</span>
+ }
+ 
+ /**
+  * Initialize compiler thread(s) + compiler object(s). The postcondition
+  * of this function is that the compiler runtimes are initialized and that
+</pre></body></html>
+

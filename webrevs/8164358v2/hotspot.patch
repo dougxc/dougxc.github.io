@@ -1,0 +1,495 @@
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2016-08-23 18:57:21.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2016-08-23 18:57:21.000000000 +0200
+@@ -348,6 +348,7 @@
+      *         [String name, Long value, ...] vmConstants,
+      *         [String name, Long value, ...] vmAddresses,
+      *         VMFlag[] vmFlags
++     *         VMIntrinsicMethod[] vmIntrinsics
+      *     ]
+      * </pre>
+      *
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java	2016-08-23 18:57:22.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java	2016-08-23 18:57:22.000000000 +0200
+@@ -497,6 +497,9 @@
+         for (Map.Entry<String, Long> e : typeSizes.entrySet()) {
+             printConfigLine(vm, "[vmconfig:type size] %s = %d%n", e.getKey(), e.getValue());
+         }
++        for (VMIntrinsicMethod e : store.getIntrinsics()) {
++            printConfigLine(vm, "[vmconfig:intrinsic] %d = %s.%s %s%n", e.id, e.declaringClass, e.name, e.descriptor);
++        }
+     }
+ 
+     public OutputStream getLogStream() {
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethod.java	2016-08-23 18:57:23.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethod.java	2016-08-23 18:57:23.000000000 +0200
+@@ -112,6 +112,15 @@
+     int intrinsicId();
+ 
+     /**
++     * Determines if this method denotes itself as a candidate for intrinsification. As of JDK 9,
++     * this is denoted by the {@code HotSpotIntrinsicCandidate} annotation. In earlier JDK versions,
++     * this method returns true.
++     *
++     * @see <a href="https://bugs.openjdk.java.net/browse/JDK-8076112">JDK-8076112</a>
++     */
++    boolean isIntrinsicCandidate();
++
++    /**
+      * Allocates a compile id for this method by asking the VM for one.
+      *
+      * @param entryBCI entry bci
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java	2016-08-23 18:57:24.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java	2016-08-23 18:57:24.000000000 +0200
+@@ -693,6 +693,10 @@
+         return UNSAFE.getChar(metaspaceMethod + config.methodIntrinsicIdOffset);
+     }
+ 
++    public boolean isIntrinsicCandidate() {
++        return (getFlags() & config().methodFlagsIntrinsicCandidate) != 0;
++    }
++
+     @Override
+     public JavaConstant invoke(JavaConstant receiver, JavaConstant[] arguments) {
+         assert !isConstructor();
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java	2016-08-23 18:57:25.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java	2016-08-23 18:57:25.000000000 +0200
+@@ -144,6 +144,7 @@
+ 
+     final int methodFlagsCallerSensitive = getConstant("Method::_caller_sensitive", Integer.class);
+     final int methodFlagsForceInline = getConstant("Method::_force_inline", Integer.class);
++    final int methodFlagsIntrinsicCandidate = getConstant("Method::_intrinsic_candidate", Integer.class);
+     final int methodFlagsDontInline = getConstant("Method::_dont_inline", Integer.class);
+     final int methodFlagsReservedStackAccess = getConstant("Method::_reserved_stack_access", Integer.class);
+     final int nonvirtualVtableIndex = getConstant("Method::nonvirtual_vtable_index", Integer.class);
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfigAccess.java	2016-08-23 18:57:27.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfigAccess.java	2016-08-23 18:57:27.000000000 +0200
+@@ -30,6 +30,13 @@
+ public class HotSpotVMConfigAccess {
+ 
+     /**
++     * Gets the available configuration data.
++     */
++    public HotSpotVMConfigStore getStore() {
++        return store;
++    }
++
++    /**
+      * Gets the address of a C++ symbol.
+      *
+      * @param name name of C++ symbol
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfigStore.java	2016-08-23 18:57:28.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfigStore.java	2016-08-23 18:57:28.000000000 +0200
+@@ -24,8 +24,10 @@
+ 
+ import static jdk.vm.ci.common.InitTimer.timer;
+ 
++import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.HashMap;
++import java.util.List;
+ import java.util.Map;
+ 
+ import jdk.vm.ci.common.InitTimer;
+@@ -80,11 +82,19 @@
+         return Collections.unmodifiableMap(vmFields);
+     }
+ 
++    /**
++     * Gets the VM intrinsic descriptions exposed by this object.
++     */
++    public List<VMIntrinsicMethod> getIntrinsics() {
++        return Collections.unmodifiableList(vmIntrinsics);
++    }
++
+     final HashMap<String, VMField> vmFields;
+     final HashMap<String, Long> vmTypeSizes;
+     final HashMap<String, Long> vmConstants;
+     final HashMap<String, Long> vmAddresses;
+     final HashMap<String, VMFlag> vmFlags;
++    final List<VMIntrinsicMethod> vmIntrinsics;
+ 
+     /**
+      * Reads the database of VM info. The return value encodes the info in a nested object array
+@@ -97,6 +107,7 @@
+      *         [String name, Long value, ...] vmConstants,
+      *         [String name, Long value, ...] vmAddresses,
+      *         VMFlag[] vmFlags
++     *         VMIntrinsicMethod[] vmIntrinsics
+      *     ]
+      * </pre>
+      */
+@@ -106,7 +117,7 @@
+         try (InitTimer t = timer("CompilerToVm readConfiguration")) {
+             data = compilerToVm.readConfiguration();
+         }
+-        assert data.length == 5 : data.length;
++        assert data.length == 6 : data.length;
+ 
+         // @formatter:off
+         VMField[] vmFieldsInfo    = (VMField[]) data[0];
+@@ -115,11 +126,12 @@
+         Object[] vmAddressesInfo  = (Object[])  data[3];
+         VMFlag[] vmFlagsInfo      = (VMFlag[])  data[4];
+ 
+-        vmFields    = new HashMap<>(vmFieldsInfo.length);
+-        vmTypeSizes = new HashMap<>(vmTypesSizesInfo.length);
+-        vmConstants = new HashMap<>(vmConstantsInfo.length);
+-        vmAddresses = new HashMap<>(vmAddressesInfo.length);
+-        vmFlags     = new HashMap<>(vmFlagsInfo.length);
++        vmFields     = new HashMap<>(vmFieldsInfo.length);
++        vmTypeSizes  = new HashMap<>(vmTypesSizesInfo.length);
++        vmConstants  = new HashMap<>(vmConstantsInfo.length);
++        vmAddresses  = new HashMap<>(vmAddressesInfo.length);
++        vmFlags      = new HashMap<>(vmFlagsInfo.length);
++        vmIntrinsics = Arrays.asList((VMIntrinsicMethod[]) data[5]);
+         // @formatter:on
+ 
+         try (InitTimer t = timer("HotSpotVMConfigStore<init> fill maps")) {
+--- old/src/share/vm/jvmci/jvmciCompilerToVM.cpp	2016-08-23 18:57:29.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciCompilerToVM.cpp	2016-08-23 18:57:29.000000000 +0200
+@@ -211,8 +211,9 @@
+ 
+   CompilerToVM::Data::initialize();
+ 
+-  VMField::klass()->initialize(thread);
+-  VMFlag::klass()->initialize(thread);
++  VMField::klass()->initialize(CHECK_NULL);
++  VMFlag::klass()->initialize(CHECK_NULL);
++  VMIntrinsicMethod::klass()->initialize(CHECK_NULL);
+ 
+   int len = JVMCIVMStructs::localHotSpotVMStructs_count();
+   objArrayHandle vmFields = oopFactory::new_objArray(VMField::klass(), len, CHECK_NULL);
+@@ -220,7 +221,7 @@
+     VMStructEntry vmField = JVMCIVMStructs::localHotSpotVMStructs[i];
+     instanceHandle vmFieldObj = InstanceKlass::cast(VMField::klass())->allocate_instance_handle(CHECK_NULL);
+     size_t name_buf_len = strlen(vmField.typeName) + strlen(vmField.fieldName) + 2 /* "::" */;
+-    char* name_buf = NEW_RESOURCE_ARRAY(char, name_buf_len + 1);
++    char* name_buf = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, char, name_buf_len + 1);
+     sprintf(name_buf, "%s::%s", vmField.typeName, vmField.fieldName);
+     Handle name = java_lang_String::create_from_str(name_buf, CHECK_NULL);
+     Handle type = java_lang_String::create_from_str(vmField.typeString, CHECK_NULL);
+@@ -338,12 +339,42 @@
+     vmFlags->obj_at_put(i, vmFlagObj());
+   }
+ 
+-  objArrayOop data = oopFactory::new_objArray(SystemDictionary::Object_klass(), 5, CHECK_NULL);
++  objArrayHandle vmIntrinsics = oopFactory::new_objArray(VMIntrinsicMethod::klass(), (vmIntrinsics::ID_LIMIT - 1), CHECK_NULL);
++  int index = 0;
++  // The intrinsics for a class are usually adjacent to each other.
++  // When they are, the string for the class name can be reused.
++  vmSymbols::SID kls_sid = vmSymbols::NO_SID;
++  Handle kls_str;
++#define SID_ENUM(n) vmSymbols::VM_SYMBOL_ENUM_NAME(n)
++#define VM_SYMBOL_TO_STRING(s) \
++  java_lang_String::create_from_symbol(vmSymbols::symbol_at(SID_ENUM(s)), THREAD)
++#define VM_INTRINSIC_INFO(id, kls, name, sig, ignore_fcode) {             \
++    instanceHandle vmIntrinsicMethod = InstanceKlass::cast(VMIntrinsicMethod::klass())->allocate_instance_handle(CHECK_NULL); \
++    if (kls_sid != SID_ENUM(kls)) {                                       \
++      kls_str = VM_SYMBOL_TO_STRING(kls);                                 \
++      kls_sid = SID_ENUM(kls);                                            \
++    }                                                                     \
++    Handle name_str = VM_SYMBOL_TO_STRING(name);                          \
++    Handle sig_str = VM_SYMBOL_TO_STRING(sig);                            \
++    VMIntrinsicMethod::set_declaringClass(vmIntrinsicMethod, kls_str());  \
++    VMIntrinsicMethod::set_name(vmIntrinsicMethod, name_str());           \
++    VMIntrinsicMethod::set_descriptor(vmIntrinsicMethod, sig_str());      \
++    VMIntrinsicMethod::set_id(vmIntrinsicMethod, vmIntrinsics::id);       \
++      vmIntrinsics->obj_at_put(index++, vmIntrinsicMethod());             \
++  }
++
++  VM_INTRINSICS_DO(VM_INTRINSIC_INFO, VM_SYMBOL_IGNORE, VM_SYMBOL_IGNORE, VM_SYMBOL_IGNORE, VM_ALIAS_IGNORE)
++#undef VM_INTRINSIC_SYMBOL
++#undef VM_INTRINSIC_INFO
++  assert(index == vmIntrinsics::ID_LIMIT - 1, "must be");
++
++  objArrayOop data = oopFactory::new_objArray(SystemDictionary::Object_klass(), 6, CHECK_NULL);
+   data->obj_at_put(0, vmFields());
+   data->obj_at_put(1, vmTypes());
+   data->obj_at_put(2, vmConstants());
+   data->obj_at_put(3, vmAddresses());
+   data->obj_at_put(4, vmFlags());
++  data->obj_at_put(5, vmIntrinsics());
+ 
+   return (jobjectArray) JNIHandles::make_local(THREAD, data);
+ #undef BOXED_LONG
+--- old/src/share/vm/jvmci/jvmciJavaClasses.hpp	2016-08-23 18:57:30.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciJavaClasses.hpp	2016-08-23 18:57:30.000000000 +0200
+@@ -124,6 +124,12 @@
+     oop_field(VMFlag, type, "Ljava/lang/String;")                                                                                                              \
+     oop_field(VMFlag, value, "Ljava/lang/Object;")                                                                                                             \
+   end_class                                                                                                                                                    \
++  start_class(VMIntrinsicMethod)                                                                                                                               \
++    oop_field(VMIntrinsicMethod, declaringClass, "Ljava/lang/String;")                                                                                         \
++    oop_field(VMIntrinsicMethod, name, "Ljava/lang/String;")                                                                                                   \
++    oop_field(VMIntrinsicMethod, descriptor, "Ljava/lang/String;")                                                                                             \
++    int_field(VMIntrinsicMethod, id)                                                                                                                           \
++  end_class                                                                                                                                                    \
+   start_class(Assumptions_NoFinalizableSubclass)                                                                                                               \
+     oop_field(Assumptions_NoFinalizableSubclass, receiverType, "Ljdk/vm/ci/meta/ResolvedJavaType;")                                                            \
+   end_class                                                                                                                                                    \
+--- old/src/share/vm/jvmci/systemDictionary_jvmci.hpp	2016-08-23 18:57:31.000000000 +0200
++++ new/src/share/vm/jvmci/systemDictionary_jvmci.hpp	2016-08-23 18:57:31.000000000 +0200
+@@ -51,6 +51,7 @@
+   do_klass(HotSpotCompilationRequestResult_klass,        jdk_vm_ci_hotspot_HotSpotCompilationRequestResult,     Jvmci) \
+   do_klass(VMField_klass,                                jdk_vm_ci_hotspot_VMField,                             Jvmci) \
+   do_klass(VMFlag_klass,                                 jdk_vm_ci_hotspot_VMFlag,                              Jvmci) \
++  do_klass(VMIntrinsicMethod_klass,                      jdk_vm_ci_hotspot_VMIntrinsicMethod,                   Jvmci) \
+   do_klass(Assumptions_ConcreteMethod_klass,             jdk_vm_ci_meta_Assumptions_ConcreteMethod,             Jvmci) \
+   do_klass(Assumptions_NoFinalizableSubclass_klass,      jdk_vm_ci_meta_Assumptions_NoFinalizableSubclass,      Jvmci) \
+   do_klass(Assumptions_ConcreteSubtype_klass,            jdk_vm_ci_meta_Assumptions_ConcreteSubtype,            Jvmci) \
+--- old/src/share/vm/jvmci/vmStructs_jvmci.cpp	2016-08-23 18:57:32.000000000 +0200
++++ new/src/share/vm/jvmci/vmStructs_jvmci.cpp	2016-08-23 18:57:32.000000000 +0200
+@@ -493,6 +493,7 @@
+   declare_constant(Method::_force_inline)                                 \
+   declare_constant(Method::_dont_inline)                                  \
+   declare_constant(Method::_hidden)                                       \
++  declare_constant(Method::_intrinsic_candidate)                          \
+   declare_constant(Method::_reserved_stack_access)                        \
+                                                                           \
+   declare_constant(Method::nonvirtual_vtable_index)                       \
+--- old/src/share/vm/jvmci/vmSymbols_jvmci.hpp	2016-08-23 18:57:33.000000000 +0200
++++ new/src/share/vm/jvmci/vmSymbols_jvmci.hpp	2016-08-23 18:57:33.000000000 +0200
+@@ -52,6 +52,7 @@
+   template(jdk_vm_ci_hotspot_HotSpotCompilationRequestResult,     "jdk/vm/ci/hotspot/HotSpotCompilationRequestResult")     \
+   template(jdk_vm_ci_hotspot_VMField,                             "jdk/vm/ci/hotspot/VMField")                             \
+   template(jdk_vm_ci_hotspot_VMFlag,                              "jdk/vm/ci/hotspot/VMFlag")                              \
++  template(jdk_vm_ci_hotspot_VMIntrinsicMethod,                   "jdk/vm/ci/hotspot/VMIntrinsicMethod")                   \
+   template(jdk_vm_ci_meta_JavaConstant,                           "jdk/vm/ci/meta/JavaConstant")                           \
+   template(jdk_vm_ci_meta_PrimitiveConstant,                      "jdk/vm/ci/meta/PrimitiveConstant")                      \
+   template(jdk_vm_ci_meta_RawConstant,                            "jdk/vm/ci/meta/RawConstant")                            \
+--- /dev/null	2016-08-23 18:57:34.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/VMIntrinsicMethod.java	2016-08-23 18:57:34.000000000 +0200
+@@ -0,0 +1,87 @@
++/*
++ * Copyright (c) 2016, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package jdk.vm.ci.hotspot;
++
++import jdk.vm.ci.meta.Signature;
++
++/**
++ * Describes a method for which the VM has an intrinsic implementation.
++ */
++public final class VMIntrinsicMethod {
++
++    /**
++     * The name of the class declaring the intrinsified method. The name is in
++     * <a href="https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-4.html#jvms-4.2.1">class
++     * file format</a> (e.g., {@code "java/lang/Thread"} instead of {@code "java.lang.Thread"}).
++     */
++    public final String declaringClass;
++
++    /**
++     * The name of the intrinsified method. This is not guaranteed to be a legal method name (e.g.,
++     * there is a HotSpot intrinsic with the name {@code "<compiledLambdaForm>"}).
++     */
++    public final String name;
++
++    /**
++     * The {@link Signature#toMethodDescriptor() descriptor} of the intrinsified method. This is not
++     * guaranteed to be a legal method descriptor (e.g., intrinsics for signature polymorphic
++     * methods have a descriptor of {@code "*"}).
++     */
++    public final String descriptor;
++
++    /**
++     * The unique VM identifier for the intrinsic.
++     */
++    public final int id;
++
++    VMIntrinsicMethod(String declaringClass, String name, String descriptor, int id) {
++        this.declaringClass = declaringClass;
++        this.name = name;
++        this.descriptor = descriptor;
++        this.id = id;
++    }
++
++    @Override
++    public boolean equals(Object obj) {
++        if (obj instanceof VMIntrinsicMethod) {
++            VMIntrinsicMethod that = (VMIntrinsicMethod) obj;
++            if (that.id == this.id) {
++                assert that.name.equals(this.name) &&
++                                that.declaringClass.equals(this.declaringClass) &&
++                                that.descriptor.equals(this.descriptor);
++                return true;
++            }
++        }
++        return false;
++    }
++
++    @Override
++    public int hashCode() {
++        return id;
++    }
++
++    @Override
++    public String toString() {
++        return String.format("IntrinsicMethod[declaringClass=%s, name=%s, descriptor=%s, id=%d]", declaringClass, name, descriptor, id);
++    }
++}
+--- old/test/compiler/jvmci/compilerToVM/InitializeConfigurationTest.java	2016-08-23 18:57:35.000000000 +0200
++++ /dev/null	2016-08-23 18:57:35.000000000 +0200
+@@ -1,64 +0,0 @@
+-/*
+- * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-
+-/*
+- * @test
+- * @bug 8136421
+- * @requires (vm.simpleArch == "x64" | vm.simpleArch == "sparcv9" | vm.simpleArch == "aarch64")
+- * @library / /test/lib
+- * @library ../common/patches
+- * @modules java.base/jdk.internal.misc
+- * @modules jdk.vm.ci/jdk.vm.ci.hotspot
+- * @build jdk.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper
+- * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
+- *                   compiler.jvmci.compilerToVM.InitializeConfigurationTest
+- */
+-
+-package compiler.jvmci.compilerToVM;
+-
+-import jdk.test.lib.Asserts;
+-import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
+-import jdk.vm.ci.hotspot.HotSpotVMConfigAccess;
+-import jdk.vm.ci.hotspot.HotSpotVMConfigStore;
+-
+-public class InitializeConfigurationTest {
+-    public static void main(String args[]) {
+-        new InitializeConfigurationTest().runTest();
+-    }
+-
+-    private void runTest() {
+-        TestHotSpotVMConfig config = new TestHotSpotVMConfig(HotSpotJVMCIRuntime.runtime().getConfigStore());
+-        Asserts.assertNE(config.codeCacheHighBound, 0L, "Got null address");
+-        Asserts.assertNE(config.stubRoutineJintArrayCopy, 0L, "Got null address");
+-    }
+-
+-    private static class TestHotSpotVMConfig extends HotSpotVMConfigAccess {
+-
+-        private TestHotSpotVMConfig(HotSpotVMConfigStore store) {
+-            super(store);
+-        }
+-
+-        final long codeCacheHighBound = getFieldValue("CodeCache::_high_bound", Long.class);
+-        final long stubRoutineJintArrayCopy = getFieldValue("StubRoutines::_jint_arraycopy", Long.class);
+-    }
+-}
+--- /dev/null	2016-08-23 18:57:35.000000000 +0200
++++ new/test/compiler/jvmci/compilerToVM/ReadConfigurationTest.java	2016-08-23 18:57:35.000000000 +0200
+@@ -0,0 +1,76 @@
++/*
++ * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++/*
++ * @test
++ * @bug 8136421
++ * @requires (vm.simpleArch == "x64" | vm.simpleArch == "sparcv9" | vm.simpleArch == "aarch64")
++ * @library / /test/lib
++ * @library ../common/patches
++ * @modules java.base/jdk.internal.misc
++ * @modules jdk.vm.ci/jdk.vm.ci.hotspot
++ * @build jdk.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper
++ * @build compiler.jvmci.compilerToVM.ReadConfigurationTest
++ * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
++ *                   compiler.jvmci.compilerToVM.ReadConfigurationTest
++ */
++
++package compiler.jvmci.compilerToVM;
++
++import jdk.test.lib.Asserts;
++import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
++import jdk.vm.ci.hotspot.HotSpotVMConfigAccess;
++import jdk.vm.ci.hotspot.HotSpotVMConfigStore;
++import jdk.vm.ci.hotspot.VMIntrinsicMethod;
++
++public class ReadConfigurationTest {
++    public static void main(String args[]) {
++        new ReadConfigurationTest().runTest();
++    }
++
++    private void runTest() {
++        TestHotSpotVMConfig config = new TestHotSpotVMConfig(HotSpotJVMCIRuntime.runtime().getConfigStore());
++        Asserts.assertNE(config.codeCacheHighBound, 0L, "Got null address");
++        Asserts.assertNE(config.stubRoutineJintArrayCopy, 0L, "Got null address");
++
++        for (VMIntrinsicMethod m : config.getStore().getIntrinsics()) {
++            Asserts.assertNotNull(m);
++            Asserts.assertNotNull(m.declaringClass);
++            Asserts.assertFalse(m.declaringClass.contains("."),
++                "declaringClass should be in class file format: " + m.declaringClass);
++            Asserts.assertNotNull(m.name);
++            Asserts.assertNotNull(m.descriptor);
++            Asserts.assertTrue(m.id > 0);
++        }
++    }
++
++    private static class TestHotSpotVMConfig extends HotSpotVMConfigAccess {
++
++        private TestHotSpotVMConfig(HotSpotVMConfigStore store) {
++            super(store);
++        }
++
++        final long codeCacheHighBound = getFieldValue("CodeCache::_high_bound", Long.class);
++        final long stubRoutineJintArrayCopy = getFieldValue("StubRoutines::_jint_arraycopy", Long.class);
++    }
++}

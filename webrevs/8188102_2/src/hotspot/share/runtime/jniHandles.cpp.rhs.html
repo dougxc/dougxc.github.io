@@ -1,0 +1,777 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 1998, 2017, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #include "precompiled.hpp"
+  26 #include "classfile/systemDictionary.hpp"
+  27 #include "logging/log.hpp"
+  28 #include "memory/iterator.hpp"
+  29 #include "oops/oop.inline.hpp"
+  30 #include "runtime/jniHandles.hpp"
+  31 #include "runtime/mutexLocker.hpp"
+  32 #include "runtime/thread.inline.hpp"
+  33 #include "utilities/align.hpp"
+  34 #if INCLUDE_ALL_GCS
+  35 #include "gc/g1/g1SATBCardTableModRefBS.hpp"
+  36 #endif
+  37 
+  38 JNIHandleBlock* JNIHandles::_global_handles       = NULL;
+  39 JNIHandleBlock* JNIHandles::_weak_global_handles  = NULL;
+  40 oop             JNIHandles::_deleted_handle       = NULL;
+  41 
+  42 
+  43 jobject JNIHandles::make_local(oop obj) {
+  44   if (obj == NULL) {
+  45     return NULL;                // ignore null handles
+  46   } else {
+  47     Thread* thread = Thread::current();
+  48     assert(Universe::heap()-&gt;is_in_reserved(obj), "sanity check");
+  49     return thread-&gt;active_handles()-&gt;allocate_handle(obj);
+  50   }
+  51 }
+  52 
+  53 
+  54 // optimized versions
+  55 
+  56 jobject JNIHandles::make_local(Thread* thread, oop obj) {
+  57   if (obj == NULL) {
+  58     return NULL;                // ignore null handles
+  59   } else {
+  60     assert(Universe::heap()-&gt;is_in_reserved(obj), "sanity check");
+  61     return thread-&gt;active_handles()-&gt;allocate_handle(obj);
+  62   }
+  63 }
+  64 
+  65 
+  66 jobject JNIHandles::make_local(JNIEnv* env, oop obj) {
+  67   if (obj == NULL) {
+  68     return NULL;                // ignore null handles
+  69   } else {
+  70     JavaThread* thread = JavaThread::thread_from_jni_environment(env);
+  71     assert(Universe::heap()-&gt;is_in_reserved(obj), "sanity check");
+  72     return thread-&gt;active_handles()-&gt;allocate_handle(obj);
+  73   }
+  74 }
+  75 
+  76 
+  77 jobject JNIHandles::make_global(Handle obj) {
+  78   assert(!Universe::heap()-&gt;is_gc_active(), "can't extend the root set during GC");
+  79   jobject res = NULL;
+  80   if (!obj.is_null()) {
+  81     // ignore null handles
+  82     MutexLocker ml(JNIGlobalHandle_lock);
+  83     assert(Universe::heap()-&gt;is_in_reserved(obj()), "sanity check");
+  84     res = _global_handles-&gt;allocate_handle(obj());
+  85   } else {
+  86     CHECK_UNHANDLED_OOPS_ONLY(Thread::current()-&gt;clear_unhandled_oops());
+  87   }
+  88 
+  89   return res;
+  90 }
+  91 
+  92 
+  93 jobject JNIHandles::make_weak_global(Handle obj) {
+  94   assert(!Universe::heap()-&gt;is_gc_active(), "can't extend the root set during GC");
+  95   jobject res = NULL;
+  96   if (!obj.is_null()) {
+  97     // ignore null handles
+  98     {
+  99       MutexLocker ml(JNIGlobalHandle_lock);
+ 100       assert(Universe::heap()-&gt;is_in_reserved(obj()), "sanity check");
+ 101       res = _weak_global_handles-&gt;allocate_handle(obj());
+ 102     }
+ 103     // Add weak tag.
+ 104     assert(is_aligned(res, weak_tag_alignment), "invariant");
+ 105     char* tptr = reinterpret_cast&lt;char*&gt;(res) + weak_tag_value;
+ 106     res = reinterpret_cast&lt;jobject&gt;(tptr);
+ 107   } else {
+ 108     CHECK_UNHANDLED_OOPS_ONLY(Thread::current()-&gt;clear_unhandled_oops());
+ 109   }
+ 110   return res;
+ 111 }
+ 112 
+ 113 template&lt;bool external_guard&gt;
+ 114 oop JNIHandles::resolve_jweak(jweak handle) {
+ 115   assert(is_jweak(handle), "precondition");
+ 116   oop result = jweak_ref(handle);
+ 117   result = guard_value&lt;external_guard&gt;(result);
+ 118 #if INCLUDE_ALL_GCS
+ 119   if (result != NULL &amp;&amp; UseG1GC) {
+ 120     G1SATBCardTableModRefBS::enqueue(result);
+ 121   }
+ 122 #endif // INCLUDE_ALL_GCS
+ 123   return result;
+ 124 }
+ 125 
+ 126 template oop JNIHandles::resolve_jweak&lt;true&gt;(jweak);
+ 127 template oop JNIHandles::resolve_jweak&lt;false&gt;(jweak);
+ 128 
+ 129 void JNIHandles::destroy_global(jobject handle) {
+ 130   if (handle != NULL) {
+ 131     assert(is_global_handle(handle), "Invalid delete of global JNI handle");
+ 132     jobject_ref(handle) = deleted_handle();
+ 133   }
+ 134 }
+ 135 
+ 136 
+ 137 void JNIHandles::destroy_weak_global(jobject handle) {
+ 138   if (handle != NULL) {
+ 139     jweak_ref(handle) = deleted_handle();
+ 140   }
+ 141 }
+ 142 
+ 143 
+<a name="1" id="anc1"></a><span class="new"> 144 bool JNIHandles::is_global_weak_cleared(jweak handle) {</span>
+<span class="new"> 145   assert(is_jweak(handle), "not a weak handle");</span>
+<span class="new"> 146   return guard_value&lt;false&gt;(jweak_ref(handle)) == NULL;</span>
+<span class="new"> 147 }</span>
+<span class="new"> 148 </span>
+ 149 void JNIHandles::oops_do(OopClosure* f) {
+ 150   f-&gt;do_oop(&amp;_deleted_handle);
+ 151   _global_handles-&gt;oops_do(f);
+ 152 }
+ 153 
+ 154 
+ 155 void JNIHandles::weak_oops_do(BoolObjectClosure* is_alive, OopClosure* f) {
+ 156   _weak_global_handles-&gt;weak_oops_do(is_alive, f);
+ 157 }
+ 158 
+ 159 
+ 160 void JNIHandles::weak_oops_do(OopClosure* f) {
+ 161   AlwaysTrueClosure always_true;
+ 162   weak_oops_do(&amp;always_true, f);
+ 163 }
+ 164 
+ 165 
+ 166 void JNIHandles::initialize() {
+ 167   _global_handles      = JNIHandleBlock::allocate_block();
+ 168   _weak_global_handles = JNIHandleBlock::allocate_block();
+ 169   EXCEPTION_MARK;
+ 170   // We will never reach the CATCH below since Exceptions::_throw will cause
+ 171   // the VM to exit if an exception is thrown during initialization
+ 172   Klass* k      = SystemDictionary::Object_klass();
+ 173   _deleted_handle = InstanceKlass::cast(k)-&gt;allocate_instance(CATCH);
+ 174 }
+ 175 
+ 176 
+ 177 bool JNIHandles::is_local_handle(Thread* thread, jobject handle) {
+ 178   JNIHandleBlock* block = thread-&gt;active_handles();
+ 179 
+ 180   // Look back past possible native calls to jni_PushLocalFrame.
+ 181   while (block != NULL) {
+ 182     if (block-&gt;chain_contains(handle)) {
+ 183       return true;
+ 184     }
+ 185     block = block-&gt;pop_frame_link();
+ 186   }
+ 187   return false;
+ 188 }
+ 189 
+ 190 
+ 191 // Determine if the handle is somewhere in the current thread's stack.
+ 192 // We easily can't isolate any particular stack frame the handle might
+ 193 // come from, so we'll check the whole stack.
+ 194 
+ 195 bool JNIHandles::is_frame_handle(JavaThread* thr, jobject obj) {
+ 196   // If there is no java frame, then this must be top level code, such
+ 197   // as the java command executable, in which case, this type of handle
+ 198   // is not permitted.
+ 199   return (thr-&gt;has_last_Java_frame() &amp;&amp;
+ 200          (void*)obj &lt; (void*)thr-&gt;stack_base() &amp;&amp;
+ 201          (void*)obj &gt;= (void*)thr-&gt;last_Java_sp());
+ 202 }
+ 203 
+ 204 
+ 205 bool JNIHandles::is_global_handle(jobject handle) {
+ 206   return _global_handles-&gt;chain_contains(handle);
+ 207 }
+ 208 
+ 209 
+ 210 bool JNIHandles::is_weak_global_handle(jobject handle) {
+ 211   return _weak_global_handles-&gt;chain_contains(handle);
+ 212 }
+ 213 
+ 214 long JNIHandles::global_handle_memory_usage() {
+ 215   return _global_handles-&gt;memory_usage();
+ 216 }
+ 217 
+ 218 long JNIHandles::weak_global_handle_memory_usage() {
+ 219   return _weak_global_handles-&gt;memory_usage();
+ 220 }
+ 221 
+ 222 
+ 223 class CountHandleClosure: public OopClosure {
+ 224 private:
+ 225   int _count;
+ 226 public:
+ 227   CountHandleClosure(): _count(0) {}
+ 228   virtual void do_oop(oop* ooph) {
+ 229     if (*ooph != JNIHandles::deleted_handle()) {
+ 230       _count++;
+ 231     }
+ 232   }
+ 233   virtual void do_oop(narrowOop* unused) { ShouldNotReachHere(); }
+ 234   int count() { return _count; }
+ 235 };
+ 236 
+ 237 // We assume this is called at a safepoint: no lock is needed.
+ 238 void JNIHandles::print_on(outputStream* st) {
+ 239   assert(SafepointSynchronize::is_at_safepoint(), "must be at safepoint");
+ 240   assert(_global_handles != NULL &amp;&amp; _weak_global_handles != NULL,
+ 241          "JNIHandles not initialized");
+ 242 
+ 243   CountHandleClosure global_handle_count;
+ 244   oops_do(&amp;global_handle_count);
+ 245   weak_oops_do(&amp;global_handle_count);
+ 246 
+ 247   st-&gt;print_cr("JNI global references: %d", global_handle_count.count());
+ 248   st-&gt;cr();
+ 249   st-&gt;flush();
+ 250 }
+ 251 
+ 252 class VerifyHandleClosure: public OopClosure {
+ 253 public:
+ 254   virtual void do_oop(oop* root) {
+ 255     (*root)-&gt;verify();
+ 256   }
+ 257   virtual void do_oop(narrowOop* root) { ShouldNotReachHere(); }
+ 258 };
+ 259 
+ 260 void JNIHandles::verify() {
+ 261   VerifyHandleClosure verify_handle;
+ 262 
+ 263   oops_do(&amp;verify_handle);
+ 264   weak_oops_do(&amp;verify_handle);
+ 265 }
+ 266 
+ 267 
+ 268 
+ 269 void jni_handles_init() {
+ 270   JNIHandles::initialize();
+ 271 }
+ 272 
+ 273 
+ 274 int             JNIHandleBlock::_blocks_allocated     = 0;
+ 275 JNIHandleBlock* JNIHandleBlock::_block_free_list      = NULL;
+ 276 #ifndef PRODUCT
+ 277 JNIHandleBlock* JNIHandleBlock::_block_list           = NULL;
+ 278 #endif
+ 279 
+ 280 
+ 281 void JNIHandleBlock::zap() {
+ 282   // Zap block values
+ 283   _top = 0;
+ 284   for (int index = 0; index &lt; block_size_in_oops; index++) {
+ 285     _handles[index] = badJNIHandle;
+ 286   }
+ 287 }
+ 288 
+ 289 JNIHandleBlock* JNIHandleBlock::allocate_block(Thread* thread)  {
+ 290   assert(thread == NULL || thread == Thread::current(), "sanity check");
+ 291   JNIHandleBlock* block;
+ 292   // Check the thread-local free list for a block so we don't
+ 293   // have to acquire a mutex.
+ 294   if (thread != NULL &amp;&amp; thread-&gt;free_handle_block() != NULL) {
+ 295     block = thread-&gt;free_handle_block();
+ 296     thread-&gt;set_free_handle_block(block-&gt;_next);
+ 297   }
+ 298   else {
+ 299     // locking with safepoint checking introduces a potential deadlock:
+ 300     // - we would hold JNIHandleBlockFreeList_lock and then Threads_lock
+ 301     // - another would hold Threads_lock (jni_AttachCurrentThread) and then
+ 302     //   JNIHandleBlockFreeList_lock (JNIHandleBlock::allocate_block)
+ 303     MutexLockerEx ml(JNIHandleBlockFreeList_lock,
+ 304                      Mutex::_no_safepoint_check_flag);
+ 305     if (_block_free_list == NULL) {
+ 306       // Allocate new block
+ 307       block = new JNIHandleBlock();
+ 308       _blocks_allocated++;
+ 309       if (ZapJNIHandleArea) block-&gt;zap();
+ 310       #ifndef PRODUCT
+ 311       // Link new block to list of all allocated blocks
+ 312       block-&gt;_block_list_link = _block_list;
+ 313       _block_list = block;
+ 314       #endif
+ 315     } else {
+ 316       // Get block from free list
+ 317       block = _block_free_list;
+ 318       _block_free_list = _block_free_list-&gt;_next;
+ 319     }
+ 320   }
+ 321   block-&gt;_top = 0;
+ 322   block-&gt;_next = NULL;
+ 323   block-&gt;_pop_frame_link = NULL;
+ 324   block-&gt;_planned_capacity = block_size_in_oops;
+ 325   // _last, _free_list &amp; _allocate_before_rebuild initialized in allocate_handle
+ 326   debug_only(block-&gt;_last = NULL);
+ 327   debug_only(block-&gt;_free_list = NULL);
+ 328   debug_only(block-&gt;_allocate_before_rebuild = -1);
+ 329   return block;
+ 330 }
+ 331 
+ 332 
+ 333 void JNIHandleBlock::release_block(JNIHandleBlock* block, Thread* thread) {
+ 334   assert(thread == NULL || thread == Thread::current(), "sanity check");
+ 335   JNIHandleBlock* pop_frame_link = block-&gt;pop_frame_link();
+ 336   // Put returned block at the beginning of the thread-local free list.
+ 337   // Note that if thread == NULL, we use it as an implicit argument that
+ 338   // we _don't_ want the block to be kept on the free_handle_block.
+ 339   // See for instance JavaThread::exit().
+ 340   if (thread != NULL ) {
+ 341     if (ZapJNIHandleArea) block-&gt;zap();
+ 342     JNIHandleBlock* freelist = thread-&gt;free_handle_block();
+ 343     block-&gt;_pop_frame_link = NULL;
+ 344     thread-&gt;set_free_handle_block(block);
+ 345 
+ 346     // Add original freelist to end of chain
+ 347     if ( freelist != NULL ) {
+ 348       while ( block-&gt;_next != NULL ) block = block-&gt;_next;
+ 349       block-&gt;_next = freelist;
+ 350     }
+ 351     block = NULL;
+ 352   }
+ 353   if (block != NULL) {
+ 354     // Return blocks to free list
+ 355     // locking with safepoint checking introduces a potential deadlock:
+ 356     // - we would hold JNIHandleBlockFreeList_lock and then Threads_lock
+ 357     // - another would hold Threads_lock (jni_AttachCurrentThread) and then
+ 358     //   JNIHandleBlockFreeList_lock (JNIHandleBlock::allocate_block)
+ 359     MutexLockerEx ml(JNIHandleBlockFreeList_lock,
+ 360                      Mutex::_no_safepoint_check_flag);
+ 361     while (block != NULL) {
+ 362       if (ZapJNIHandleArea) block-&gt;zap();
+ 363       JNIHandleBlock* next = block-&gt;_next;
+ 364       block-&gt;_next = _block_free_list;
+ 365       _block_free_list = block;
+ 366       block = next;
+ 367     }
+ 368   }
+ 369   if (pop_frame_link != NULL) {
+ 370     // As a sanity check we release blocks pointed to by the pop_frame_link.
+ 371     // This should never happen (only if PopLocalFrame is not called the
+ 372     // correct number of times).
+ 373     release_block(pop_frame_link, thread);
+ 374   }
+ 375 }
+ 376 
+ 377 
+ 378 void JNIHandleBlock::oops_do(OopClosure* f) {
+ 379   JNIHandleBlock* current_chain = this;
+ 380   // Iterate over chain of blocks, followed by chains linked through the
+ 381   // pop frame links.
+ 382   while (current_chain != NULL) {
+ 383     for (JNIHandleBlock* current = current_chain; current != NULL;
+ 384          current = current-&gt;_next) {
+ 385       assert(current == current_chain || current-&gt;pop_frame_link() == NULL,
+ 386         "only blocks first in chain should have pop frame link set");
+ 387       for (int index = 0; index &lt; current-&gt;_top; index++) {
+ 388         oop* root = &amp;(current-&gt;_handles)[index];
+ 389         oop value = *root;
+ 390         // traverse heap pointers only, not deleted handles or free list
+ 391         // pointers
+ 392         if (value != NULL &amp;&amp; Universe::heap()-&gt;is_in_reserved(value)) {
+ 393           f-&gt;do_oop(root);
+ 394         }
+ 395       }
+ 396       // the next handle block is valid only if current block is full
+ 397       if (current-&gt;_top &lt; block_size_in_oops) {
+ 398         break;
+ 399       }
+ 400     }
+ 401     current_chain = current_chain-&gt;pop_frame_link();
+ 402   }
+ 403 }
+ 404 
+ 405 
+ 406 void JNIHandleBlock::weak_oops_do(BoolObjectClosure* is_alive,
+ 407                                   OopClosure* f) {
+ 408   for (JNIHandleBlock* current = this; current != NULL; current = current-&gt;_next) {
+ 409     assert(current-&gt;pop_frame_link() == NULL,
+ 410       "blocks holding weak global JNI handles should not have pop frame link set");
+ 411     for (int index = 0; index &lt; current-&gt;_top; index++) {
+ 412       oop* root = &amp;(current-&gt;_handles)[index];
+ 413       oop value = *root;
+ 414       // traverse heap pointers only, not deleted handles or free list pointers
+ 415       if (value != NULL &amp;&amp; Universe::heap()-&gt;is_in_reserved(value)) {
+ 416         if (is_alive-&gt;do_object_b(value)) {
+ 417           // The weakly referenced object is alive, update pointer
+ 418           f-&gt;do_oop(root);
+ 419         } else {
+ 420           // The weakly referenced object is not alive, clear the reference by storing NULL
+ 421           log_develop_trace(gc, ref)("Clearing JNI weak reference (" INTPTR_FORMAT ")", p2i(root));
+ 422           *root = NULL;
+ 423         }
+ 424       }
+ 425     }
+ 426     // the next handle block is valid only if current block is full
+ 427     if (current-&gt;_top &lt; block_size_in_oops) {
+ 428       break;
+ 429     }
+ 430   }
+ 431 }
+ 432 
+ 433 
+ 434 jobject JNIHandleBlock::allocate_handle(oop obj) {
+ 435   assert(Universe::heap()-&gt;is_in_reserved(obj), "sanity check");
+ 436   if (_top == 0) {
+ 437     // This is the first allocation or the initial block got zapped when
+ 438     // entering a native function. If we have any following blocks they are
+ 439     // not valid anymore.
+ 440     for (JNIHandleBlock* current = _next; current != NULL;
+ 441          current = current-&gt;_next) {
+ 442       assert(current-&gt;_last == NULL, "only first block should have _last set");
+ 443       assert(current-&gt;_free_list == NULL,
+ 444              "only first block should have _free_list set");
+ 445       if (current-&gt;_top == 0) {
+ 446         // All blocks after the first clear trailing block are already cleared.
+ 447 #ifdef ASSERT
+ 448         for (current = current-&gt;_next; current != NULL; current = current-&gt;_next) {
+ 449           assert(current-&gt;_top == 0, "trailing blocks must already be cleared");
+ 450         }
+ 451 #endif
+ 452         break;
+ 453       }
+ 454       current-&gt;_top = 0;
+ 455       if (ZapJNIHandleArea) current-&gt;zap();
+ 456     }
+ 457     // Clear initial block
+ 458     _free_list = NULL;
+ 459     _allocate_before_rebuild = 0;
+ 460     _last = this;
+ 461     if (ZapJNIHandleArea) zap();
+ 462   }
+ 463 
+ 464   // Try last block
+ 465   if (_last-&gt;_top &lt; block_size_in_oops) {
+ 466     oop* handle = &amp;(_last-&gt;_handles)[_last-&gt;_top++];
+ 467     *handle = obj;
+ 468     return (jobject) handle;
+ 469   }
+ 470 
+ 471   // Try free list
+ 472   if (_free_list != NULL) {
+ 473     oop* handle = _free_list;
+ 474     _free_list = (oop*) *_free_list;
+ 475     *handle = obj;
+ 476     return (jobject) handle;
+ 477   }
+ 478   // Check if unused block follow last
+ 479   if (_last-&gt;_next != NULL) {
+ 480     // update last and retry
+ 481     _last = _last-&gt;_next;
+ 482     return allocate_handle(obj);
+ 483   }
+ 484 
+ 485   // No space available, we have to rebuild free list or expand
+ 486   if (_allocate_before_rebuild == 0) {
+ 487       rebuild_free_list();        // updates _allocate_before_rebuild counter
+ 488   } else {
+ 489     // Append new block
+ 490     Thread* thread = Thread::current();
+ 491     Handle obj_handle(thread, obj);
+ 492     // This can block, so we need to preserve obj across call.
+ 493     _last-&gt;_next = JNIHandleBlock::allocate_block(thread);
+ 494     _last = _last-&gt;_next;
+ 495     _allocate_before_rebuild--;
+ 496     obj = obj_handle();
+ 497   }
+ 498   return allocate_handle(obj);  // retry
+ 499 }
+ 500 
+ 501 void JNIHandleBlock::release_handle(jobject h) {
+ 502   if (h != NULL) {
+ 503     assert(chain_contains(h), "does not contain the JNI handle");
+ 504     // Mark the handle as deleted, allocate will reuse it
+ 505     *((oop*)h) = JNIHandles::deleted_handle();
+ 506   }
+ 507 }
+ 508 
+ 509 
+ 510 void JNIHandleBlock::rebuild_free_list() {
+ 511   assert(_allocate_before_rebuild == 0 &amp;&amp; _free_list == NULL, "just checking");
+ 512   int free = 0;
+ 513   int blocks = 0;
+ 514   for (JNIHandleBlock* current = this; current != NULL; current = current-&gt;_next) {
+ 515     for (int index = 0; index &lt; current-&gt;_top; index++) {
+ 516       oop* handle = &amp;(current-&gt;_handles)[index];
+ 517       if (*handle ==  JNIHandles::deleted_handle()) {
+ 518         // this handle was cleared out by a delete call, reuse it
+ 519         *handle = (oop) _free_list;
+ 520         _free_list = handle;
+ 521         free++;
+ 522       }
+ 523     }
+ 524     // we should not rebuild free list if there are unused handles at the end
+ 525     assert(current-&gt;_top == block_size_in_oops, "just checking");
+ 526     blocks++;
+ 527   }
+ 528   // Heuristic: if more than half of the handles are free we rebuild next time
+ 529   // as well, otherwise we append a corresponding number of new blocks before
+ 530   // attempting a free list rebuild again.
+ 531   int total = blocks * block_size_in_oops;
+ 532   int extra = total - 2*free;
+ 533   if (extra &gt; 0) {
+ 534     // Not as many free handles as we would like - compute number of new blocks to append
+ 535     _allocate_before_rebuild = (extra + block_size_in_oops - 1) / block_size_in_oops;
+ 536   }
+ 537 }
+ 538 
+ 539 
+ 540 bool JNIHandleBlock::contains(jobject handle) const {
+ 541   return ((jobject)&amp;_handles[0] &lt;= handle &amp;&amp; handle&lt;(jobject)&amp;_handles[_top]);
+ 542 }
+ 543 
+ 544 
+ 545 bool JNIHandleBlock::chain_contains(jobject handle) const {
+ 546   for (JNIHandleBlock* current = (JNIHandleBlock*) this; current != NULL; current = current-&gt;_next) {
+ 547     if (current-&gt;contains(handle)) {
+ 548       return true;
+ 549     }
+ 550   }
+ 551   return false;
+ 552 }
+ 553 
+ 554 
+ 555 int JNIHandleBlock::length() const {
+ 556   int result = 1;
+ 557   for (JNIHandleBlock* current = _next; current != NULL; current = current-&gt;_next) {
+ 558     result++;
+ 559   }
+ 560   return result;
+ 561 }
+ 562 
+ 563 const size_t JNIHandleBlock::get_number_of_live_handles() {
+ 564   CountHandleClosure counter;
+ 565   oops_do(&amp;counter);
+ 566   return counter.count();
+ 567 }
+ 568 
+ 569 // This method is not thread-safe, i.e., must be called while holding a lock on the
+ 570 // structure.
+ 571 long JNIHandleBlock::memory_usage() const {
+ 572   return length() * sizeof(JNIHandleBlock);
+ 573 }
+ 574 
+ 575 
+ 576 #ifndef PRODUCT
+ 577 
+ 578 bool JNIHandleBlock::any_contains(jobject handle) {
+ 579   for (JNIHandleBlock* current = _block_list; current != NULL; current = current-&gt;_block_list_link) {
+ 580     if (current-&gt;contains(handle)) {
+ 581       return true;
+ 582     }
+ 583   }
+ 584   return false;
+ 585 }
+ 586 
+ 587 void JNIHandleBlock::print_statistics() {
+ 588   int used_blocks = 0;
+ 589   int free_blocks = 0;
+ 590   int used_handles = 0;
+ 591   int free_handles = 0;
+ 592   JNIHandleBlock* block = _block_list;
+ 593   while (block != NULL) {
+ 594     if (block-&gt;_top &gt; 0) {
+ 595       used_blocks++;
+ 596     } else {
+ 597       free_blocks++;
+ 598     }
+ 599     used_handles += block-&gt;_top;
+ 600     free_handles += (block_size_in_oops - block-&gt;_top);
+ 601     block = block-&gt;_block_list_link;
+ 602   }
+ 603   tty-&gt;print_cr("JNIHandleBlocks statistics");
+ 604   tty-&gt;print_cr("- blocks allocated: %d", used_blocks + free_blocks);
+ 605   tty-&gt;print_cr("- blocks in use:    %d", used_blocks);
+ 606   tty-&gt;print_cr("- blocks free:      %d", free_blocks);
+ 607   tty-&gt;print_cr("- handles in use:   %d", used_handles);
+ 608   tty-&gt;print_cr("- handles free:     %d", free_handles);
+ 609 }
+ 610 
+ 611 #endif
+<a name="2" id="anc2"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="2" type="hidden" /></form></body></html>

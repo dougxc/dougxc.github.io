@@ -1,0 +1,517 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>New src/share/vm/runtime/simpleThresholdPolicy.cpp</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2010, 2016, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #include "precompiled.hpp"
+  26 #include "compiler/compileBroker.hpp"
+  27 #include "memory/resourceArea.hpp"
+  28 #include "runtime/arguments.hpp"
+  29 #include "runtime/simpleThresholdPolicy.hpp"
+  30 #include "runtime/simpleThresholdPolicy.inline.hpp"
+  31 #include "code/scopeDesc.hpp"
+  32 #if INCLUDE_JVMCI
+  33 #include "jvmci/jvmciRuntime.hpp"
+  34 #endif
+  35 
+  36 
+  37 void SimpleThresholdPolicy::print_counters(const char* prefix, methodHandle mh) {
+  38   int invocation_count = mh-&gt;invocation_count();
+  39   int backedge_count = mh-&gt;backedge_count();
+  40   MethodData* mdh = mh-&gt;method_data();
+  41   int mdo_invocations = 0, mdo_backedges = 0;
+  42   int mdo_invocations_start = 0, mdo_backedges_start = 0;
+  43   if (mdh != NULL) {
+  44     mdo_invocations = mdh-&gt;invocation_count();
+  45     mdo_backedges = mdh-&gt;backedge_count();
+  46     mdo_invocations_start = mdh-&gt;invocation_count_start();
+  47     mdo_backedges_start = mdh-&gt;backedge_count_start();
+  48   }
+  49   tty-&gt;print(" %stotal=%d,%d %smdo=%d(%d),%d(%d)", prefix,
+  50       invocation_count, backedge_count, prefix,
+  51       mdo_invocations, mdo_invocations_start,
+  52       mdo_backedges, mdo_backedges_start);
+  53   tty-&gt;print(" %smax levels=%d,%d", prefix,
+  54       mh-&gt;highest_comp_level(), mh-&gt;highest_osr_comp_level());
+  55 }
+  56 
+  57 // Print an event.
+  58 void SimpleThresholdPolicy::print_event(EventType type, methodHandle mh, methodHandle imh,
+  59                                         int bci, CompLevel level) {
+  60   bool inlinee_event = mh() != imh();
+  61 
+  62   ttyLocker tty_lock;
+  63   tty-&gt;print("%lf: [", os::elapsedTime());
+  64 
+  65   switch(type) {
+  66   case CALL:
+  67     tty-&gt;print("call");
+  68     break;
+  69   case LOOP:
+  70     tty-&gt;print("loop");
+  71     break;
+  72   case COMPILE:
+  73     tty-&gt;print("compile");
+  74     break;
+  75   case REMOVE_FROM_QUEUE:
+  76     tty-&gt;print("remove-from-queue");
+  77     break;
+  78   case UPDATE_IN_QUEUE:
+  79     tty-&gt;print("update-in-queue");
+  80     break;
+  81   case REPROFILE:
+  82     tty-&gt;print("reprofile");
+  83     break;
+  84   case MAKE_NOT_ENTRANT:
+  85     tty-&gt;print("make-not-entrant");
+  86     break;
+  87   default:
+  88     tty-&gt;print("unknown");
+  89   }
+  90 
+  91   tty-&gt;print(" level=%d ", level);
+  92 
+  93   ResourceMark rm;
+  94   char *method_name = mh-&gt;name_and_sig_as_C_string();
+  95   tty-&gt;print("[%s", method_name);
+  96   if (inlinee_event) {
+  97     char *inlinee_name = imh-&gt;name_and_sig_as_C_string();
+  98     tty-&gt;print(" [%s]] ", inlinee_name);
+  99   }
+ 100   else tty-&gt;print("] ");
+ 101   tty-&gt;print("@%d queues=%d,%d", bci, CompileBroker::queue_size(CompLevel_full_profile),
+ 102                                       CompileBroker::queue_size(CompLevel_full_optimization));
+ 103 
+ 104   print_specific(type, mh, imh, bci, level);
+ 105 
+ 106   if (type != COMPILE) {
+ 107     print_counters("", mh);
+ 108     if (inlinee_event) {
+ 109       print_counters("inlinee ", imh);
+ 110     }
+ 111     tty-&gt;print(" compilable=");
+ 112     bool need_comma = false;
+ 113     if (!mh-&gt;is_not_compilable(CompLevel_full_profile)) {
+ 114       tty-&gt;print("c1");
+ 115       need_comma = true;
+ 116     }
+ 117     if (!mh-&gt;is_not_osr_compilable(CompLevel_full_profile)) {
+ 118       if (need_comma) tty-&gt;print(",");
+ 119       tty-&gt;print("c1-osr");
+ 120       need_comma = true;
+ 121     }
+ 122     if (!mh-&gt;is_not_compilable(CompLevel_full_optimization)) {
+ 123       if (need_comma) tty-&gt;print(",");
+ 124       tty-&gt;print("c2");
+ 125       need_comma = true;
+ 126     }
+ 127     if (!mh-&gt;is_not_osr_compilable(CompLevel_full_optimization)) {
+ 128       if (need_comma) tty-&gt;print(",");
+ 129       tty-&gt;print("c2-osr");
+ 130     }
+ 131     tty-&gt;print(" status=");
+ 132     if (mh-&gt;queued_for_compilation()) {
+ 133       tty-&gt;print("in-queue");
+ 134     } else tty-&gt;print("idle");
+ 135   }
+ 136   tty-&gt;print_cr("]");
+ 137 }
+ 138 
+ 139 void SimpleThresholdPolicy::initialize() {
+ 140   if (FLAG_IS_DEFAULT(CICompilerCount)) {
+ 141     FLAG_SET_DEFAULT(CICompilerCount, 3);
+ 142   }
+ 143   int count = CICompilerCount;
+ 144 #ifdef _LP64
+ 145   // On 64-bit systems, scale the number of compiler threads with
+ 146   // the number of cores available on the system. Scaling is not
+ 147   // performed on 32-bit systems because it can lead to exhaustion
+ 148   // of the virtual memory address space available to the JVM.
+ 149   if (CICompilerCountPerCPU) {
+ 150     count = MAX2(log2_intptr(os::active_processor_count()), 1) * 3 / 2;
+ 151   }
+ 152 #endif
+ 153   set_c1_count(MAX2(count / 3, 1));
+ 154   set_c2_count(MAX2(count - c1_count(), 1));
+ 155   FLAG_SET_ERGO(intx, CICompilerCount, c1_count() + c2_count());
+ 156 }
+ 157 
+ 158 void SimpleThresholdPolicy::set_carry_if_necessary(InvocationCounter *counter) {
+ 159   if (!counter-&gt;carry() &amp;&amp; counter-&gt;count() &gt; InvocationCounter::count_limit / 2) {
+ 160     counter-&gt;set_carry_flag();
+ 161   }
+ 162 }
+ 163 
+ 164 // Set carry flags on the counters if necessary
+ 165 void SimpleThresholdPolicy::handle_counter_overflow(Method* method) {
+ 166   MethodCounters *mcs = method-&gt;method_counters();
+ 167   if (mcs != NULL) {
+ 168     set_carry_if_necessary(mcs-&gt;invocation_counter());
+ 169     set_carry_if_necessary(mcs-&gt;backedge_counter());
+ 170   }
+ 171   MethodData* mdo = method-&gt;method_data();
+ 172   if (mdo != NULL) {
+ 173     set_carry_if_necessary(mdo-&gt;invocation_counter());
+ 174     set_carry_if_necessary(mdo-&gt;backedge_counter());
+ 175   }
+ 176 }
+ 177 
+ 178 // Called with the queue locked and with at least one element
+ 179 CompileTask* SimpleThresholdPolicy::select_task(CompileQueue* compile_queue) {
+ 180   return select_task_helper(compile_queue);
+ 181 }
+ 182 
+ 183 void SimpleThresholdPolicy::reprofile(ScopeDesc* trap_scope, bool is_osr) {
+ 184   for (ScopeDesc* sd = trap_scope;; sd = sd-&gt;sender()) {
+ 185     if (PrintTieredEvents) {
+ 186       methodHandle mh(sd-&gt;method());
+ 187       print_event(REPROFILE, mh, mh, InvocationEntryBci, CompLevel_none);
+ 188     }
+ 189     MethodData* mdo = sd-&gt;method()-&gt;method_data();
+ 190     if (mdo != NULL) {
+ 191       mdo-&gt;reset_start_counters();
+ 192     }
+ 193     if (sd-&gt;is_top()) break;
+ 194   }
+ 195 }
+ 196 
+ 197 nmethod* SimpleThresholdPolicy::event(const methodHandle&amp; method, const methodHandle&amp; inlinee,
+ 198                                       int branch_bci, int bci, CompLevel comp_level, CompiledMethod* nm, JavaThread* thread) {
+ 199   if (comp_level == CompLevel_none &amp;&amp;
+ 200       JvmtiExport::can_post_interpreter_events() &amp;&amp;
+ 201       thread-&gt;is_interp_only_mode()) {
+ 202     return NULL;
+ 203   }
+ 204   if (CompileTheWorld || ReplayCompiles) {
+ 205     // Don't trigger other compiles in testing mode
+ 206     return NULL;
+ 207   }
+ 208 
+ 209   handle_counter_overflow(method());
+ 210   if (method() != inlinee()) {
+ 211     handle_counter_overflow(inlinee());
+ 212   }
+ 213 
+ 214   if (PrintTieredEvents) {
+ 215     print_event(bci == InvocationEntryBci ? CALL : LOOP, method, inlinee, bci, comp_level);
+ 216   }
+ 217 
+ 218   if (bci == InvocationEntryBci) {
+ 219     method_invocation_event(method, inlinee, comp_level, nm, thread);
+ 220   } else {
+ 221     // method == inlinee if the event originated in the main method
+ 222     method_back_branch_event(method, inlinee, bci, comp_level, nm, thread);
+ 223     // Check if event led to a higher level OSR compilation
+ 224     nmethod* osr_nm = inlinee-&gt;lookup_osr_nmethod_for(bci, comp_level, false);
+ 225     if (osr_nm != NULL &amp;&amp; osr_nm-&gt;comp_level() &gt; comp_level) {
+ 226       // Perform OSR with new nmethod
+ 227       return osr_nm;
+ 228     }
+ 229   }
+ 230   return NULL;
+ 231 }
+ 232 
+ 233 // Check if the method can be compiled, change level if necessary
+ 234 void SimpleThresholdPolicy::compile(const methodHandle&amp; mh, int bci, CompLevel level, JavaThread* thread) {
+ 235   assert(level &lt;= TieredStopAtLevel, "Invalid compilation level");
+ 236   if (level == CompLevel_none) {
+ 237     return;
+ 238   }
+ 239 
+ 240   // Check if the method can be compiled. If it cannot be compiled with C1, continue profiling
+ 241   // in the interpreter and then compile with C2 (the transition function will request that,
+ 242   // see common() ). If the method cannot be compiled with C2 but still can with C1, compile it with
+ 243   // pure C1.
+ 244   if (!can_be_compiled(mh, level)) {
+ 245     if (level == CompLevel_full_optimization &amp;&amp; can_be_compiled(mh, CompLevel_simple)) {
+ 246         compile(mh, bci, CompLevel_simple, thread);
+ 247     }
+ 248     return;
+ 249   }
+ 250   if (bci != InvocationEntryBci &amp;&amp; mh-&gt;is_not_osr_compilable(level)) {
+ 251     return;
+ 252   }
+ 253   if (!CompileBroker::compilation_is_in_queue(mh)) {
+ 254     if (PrintTieredEvents) {
+ 255       print_event(COMPILE, mh, mh, bci, level);
+ 256     }
+ 257     submit_compile(mh, bci, level, thread);
+ 258   }
+ 259 }
+ 260 
+ 261 // Tell the broker to compile the method
+ 262 void SimpleThresholdPolicy::submit_compile(const methodHandle&amp; mh, int bci, CompLevel level, JavaThread* thread) {
+ 263   int hot_count = (bci == InvocationEntryBci) ? mh-&gt;invocation_count() : mh-&gt;backedge_count();
+ 264   CompileBroker::compile_method(mh, bci, level, mh, hot_count, CompileTask::Reason_Tiered, thread);
+ 265 }
+ 266 
+ 267 // Call and loop predicates determine whether a transition to a higher
+ 268 // compilation level should be performed (pointers to predicate functions
+ 269 // are passed to common() transition function).
+ 270 bool SimpleThresholdPolicy::loop_predicate(int i, int b, CompLevel cur_level, Method* method) {
+ 271   switch(cur_level) {
+ 272   case CompLevel_none:
+ 273   case CompLevel_limited_profile: {
+ 274     return loop_predicate_helper&lt;CompLevel_none&gt;(i, b, 1.0, method);
+ 275   }
+ 276   case CompLevel_full_profile: {
+ 277     return loop_predicate_helper&lt;CompLevel_full_profile&gt;(i, b, 1.0, method);
+ 278   }
+ 279   default:
+ 280     return true;
+ 281   }
+ 282 }
+ 283 
+ 284 bool SimpleThresholdPolicy::call_predicate(int i, int b, CompLevel cur_level, Method* method) {
+ 285   switch(cur_level) {
+ 286   case CompLevel_none:
+ 287   case CompLevel_limited_profile: {
+ 288     return call_predicate_helper&lt;CompLevel_none&gt;(i, b, 1.0, method);
+ 289   }
+ 290   case CompLevel_full_profile: {
+ 291     return call_predicate_helper&lt;CompLevel_full_profile&gt;(i, b, 1.0, method);
+ 292   }
+ 293   default:
+ 294     return true;
+ 295   }
+ 296 }
+ 297 
+ 298 // Determine is a method is mature.
+ 299 bool SimpleThresholdPolicy::is_mature(Method* method) {
+ 300   if (is_trivial(method)) return true;
+ 301   MethodData* mdo = method-&gt;method_data();
+ 302   if (mdo != NULL) {
+ 303     int i = mdo-&gt;invocation_count();
+ 304     int b = mdo-&gt;backedge_count();
+ 305     double k = ProfileMaturityPercentage / 100.0;
+ 306     return call_predicate_helper&lt;CompLevel_full_profile&gt;(i, b, k, method) ||
+ 307            loop_predicate_helper&lt;CompLevel_full_profile&gt;(i, b, k, method);
+ 308   }
+ 309   return false;
+ 310 }
+ 311 
+ 312 // Common transition function. Given a predicate determines if a method should transition to another level.
+ 313 CompLevel SimpleThresholdPolicy::common(Predicate p, Method* method, CompLevel cur_level) {
+ 314   CompLevel next_level = cur_level;
+ 315   int i = method-&gt;invocation_count();
+ 316   int b = method-&gt;backedge_count();
+ 317 
+ 318   if (is_trivial(method)) {
+ 319     next_level = CompLevel_simple;
+ 320   } else {
+ 321     switch(cur_level) {
+ 322     case CompLevel_none:
+ 323       // If we were at full profile level, would we switch to full opt?
+ 324       if (common(p, method, CompLevel_full_profile) == CompLevel_full_optimization) {
+ 325         next_level = CompLevel_full_optimization;
+ 326       } else if ((this-&gt;*p)(i, b, cur_level, method)) {
+ 327         next_level = CompLevel_full_profile;
+ 328       }
+ 329       break;
+ 330     case CompLevel_limited_profile:
+ 331     case CompLevel_full_profile:
+ 332       {
+ 333         MethodData* mdo = method-&gt;method_data();
+ 334         if (mdo != NULL) {
+ 335           if (mdo-&gt;would_profile()) {
+ 336             int mdo_i = mdo-&gt;invocation_count_delta();
+ 337             int mdo_b = mdo-&gt;backedge_count_delta();
+ 338             if ((this-&gt;*p)(mdo_i, mdo_b, cur_level, method)) {
+ 339               next_level = CompLevel_full_optimization;
+ 340             }
+ 341           } else {
+ 342             next_level = CompLevel_full_optimization;
+ 343           }
+ 344         }
+ 345       }
+ 346       break;
+ 347     }
+ 348   }
+ 349   return MIN2(next_level, (CompLevel)TieredStopAtLevel);
+ 350 }
+ 351 
+ 352 // Determine if a method should be compiled with a normal entry point at a different level.
+ 353 CompLevel SimpleThresholdPolicy::call_event(Method* method,  CompLevel cur_level, JavaThread* thread) {
+ 354   CompLevel osr_level = MIN2((CompLevel) method-&gt;highest_osr_comp_level(),
+ 355                              common(&amp;SimpleThresholdPolicy::loop_predicate, method, cur_level));
+ 356   CompLevel next_level = common(&amp;SimpleThresholdPolicy::call_predicate, method, cur_level);
+ 357 
+ 358   // If OSR method level is greater than the regular method level, the levels should be
+ 359   // equalized by raising the regular method level in order to avoid OSRs during each
+ 360   // invocation of the method.
+ 361   if (osr_level == CompLevel_full_optimization &amp;&amp; cur_level == CompLevel_full_profile) {
+ 362     MethodData* mdo = method-&gt;method_data();
+ 363     guarantee(mdo != NULL, "MDO should not be NULL");
+ 364     if (mdo-&gt;invocation_count() &gt;= 1) {
+ 365       next_level = CompLevel_full_optimization;
+ 366     }
+ 367   } else {
+ 368     next_level = MAX2(osr_level, next_level);
+ 369   }
+ 370 #if INCLUDE_JVMCI
+ 371   if (UseJVMCICompiler) {
+ 372     next_level = JVMCIRuntime::adjust_comp_level(method, false, next_level, thread);
+ 373   }
+ 374 #endif
+ 375   return next_level;
+ 376 }
+ 377 
+ 378 // Determine if we should do an OSR compilation of a given method.
+ 379 CompLevel SimpleThresholdPolicy::loop_event(Method* method, CompLevel cur_level, JavaThread* thread) {
+ 380   CompLevel next_level = common(&amp;SimpleThresholdPolicy::loop_predicate, method, cur_level);
+ 381   if (cur_level == CompLevel_none) {
+ 382     // If there is a live OSR method that means that we deopted to the interpreter
+ 383     // for the transition.
+ 384     CompLevel osr_level = MIN2((CompLevel)method-&gt;highest_osr_comp_level(), next_level);
+ 385     if (osr_level &gt; CompLevel_none) {
+ 386       return osr_level;
+ 387     }
+ 388   }
+ 389 #if INCLUDE_JVMCI
+ 390   if (UseJVMCICompiler) {
+ 391     next_level = JVMCIRuntime::adjust_comp_level(method, true, next_level, thread);
+ 392   }
+ 393 #endif
+ 394   return next_level;
+ 395 }
+ 396 
+ 397 
+ 398 // Handle the invocation event.
+ 399 void SimpleThresholdPolicy::method_invocation_event(const methodHandle&amp; mh, const methodHandle&amp; imh,
+ 400                                               CompLevel level, CompiledMethod* nm, JavaThread* thread) {
+ 401   if (is_compilation_enabled() &amp;&amp; !CompileBroker::compilation_is_in_queue(mh)) {
+ 402     CompLevel next_level = call_event(mh(), level, thread);
+ 403     if (next_level != level) {
+ 404       compile(mh, InvocationEntryBci, next_level, thread);
+ 405     }
+ 406   }
+ 407 }
+ 408 
+ 409 // Handle the back branch event. Notice that we can compile the method
+ 410 // with a regular entry from here.
+ 411 void SimpleThresholdPolicy::method_back_branch_event(const methodHandle&amp; mh, const methodHandle&amp; imh,
+ 412                                                      int bci, CompLevel level, CompiledMethod* nm, JavaThread* thread) {
+ 413   // If the method is already compiling, quickly bail out.
+ 414   if (is_compilation_enabled() &amp;&amp; !CompileBroker::compilation_is_in_queue(mh)) {
+ 415     // Use loop event as an opportunity to also check there's been
+ 416     // enough calls.
+ 417     CompLevel cur_level = comp_level(mh());
+ 418     CompLevel next_level = call_event(mh(), cur_level, thread);
+ 419     CompLevel next_osr_level = loop_event(mh(), level, thread);
+ 420 
+ 421     next_level = MAX2(next_level,
+ 422                       next_osr_level &lt; CompLevel_full_optimization ? next_osr_level : cur_level);
+ 423     bool is_compiling = false;
+ 424     if (next_level != cur_level) {
+ 425       compile(mh, InvocationEntryBci, next_level, thread);
+ 426       is_compiling = true;
+ 427     }
+ 428 
+ 429     // Do the OSR version
+ 430     if (!is_compiling &amp;&amp; next_osr_level != level) {
+ 431       compile(mh, bci, next_osr_level, thread);
+ 432     }
+ 433   }
+ 434 }
+</pre></body></html>

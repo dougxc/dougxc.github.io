@@ -1,0 +1,505 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../../../../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2011, 2016, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package jdk.vm.ci.hotspot;
+  24 
+  25 import static jdk.vm.ci.hotspot.HotSpotJVMCIRuntimeProvider.getArrayBaseOffset;
+  26 import static jdk.vm.ci.hotspot.HotSpotJVMCIRuntimeProvider.getArrayIndexScale;
+  27 import static jdk.vm.ci.hotspot.UnsafeAccess.UNSAFE;
+  28 
+  29 import java.lang.reflect.Array;
+  30 
+  31 import jdk.vm.ci.common.JVMCIError;
+  32 import jdk.vm.ci.meta.Constant;
+  33 import jdk.vm.ci.meta.JavaConstant;
+  34 import jdk.vm.ci.meta.JavaKind;
+  35 import jdk.vm.ci.meta.MemoryAccessProvider;
+  36 import jdk.vm.ci.meta.MetaAccessProvider;
+  37 import jdk.vm.ci.meta.PrimitiveConstant;
+  38 import jdk.vm.ci.meta.ResolvedJavaField;
+  39 import jdk.vm.ci.meta.ResolvedJavaType;
+  40 
+  41 /**
+  42  * HotSpot implementation of {@link MemoryAccessProvider}.
+  43  */
+  44 class HotSpotMemoryAccessProviderImpl implements HotSpotMemoryAccessProvider {
+  45 
+  46     protected final HotSpotJVMCIRuntimeProvider runtime;
+  47 
+  48     HotSpotMemoryAccessProviderImpl(HotSpotJVMCIRuntimeProvider runtime) {
+  49         this.runtime = runtime;
+  50     }
+  51 
+  52     /**
+  53      * Gets the object boxed by {@code base} that is about to have a value of kind {@code kind} read
+  54      * from it at the offset {@code displacement}.
+  55      *
+  56      * @param base constant value containing the base address for a pending read
+  57      * @return {@code null} if {@code base} does not box an object otherwise the object boxed in
+  58      *         {@code base}
+  59      */
+  60     private Object asObject(Constant base, JavaKind kind, long displacement) {
+  61         if (base instanceof HotSpotObjectConstantImpl) {
+  62             HotSpotObjectConstantImpl constant = (HotSpotObjectConstantImpl) base;
+  63             HotSpotResolvedObjectType type = constant.getType();
+  64             Object object = constant.object();
+  65             checkRead(kind, displacement, type, object);
+  66             return object;
+  67         }
+  68         return null;
+  69     }
+  70 
+  71     /**
+  72      * Offset of injected {@code java.lang.Class::oop_size} field. No need to make {@code volatile}
+  73      * as initialization is idempotent.
+  74      */
+  75     private long oopSizeOffset;
+  76 
+  77     private static int computeOopSizeOffset(HotSpotJVMCIRuntimeProvider runtime) {
+  78         MetaAccessProvider metaAccess = runtime.getHostJVMCIBackend().getMetaAccess();
+  79         ResolvedJavaType staticType = metaAccess.lookupJavaType(Class.class);
+  80         for (ResolvedJavaField f : staticType.getInstanceFields(false)) {
+  81             if (f.getName().equals("oop_size")) {
+  82                 int offset = ((HotSpotResolvedJavaField) f).offset();
+  83                 assert offset != 0 : "not expecting offset of java.lang.Class::oop_size to be 0";
+  84                 return offset;
+  85             }
+  86         }
+  87         throw new JVMCIError("Could not find injected java.lang.Class::oop_size field");
+  88     }
+  89 
+  90     private boolean checkRead(JavaKind kind, long displacement, HotSpotResolvedObjectType type, Object object) {
+  91         if (type.isArray()) {
+  92             ResolvedJavaType componentType = type.getComponentType();
+  93             JavaKind componentKind = componentType.getJavaKind();
+  94             final int headerSize = getArrayBaseOffset(componentKind);
+  95             int sizeOfElement = getArrayIndexScale(componentKind);
+  96             int length = Array.getLength(object);
+  97             long arrayEnd = headerSize + (sizeOfElement * length);
+  98             boolean aligned = ((displacement - headerSize) % sizeOfElement) == 0;
+  99             if (displacement &lt; 0 || displacement &gt; (arrayEnd - sizeOfElement) || (kind == JavaKind.Object &amp;&amp; !aligned)) {
+ 100                 int index = (int) ((displacement - headerSize) / sizeOfElement);
+<a name="1" id="anc1"></a><span class="changed"> 101                 throw new IllegalArgumentException("Unsafe array access: reading element of kind " + kind +</span>
+ 102                                 " at offset " + displacement + " (index ~ " + index + ") in " +
+ 103                                 type.toJavaName() + " object of length " + length);
+ 104             }
+ 105         } else if (kind != JavaKind.Object) {
+ 106             long size;
+ 107             if (object instanceof Class) {
+ 108                 if (oopSizeOffset == 0) {
+ 109                     oopSizeOffset = computeOopSizeOffset(runtime);
+ 110                 }
+ 111                 int wordSize = runtime.getHostJVMCIBackend().getCodeCache().getTarget().wordSize;
+ 112                 size = UNSAFE.getInt(object, oopSizeOffset) * wordSize;
+ 113             } else {
+ 114                 size = Math.abs(type.instanceSize());
+ 115             }
+ 116             int bytesToRead = kind.getByteCount();
+ 117             if (displacement + bytesToRead &gt; size || displacement &lt; 0) {
+ 118                 throw new IllegalArgumentException("Unsafe access: reading " + bytesToRead + " bytes at offset " + displacement + " in " +
+ 119                                 type.toJavaName() + " object of size " + size);
+ 120             }
+ 121         } else {
+ 122             ResolvedJavaField field = type.findInstanceFieldWithOffset(displacement, JavaKind.Object);
+ 123             if (field == null &amp;&amp; object instanceof Class) {
+ 124                 // Read of a static field
+ 125                 MetaAccessProvider metaAccess = runtime.getHostJVMCIBackend().getMetaAccess();
+ 126                 HotSpotResolvedObjectTypeImpl staticFieldsHolder = (HotSpotResolvedObjectTypeImpl) metaAccess.lookupJavaType((Class&lt;?&gt;) object);
+ 127                 field = staticFieldsHolder.findStaticFieldWithOffset(displacement, JavaKind.Object);
+ 128             }
+ 129             if (field == null) {
+ 130                 throw new IllegalArgumentException("Unsafe object access: field not found for read of kind Object" +
+ 131                                 " at offset " + displacement + " in " + type.toJavaName() + " object");
+ 132             }
+ 133             if (field.getJavaKind() != JavaKind.Object) {
+ 134                 throw new IllegalArgumentException("Unsafe object access: field " + field.format("%H.%n:%T") + " not of expected kind Object" +
+ 135                                 " at offset " + displacement + " in " + type.toJavaName() + " object");
+ 136             }
+ 137         }
+ 138         return true;
+ 139     }
+ 140 
+ 141     private boolean isValidObjectFieldDisplacement(Constant base, long displacement) {
+ 142         if (base instanceof HotSpotMetaspaceConstant) {
+ 143             MetaspaceWrapperObject metaspaceObject = HotSpotMetaspaceConstantImpl.getMetaspaceObject(base);
+ 144             if (metaspaceObject instanceof HotSpotResolvedObjectTypeImpl) {
+ 145                 if (displacement == runtime.getConfig().classMirrorOffset) {
+ 146                     // Klass::_java_mirror is valid for all Klass* values
+ 147                     return true;
+ 148                 }
+ 149             } else {
+ 150                 throw new IllegalArgumentException(String.valueOf(metaspaceObject));
+ 151             }
+ 152         }
+ 153         return false;
+ 154     }
+ 155 
+ 156     private static long asRawPointer(Constant base) {
+ 157         if (base instanceof HotSpotMetaspaceConstantImpl) {
+ 158             MetaspaceWrapperObject meta = HotSpotMetaspaceConstantImpl.getMetaspaceObject(base);
+ 159             return meta.getMetaspacePointer();
+ 160         } else if (base instanceof PrimitiveConstant) {
+ 161             PrimitiveConstant prim = (PrimitiveConstant) base;
+ 162             if (prim.getJavaKind().isNumericInteger()) {
+ 163                 return prim.asLong();
+ 164             }
+ 165         }
+ 166         throw new IllegalArgumentException(String.valueOf(base));
+ 167     }
+ 168 
+ 169     private long readRawValue(Constant baseConstant, long displacement, JavaKind kind, int bits) {
+ 170         Object base = asObject(baseConstant, kind, displacement);
+ 171         if (base != null) {
+ 172             switch (bits) {
+ 173                 case Byte.SIZE:
+ 174                     return UNSAFE.getByte(base, displacement);
+ 175                 case Short.SIZE:
+ 176                     return UNSAFE.getShort(base, displacement);
+ 177                 case Integer.SIZE:
+ 178                     return UNSAFE.getInt(base, displacement);
+ 179                 case Long.SIZE:
+ 180                     return UNSAFE.getLong(base, displacement);
+ 181                 default:
+ 182                     throw new IllegalArgumentException(String.valueOf(bits));
+ 183             }
+ 184         } else {
+ 185             long pointer = asRawPointer(baseConstant);
+ 186             switch (bits) {
+ 187                 case Byte.SIZE:
+ 188                     return UNSAFE.getByte(pointer + displacement);
+ 189                 case Short.SIZE:
+ 190                     return UNSAFE.getShort(pointer + displacement);
+ 191                 case Integer.SIZE:
+ 192                     return UNSAFE.getInt(pointer + displacement);
+ 193                 case Long.SIZE:
+ 194                     return UNSAFE.getLong(pointer + displacement);
+ 195                 default:
+ 196                     throw new IllegalArgumentException(String.valueOf(bits));
+ 197             }
+ 198         }
+ 199     }
+ 200 
+ 201     private boolean verifyReadRawObject(Object expected, Constant base, long displacement) {
+ 202         if (base instanceof HotSpotMetaspaceConstant) {
+ 203             MetaspaceWrapperObject metaspaceObject = HotSpotMetaspaceConstantImpl.getMetaspaceObject(base);
+ 204             if (metaspaceObject instanceof HotSpotResolvedObjectTypeImpl) {
+ 205                 if (displacement == runtime.getConfig().classMirrorOffset) {
+ 206                     assert expected == ((HotSpotResolvedObjectTypeImpl) metaspaceObject).mirror();
+ 207                 }
+ 208             }
+ 209         }
+ 210         return true;
+ 211     }
+ 212 
+ 213     private Object readRawObject(Constant baseConstant, long initialDisplacement, boolean compressed) {
+ 214         long displacement = initialDisplacement;
+ 215         Object ret;
+ 216         Object base = asObject(baseConstant, JavaKind.Object, displacement);
+ 217         if (base == null) {
+ 218             assert !compressed;
+ 219             displacement += asRawPointer(baseConstant);
+ 220             ret = UNSAFE.getUncompressedObject(displacement);
+ 221             assert verifyReadRawObject(ret, baseConstant, initialDisplacement);
+ 222         } else {
+ 223             assert runtime.getConfig().useCompressedOops == compressed;
+ 224             ret = UNSAFE.getObject(base, displacement);
+ 225         }
+ 226         return ret;
+ 227     }
+ 228 
+ 229     JavaConstant readFieldValue(HotSpotResolvedJavaField field, Object obj) {
+ 230         assert obj != null;
+ 231         assert !field.isStatic() || obj instanceof Class;
+ 232         long displacement = field.offset();
+ 233         assert checkRead(field.getJavaKind(), displacement, (HotSpotResolvedObjectType) runtime.getHostJVMCIBackend().getMetaAccess().lookupJavaType(obj.getClass()), obj);
+ 234         if (field.getJavaKind() == JavaKind.Object) {
+ 235             Object o = UNSAFE.getObject(obj, displacement);
+ 236             return HotSpotObjectConstantImpl.forObject(o);
+ 237         } else {
+ 238             JavaKind kind = field.getJavaKind();
+ 239             switch (kind) {
+ 240                 case Boolean:
+ 241                     return JavaConstant.forBoolean(UNSAFE.getBoolean(obj, displacement));
+ 242                 case Byte:
+ 243                     return JavaConstant.forByte(UNSAFE.getByte(obj, displacement));
+ 244                 case Char:
+ 245                     return JavaConstant.forChar(UNSAFE.getChar(obj, displacement));
+ 246                 case Short:
+ 247                     return JavaConstant.forShort(UNSAFE.getShort(obj, displacement));
+ 248                 case Int:
+ 249                     return JavaConstant.forInt(UNSAFE.getInt(obj, displacement));
+ 250                 case Long:
+ 251                     return JavaConstant.forLong(UNSAFE.getLong(obj, displacement));
+ 252                 case Float:
+ 253                     return JavaConstant.forFloat(UNSAFE.getFloat(obj, displacement));
+ 254                 case Double:
+ 255                     return JavaConstant.forDouble(UNSAFE.getDouble(obj, displacement));
+ 256                 default:
+ 257                     throw new IllegalArgumentException("Unsupported kind: " + kind);
+ 258             }
+ 259         }
+ 260     }
+ 261 
+ 262     @Override
+ 263     public JavaConstant readPrimitiveConstant(JavaKind kind, Constant baseConstant, long initialDisplacement, int bits) {
+ 264         try {
+ 265             long rawValue = readRawValue(baseConstant, initialDisplacement, kind, bits);
+ 266             switch (kind) {
+ 267                 case Boolean:
+ 268                     return JavaConstant.forBoolean(rawValue != 0);
+ 269                 case Byte:
+ 270                     return JavaConstant.forByte((byte) rawValue);
+ 271                 case Char:
+ 272                     return JavaConstant.forChar((char) rawValue);
+ 273                 case Short:
+ 274                     return JavaConstant.forShort((short) rawValue);
+ 275                 case Int:
+ 276                     return JavaConstant.forInt((int) rawValue);
+ 277                 case Long:
+ 278                     return JavaConstant.forLong(rawValue);
+ 279                 case Float:
+ 280                     return JavaConstant.forFloat(Float.intBitsToFloat((int) rawValue));
+ 281                 case Double:
+ 282                     return JavaConstant.forDouble(Double.longBitsToDouble(rawValue));
+ 283                 default:
+ 284                     throw new IllegalArgumentException("Unsupported kind: " + kind);
+ 285             }
+ 286         } catch (NullPointerException e) {
+ 287             return null;
+ 288         }
+ 289     }
+ 290 
+ 291     @Override
+ 292     public JavaConstant readObjectConstant(Constant base, long displacement) {
+ 293         if (base instanceof HotSpotObjectConstantImpl) {
+ 294             Object o = readRawObject(base, displacement, runtime.getConfig().useCompressedOops);
+ 295             return HotSpotObjectConstantImpl.forObject(o);
+ 296         }
+ 297         if (!isValidObjectFieldDisplacement(base, displacement)) {
+ 298             return null;
+ 299         }
+ 300         return HotSpotObjectConstantImpl.forObject(readRawObject(base, displacement, false));
+ 301     }
+ 302 
+ 303     @Override
+ 304     public JavaConstant readNarrowOopConstant(Constant base, long displacement) {
+ 305         return HotSpotObjectConstantImpl.forObject(readRawObject(base, displacement, true), true);
+ 306     }
+ 307 
+ 308     private HotSpotResolvedObjectTypeImpl readKlass(Constant base, long displacement, boolean compressed) {
+ 309         assert (base instanceof HotSpotMetaspaceConstantImpl) || (base instanceof HotSpotObjectConstantImpl) : base.getClass();
+ 310         Object baseObject = (base instanceof HotSpotMetaspaceConstantImpl) ? ((HotSpotMetaspaceConstantImpl) base).asResolvedJavaType() : ((HotSpotObjectConstantImpl) base).object();
+ 311         return runtime.getCompilerToVM().getResolvedJavaType(baseObject, displacement, compressed);
+ 312     }
+ 313 
+ 314     @Override
+ 315     public Constant readKlassPointerConstant(Constant base, long displacement) {
+ 316         HotSpotResolvedObjectTypeImpl klass = readKlass(base, displacement, false);
+ 317         if (klass == null) {
+ 318             return JavaConstant.NULL_POINTER;
+ 319         }
+ 320         return HotSpotMetaspaceConstantImpl.forMetaspaceObject(klass, false);
+ 321     }
+ 322 
+ 323     @Override
+ 324     public Constant readNarrowKlassPointerConstant(Constant base, long displacement) {
+ 325         HotSpotResolvedObjectTypeImpl klass = readKlass(base, displacement, true);
+ 326         if (klass == null) {
+ 327             return HotSpotCompressedNullConstant.COMPRESSED_NULL;
+ 328         }
+ 329         return HotSpotMetaspaceConstantImpl.forMetaspaceObject(klass, true);
+ 330     }
+ 331 
+ 332     @Override
+ 333     public Constant readMethodPointerConstant(Constant base, long displacement) {
+ 334         assert (base instanceof HotSpotObjectConstantImpl);
+ 335         Object baseObject = ((HotSpotObjectConstantImpl) base).object();
+ 336         HotSpotResolvedJavaMethodImpl method = runtime.getCompilerToVM().getResolvedJavaMethod(baseObject, displacement);
+ 337         return HotSpotMetaspaceConstantImpl.forMetaspaceObject(method, false);
+ 338     }
+ 339 }
+<a name="2" id="anc2"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="2" type="hidden" /></form></body></html>

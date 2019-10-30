@@ -1,0 +1,1316 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2011, 2015, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 
+  24 #include "precompiled.hpp"
+  25 #include "code/compiledIC.hpp"
+  26 #include "compiler/compileBroker.hpp"
+  27 #include "compiler/disassembler.hpp"
+  28 #include "oops/oop.inline.hpp"
+  29 #include "oops/objArrayOop.inline.hpp"
+  30 #include "runtime/javaCalls.hpp"
+  31 #include "jvmci/jvmciEnv.hpp"
+  32 #include "jvmci/jvmciCompiler.hpp"
+  33 #include "jvmci/jvmciCodeInstaller.hpp"
+  34 #include "jvmci/jvmciJavaClasses.hpp"
+  35 #include "jvmci/jvmciCompilerToVM.hpp"
+  36 #include "jvmci/jvmciRuntime.hpp"
+  37 #include "asm/register.hpp"
+  38 #include "classfile/vmSymbols.hpp"
+  39 #include "code/vmreg.hpp"
+  40 
+  41 #ifdef TARGET_ARCH_x86
+  42 # include "vmreg_x86.inline.hpp"
+  43 #endif
+  44 #ifdef TARGET_ARCH_sparc
+  45 # include "vmreg_sparc.inline.hpp"
+  46 #endif
+  47 #ifdef TARGET_ARCH_zero
+  48 # include "vmreg_zero.inline.hpp"
+  49 #endif
+  50 #ifdef TARGET_ARCH_arm
+  51 # include "vmreg_arm.inline.hpp"
+  52 #endif
+  53 #ifdef TARGET_ARCH_ppc
+  54 # include "vmreg_ppc.inline.hpp"
+  55 #endif
+  56 
+  57 
+  58 // frequently used constants
+  59 // Allocate them with new so they are never destroyed (otherwise, a
+  60 // forced exit could destroy these objects while they are still in
+  61 // use).
+  62 ConstantOopWriteValue* CodeInstaller::_oop_null_scope_value = new (ResourceObj::C_HEAP, mtCompiler) ConstantOopWriteValue(NULL);
+  63 ConstantIntValue*      CodeInstaller::_int_m1_scope_value = new (ResourceObj::C_HEAP, mtCompiler) ConstantIntValue(-1);
+  64 ConstantIntValue*      CodeInstaller::_int_0_scope_value =  new (ResourceObj::C_HEAP, mtCompiler) ConstantIntValue(0);
+  65 ConstantIntValue*      CodeInstaller::_int_1_scope_value =  new (ResourceObj::C_HEAP, mtCompiler) ConstantIntValue(1);
+  66 ConstantIntValue*      CodeInstaller::_int_2_scope_value =  new (ResourceObj::C_HEAP, mtCompiler) ConstantIntValue(2);
+  67 LocationValue*         CodeInstaller::_illegal_value = new (ResourceObj::C_HEAP, mtCompiler) LocationValue(Location());
+  68 
+  69 Method* getMethodFromHotSpotMethod(oop hotspot_method) {
+  70   assert(hotspot_method != NULL &amp;&amp; hotspot_method-&gt;is_a(HotSpotResolvedJavaMethodImpl::klass()), "sanity");
+  71   return CompilerToVM::asMethod(hotspot_method);
+  72 }
+  73 
+  74 VMReg getVMRegFromLocation(Handle location, int total_frame_size, TRAPS) {
+  75   if (location.is_null()) {
+  76     THROW_NULL(vmSymbols::java_lang_NullPointerException());
+  77   }
+  78 
+  79   Handle reg = code_Location::reg(location);
+  80   jint offset = code_Location::offset(location);
+  81 
+  82   if (reg.not_null()) {
+  83     // register
+  84     jint number = code_Register::number(reg);
+  85     VMReg vmReg = CodeInstaller::get_hotspot_reg(number, CHECK_NULL);
+  86     if (offset % 4 == 0) {
+  87       return vmReg-&gt;next(offset / 4);
+  88     } else {
+  89       JVMCI_ERROR_NULL("unaligned subregister offset %d in oop map", offset);
+  90     }
+  91   } else {
+  92     // stack slot
+  93     if (offset % 4 == 0) {
+  94       return VMRegImpl::stack2reg(offset / 4);
+  95     } else {
+  96       JVMCI_ERROR_NULL("unaligned stack offset %d in oop map", offset);
+  97     }
+  98   }
+  99 }
+ 100 
+ 101 // creates a HotSpot oop map out of the byte arrays provided by DebugInfo
+ 102 OopMap* CodeInstaller::create_oop_map(Handle debug_info, TRAPS) {
+ 103   Handle reference_map = DebugInfo::referenceMap(debug_info);
+ 104   if (reference_map.is_null()) {
+ 105     THROW_NULL(vmSymbols::java_lang_NullPointerException());
+ 106   }
+ 107   if (!reference_map-&gt;is_a(HotSpotReferenceMap::klass())) {
+ 108     JVMCI_ERROR_NULL("unknown reference map: %s", reference_map-&gt;klass()-&gt;signature_name());
+ 109   }
+ 110   if (HotSpotReferenceMap::maxRegisterSize(reference_map) &gt; 16) {
+ 111     _has_wide_vector = true;
+ 112   }
+ 113   OopMap* map = new OopMap(_total_frame_size, _parameter_count);
+ 114   objArrayHandle objects = HotSpotReferenceMap::objects(reference_map);
+ 115   objArrayHandle derivedBase = HotSpotReferenceMap::derivedBase(reference_map);
+ 116   typeArrayHandle sizeInBytes = HotSpotReferenceMap::sizeInBytes(reference_map);
+ 117   if (objects.is_null() || derivedBase.is_null() || sizeInBytes.is_null()) {
+ 118     THROW_NULL(vmSymbols::java_lang_NullPointerException());
+ 119   }
+ 120   if (objects-&gt;length() != derivedBase-&gt;length() || objects-&gt;length() != sizeInBytes-&gt;length()) {
+ 121     JVMCI_ERROR_NULL("arrays in reference map have different sizes: %d %d %d", objects-&gt;length(), derivedBase-&gt;length(), sizeInBytes-&gt;length());
+ 122   }
+ 123   for (int i = 0; i &lt; objects-&gt;length(); i++) {
+ 124     Handle location = objects-&gt;obj_at(i);
+ 125     Handle baseLocation = derivedBase-&gt;obj_at(i);
+ 126     int bytes = sizeInBytes-&gt;int_at(i);
+ 127 
+ 128     VMReg vmReg = getVMRegFromLocation(location, _total_frame_size, CHECK_NULL);
+ 129     if (baseLocation.not_null()) {
+ 130       // derived oop
+ 131 #ifdef _LP64
+ 132       if (bytes == 8) {
+ 133 #else
+ 134       if (bytes == 4) {
+ 135 #endif
+ 136         VMReg baseReg = getVMRegFromLocation(baseLocation, _total_frame_size, CHECK_NULL);
+ 137         map-&gt;set_derived_oop(vmReg, baseReg);
+ 138       } else {
+ 139         JVMCI_ERROR_NULL("invalid derived oop size in ReferenceMap: %d", bytes);
+ 140       }
+ 141 #ifdef _LP64
+ 142     } else if (bytes == 8) {
+ 143       // wide oop
+ 144       map-&gt;set_oop(vmReg);
+ 145     } else if (bytes == 4) {
+ 146       // narrow oop
+ 147       map-&gt;set_narrowoop(vmReg);
+ 148 #else
+ 149     } else if (bytes == 4) {
+ 150       map-&gt;set_oop(vmReg);
+ 151 #endif
+ 152     } else {
+ 153       JVMCI_ERROR_NULL("invalid oop size in ReferenceMap: %d", bytes);
+ 154     }
+ 155   }
+ 156 
+ 157   Handle callee_save_info = (oop) DebugInfo::calleeSaveInfo(debug_info);
+ 158   if (callee_save_info.not_null()) {
+ 159     objArrayHandle registers = RegisterSaveLayout::registers(callee_save_info);
+ 160     typeArrayHandle slots = RegisterSaveLayout::slots(callee_save_info);
+ 161     for (jint i = 0; i &lt; slots-&gt;length(); i++) {
+ 162       Handle jvmci_reg = registers-&gt;obj_at(i);
+ 163       jint jvmci_reg_number = code_Register::number(jvmci_reg);
+ 164       VMReg hotspot_reg = CodeInstaller::get_hotspot_reg(jvmci_reg_number, CHECK_NULL);
+ 165       // HotSpot stack slots are 4 bytes
+ 166       jint jvmci_slot = slots-&gt;int_at(i);
+ 167       jint hotspot_slot = jvmci_slot * VMRegImpl::slots_per_word;
+ 168       VMReg hotspot_slot_as_reg = VMRegImpl::stack2reg(hotspot_slot);
+ 169       map-&gt;set_callee_saved(hotspot_slot_as_reg, hotspot_reg);
+ 170 #ifdef _LP64
+ 171       // (copied from generate_oop_map() in c1_Runtime1_x86.cpp)
+ 172       VMReg hotspot_slot_hi_as_reg = VMRegImpl::stack2reg(hotspot_slot + 1);
+ 173       map-&gt;set_callee_saved(hotspot_slot_hi_as_reg, hotspot_reg-&gt;next());
+ 174 #endif
+ 175     }
+ 176   }
+ 177   return map;
+ 178 }
+ 179 
+ 180 Metadata* CodeInstaller::record_metadata_reference(Handle constant, TRAPS) {
+ 181   oop obj = HotSpotMetaspaceConstantImpl::metaspaceObject(constant);
+ 182   if (obj-&gt;is_a(HotSpotResolvedObjectTypeImpl::klass())) {
+ 183     Klass* klass = java_lang_Class::as_Klass(HotSpotResolvedObjectTypeImpl::javaClass(obj));
+ 184     assert(!HotSpotMetaspaceConstantImpl::compressed(constant), "unexpected compressed klass pointer %s @ " INTPTR_FORMAT, klass-&gt;name()-&gt;as_C_string(), p2i(klass));
+ 185     int index = _oop_recorder-&gt;find_index(klass);
+ 186     TRACE_jvmci_3("metadata[%d of %d] = %s", index, _oop_recorder-&gt;metadata_count(), klass-&gt;name()-&gt;as_C_string());
+ 187     return klass;
+ 188   } else if (obj-&gt;is_a(HotSpotResolvedJavaMethodImpl::klass())) {
+ 189     Method* method = (Method*) (address) HotSpotResolvedJavaMethodImpl::metaspaceMethod(obj);
+ 190     assert(!HotSpotMetaspaceConstantImpl::compressed(constant), "unexpected compressed method pointer %s @ " INTPTR_FORMAT, method-&gt;name()-&gt;as_C_string(), p2i(method));
+ 191     int index = _oop_recorder-&gt;find_index(method);
+ 192     TRACE_jvmci_3("metadata[%d of %d] = %s", index, _oop_recorder-&gt;metadata_count(), method-&gt;name()-&gt;as_C_string());
+ 193     return method;
+ 194   } else {
+ 195     JVMCI_ERROR_NULL("unexpected metadata reference for constant of type %s", obj-&gt;klass()-&gt;signature_name());
+ 196   }
+ 197 }
+ 198 
+ 199 #ifdef _LP64
+ 200 narrowKlass CodeInstaller::record_narrow_metadata_reference(Handle constant, TRAPS) {
+ 201   oop obj = HotSpotMetaspaceConstantImpl::metaspaceObject(constant);
+ 202   assert(HotSpotMetaspaceConstantImpl::compressed(constant), "unexpected uncompressed pointer");
+ 203 
+ 204   if (!obj-&gt;is_a(HotSpotResolvedObjectTypeImpl::klass())) {
+ 205     JVMCI_ERROR_0("unexpected compressed pointer of type %s", obj-&gt;klass()-&gt;signature_name());
+ 206   }
+ 207 
+ 208   Klass* klass = java_lang_Class::as_Klass(HotSpotResolvedObjectTypeImpl::javaClass(obj));
+ 209   int index = _oop_recorder-&gt;find_index(klass);
+ 210   TRACE_jvmci_3("narrowKlass[%d of %d] = %s", index, _oop_recorder-&gt;metadata_count(), klass-&gt;name()-&gt;as_C_string());
+ 211   return Klass::encode_klass(klass);
+ 212 }
+ 213 #endif
+ 214 
+ 215 Location::Type CodeInstaller::get_oop_type(Handle value) {
+ 216   Handle lirKind = Value::lirKind(value);
+ 217   Handle platformKind = LIRKind::platformKind(lirKind);
+ 218   assert(LIRKind::referenceMask(lirKind) == 1, "unexpected referenceMask");
+ 219 
+ 220   if (platformKind == word_kind()) {
+ 221     return Location::oop;
+ 222   } else {
+ 223     return Location::narrowoop;
+ 224   }
+ 225 }
+ 226 
+ 227 ScopeValue* CodeInstaller::get_scope_value(Handle value, BasicType type, GrowableArray&lt;ScopeValue*&gt;* objects, ScopeValue* &amp;second, TRAPS) {
+ 228   second = NULL;
+ 229   if (value.is_null()) {
+ 230     THROW_NULL(vmSymbols::java_lang_NullPointerException());
+ 231   } else if (value == Value::ILLEGAL()) {
+ 232     if (type != T_ILLEGAL) {
+ 233       JVMCI_ERROR_NULL("unexpected illegal value, expected %s", basictype_to_str(type));
+ 234     }
+ 235     return _illegal_value;
+ 236   } else if (value-&gt;is_a(RegisterValue::klass())) {
+ 237     Handle reg = RegisterValue::reg(value);
+ 238     jint number = code_Register::number(reg);
+ 239     VMReg hotspotRegister = get_hotspot_reg(number, CHECK_NULL);
+ 240     if (is_general_purpose_reg(hotspotRegister)) {
+ 241       Location::Type locationType;
+ 242       if (type == T_OBJECT) {
+ 243         locationType = get_oop_type(value);
+ 244       } else if (type == T_LONG) {
+ 245         locationType = Location::lng;
+ 246       } else if (type == T_INT || type == T_FLOAT || type == T_SHORT || type == T_CHAR || type == T_BYTE || type == T_BOOLEAN) {
+ 247         locationType = Location::int_in_long;
+ 248       } else {
+ 249         JVMCI_ERROR_NULL("unexpected type %s in cpu register", basictype_to_str(type));
+ 250       }
+ 251       ScopeValue* value = new LocationValue(Location::new_reg_loc(locationType, hotspotRegister));
+ 252       if (type == T_LONG) {
+ 253         second = value;
+ 254       }
+ 255       return value;
+ 256     } else {
+ 257       Location::Type locationType;
+ 258       if (type == T_FLOAT) {
+ 259         // this seems weird, but the same value is used in c1_LinearScan
+ 260         locationType = Location::normal;
+ 261       } else if (type == T_DOUBLE) {
+ 262         locationType = Location::dbl;
+ 263       } else {
+ 264         JVMCI_ERROR_NULL("unexpected type %s in floating point register", basictype_to_str(type));
+ 265       }
+ 266       ScopeValue* value = new LocationValue(Location::new_reg_loc(locationType, hotspotRegister));
+ 267       if (type == T_DOUBLE) {
+ 268         second = value;
+ 269       }
+ 270       return value;
+ 271     }
+ 272   } else if (value-&gt;is_a(StackSlot::klass())) {
+ 273     jint offset = StackSlot::offset(value);
+ 274     if (StackSlot::addFrameSize(value)) {
+ 275       offset += _total_frame_size;
+ 276     }
+ 277 
+ 278     Location::Type locationType;
+ 279     if (type == T_OBJECT) {
+ 280       locationType = get_oop_type(value);
+ 281     } else if (type == T_LONG) {
+ 282       locationType = Location::lng;
+ 283     } else if (type == T_DOUBLE) {
+ 284       locationType = Location::dbl;
+ 285     } else if (type == T_INT || type == T_FLOAT || type == T_SHORT || type == T_CHAR || type == T_BYTE || type == T_BOOLEAN) {
+ 286       locationType = Location::normal;
+ 287     } else {
+ 288       JVMCI_ERROR_NULL("unexpected type %s in stack slot", basictype_to_str(type));
+ 289     }
+ 290     ScopeValue* value = new LocationValue(Location::new_stk_loc(locationType, offset));
+ 291     if (type == T_DOUBLE || type == T_LONG) {
+ 292       second = value;
+ 293     }
+ 294     return value;
+ 295   } else if (value-&gt;is_a(JavaConstant::klass())) {
+ 296     if (value-&gt;is_a(PrimitiveConstant::klass())) {
+ 297       if (value-&gt;is_a(RawConstant::klass())) {
+ 298         jlong prim = PrimitiveConstant::primitive(value);
+ 299         return new ConstantLongValue(prim);
+ 300       } else {
+ 301         BasicType constantType = JVMCIRuntime::kindToBasicType(PrimitiveConstant::kind(value), CHECK_NULL);
+ 302         if (type != constantType) {
+ 303           JVMCI_ERROR_NULL("primitive constant type doesn't match, expected %s but got %s", basictype_to_str(type), basictype_to_str(constantType));
+ 304         }
+ 305         if (type == T_INT || type == T_FLOAT) {
+ 306           jint prim = (jint)PrimitiveConstant::primitive(value);
+ 307           switch (prim) {
+ 308             case -1: return _int_m1_scope_value;
+ 309             case  0: return _int_0_scope_value;
+ 310             case  1: return _int_1_scope_value;
+ 311             case  2: return _int_2_scope_value;
+ 312             default: return new ConstantIntValue(prim);
+ 313           }
+ 314         } else if (type == T_LONG || type == T_DOUBLE) {
+ 315           jlong prim = PrimitiveConstant::primitive(value);
+ 316           second = _int_1_scope_value;
+ 317           return new ConstantLongValue(prim);
+ 318         } else {
+ 319           JVMCI_ERROR_NULL("unexpected primitive constant type %s", basictype_to_str(type));
+ 320         }
+ 321       }
+ 322     } else if (value-&gt;is_a(NullConstant::klass()) || value-&gt;is_a(HotSpotCompressedNullConstant::klass())) {
+ 323       if (type == T_OBJECT) {
+ 324         return _oop_null_scope_value;
+ 325       } else {
+ 326         JVMCI_ERROR_NULL("unexpected null constant, expected %s", basictype_to_str(type));
+ 327       }
+ 328     } else if (value-&gt;is_a(HotSpotObjectConstantImpl::klass())) {
+ 329       if (type == T_OBJECT) {
+ 330         oop obj = HotSpotObjectConstantImpl::object(value);
+ 331         if (obj == NULL) {
+ 332           JVMCI_ERROR_NULL("null value must be in NullConstant");
+ 333         }
+ 334         return new ConstantOopWriteValue(JNIHandles::make_local(obj));
+ 335       } else {
+ 336         JVMCI_ERROR_NULL("unexpected object constant, expected %s", basictype_to_str(type));
+ 337       }
+ 338     }
+ 339   } else if (value-&gt;is_a(VirtualObject::klass())) {
+ 340     if (type == T_OBJECT) {
+ 341       int id = VirtualObject::id(value);
+ 342       if (0 &lt;= id &amp;&amp; id &lt; objects-&gt;length()) {
+ 343         ScopeValue* object = objects-&gt;at(id);
+ 344         if (object != NULL) {
+ 345           return object;
+ 346         }
+ 347       }
+ 348       JVMCI_ERROR_NULL("unknown virtual object id %d", id);
+ 349     } else {
+ 350       JVMCI_ERROR_NULL("unexpected virtual object, expected %s", basictype_to_str(type));
+ 351     }
+ 352   }
+ 353 
+ 354   JVMCI_ERROR_NULL("unexpected value in scope: %s", value-&gt;klass()-&gt;signature_name())
+ 355 }
+ 356 
+ 357 void CodeInstaller::record_object_value(ObjectValue* sv, Handle value, GrowableArray&lt;ScopeValue*&gt;* objects, TRAPS) {
+ 358   Handle type = VirtualObject::type(value);
+ 359   int id = VirtualObject::id(value);
+ 360   oop javaMirror = HotSpotResolvedObjectTypeImpl::javaClass(type);
+ 361   Klass* klass = java_lang_Class::as_Klass(javaMirror);
+ 362   bool isLongArray = klass == Universe::longArrayKlassObj();
+ 363 
+ 364   objArrayHandle values = VirtualObject::values(value);
+ 365   objArrayHandle slotKinds = VirtualObject::slotKinds(value);
+ 366   for (jint i = 0; i &lt; values-&gt;length(); i++) {
+ 367     ScopeValue* cur_second = NULL;
+ 368     Handle object = values-&gt;obj_at(i);
+ 369     BasicType type = JVMCIRuntime::kindToBasicType(slotKinds-&gt;obj_at(i), CHECK);
+ 370     ScopeValue* value = get_scope_value(object, type, objects, cur_second, CHECK);
+ 371 
+ 372     if (isLongArray &amp;&amp; cur_second == NULL) {
+ 373       // we're trying to put ints into a long array... this isn't really valid, but it's used for some optimizations.
+ 374       // add an int 0 constant
+ 375       cur_second = _int_0_scope_value;
+ 376     }
+ 377 
+ 378     if (cur_second != NULL) {
+ 379       sv-&gt;field_values()-&gt;append(cur_second);
+ 380     }
+ 381     assert(value != NULL, "missing value");
+ 382     sv-&gt;field_values()-&gt;append(value);
+ 383   }
+ 384 }
+ 385 
+ 386 MonitorValue* CodeInstaller::get_monitor_value(Handle value, GrowableArray&lt;ScopeValue*&gt;* objects, TRAPS) {
+ 387   if (value.is_null()) {
+ 388     THROW_NULL(vmSymbols::java_lang_NullPointerException());
+ 389   }
+ 390   if (!value-&gt;is_a(StackLockValue::klass())) {
+ 391     JVMCI_ERROR_NULL("Monitors must be of type StackLockValue, got %s", value-&gt;klass()-&gt;signature_name());
+ 392   }
+ 393 
+ 394   ScopeValue* second = NULL;
+ 395   ScopeValue* owner_value = get_scope_value(StackLockValue::owner(value), T_OBJECT, objects, second, CHECK_NULL);
+ 396   assert(second == NULL, "monitor cannot occupy two stack slots");
+ 397 
+ 398   ScopeValue* lock_data_value = get_scope_value(StackLockValue::slot(value), T_LONG, objects, second, CHECK_NULL);
+ 399   assert(second == lock_data_value, "monitor is LONG value that occupies two stack slots");
+ 400   assert(lock_data_value-&gt;is_location(), "invalid monitor location");
+ 401   Location lock_data_loc = ((LocationValue*)lock_data_value)-&gt;location();
+ 402 
+ 403   bool eliminated = false;
+ 404   if (StackLockValue::eliminated(value)) {
+ 405     eliminated = true;
+ 406   }
+ 407 
+ 408   return new MonitorValue(owner_value, lock_data_loc, eliminated);
+ 409 }
+ 410 
+ 411 void CodeInstaller::initialize_dependencies(oop compiled_code, OopRecorder* recorder, TRAPS) {
+ 412   JavaThread* thread = JavaThread::current();
+ 413   CompilerThread* compilerThread = thread-&gt;is_Compiler_thread() ? thread-&gt;as_CompilerThread() : NULL;
+ 414   _oop_recorder = recorder;
+ 415   _dependencies = new Dependencies(&amp;_arena, _oop_recorder, compilerThread != NULL ? compilerThread-&gt;log() : NULL);
+ 416   objArrayHandle assumptions = HotSpotCompiledCode::assumptions(compiled_code);
+ 417   if (!assumptions.is_null()) {
+ 418     int length = assumptions-&gt;length();
+ 419     for (int i = 0; i &lt; length; ++i) {
+ 420       Handle assumption = assumptions-&gt;obj_at(i);
+ 421       if (!assumption.is_null()) {
+ 422         if (assumption-&gt;klass() == Assumptions_NoFinalizableSubclass::klass()) {
+ 423           assumption_NoFinalizableSubclass(assumption);
+ 424         } else if (assumption-&gt;klass() == Assumptions_ConcreteSubtype::klass()) {
+ 425           assumption_ConcreteSubtype(assumption);
+ 426         } else if (assumption-&gt;klass() == Assumptions_LeafType::klass()) {
+ 427           assumption_LeafType(assumption);
+ 428         } else if (assumption-&gt;klass() == Assumptions_ConcreteMethod::klass()) {
+ 429           assumption_ConcreteMethod(assumption);
+ 430         } else if (assumption-&gt;klass() == Assumptions_CallSiteTargetValue::klass()) {
+ 431           assumption_CallSiteTargetValue(assumption);
+ 432         } else {
+ 433           JVMCI_ERROR("unexpected Assumption subclass %s", assumption-&gt;klass()-&gt;signature_name());
+ 434         }
+ 435       }
+ 436     }
+ 437   }
+ 438   if (JvmtiExport::can_hotswap_or_post_breakpoint()) {
+ 439     objArrayHandle methods = HotSpotCompiledCode::methods(compiled_code);
+ 440     if (!methods.is_null()) {
+ 441       int length = methods-&gt;length();
+ 442       for (int i = 0; i &lt; length; ++i) {
+ 443         Handle method_handle = methods-&gt;obj_at(i);
+ 444         methodHandle method = getMethodFromHotSpotMethod(method_handle());
+ 445         _dependencies-&gt;assert_evol_method(method());
+ 446       }
+ 447     }
+ 448   }
+ 449 }
+ 450 
+ 451 RelocBuffer::~RelocBuffer() {
+ 452   if (_buffer != NULL) {
+ 453     FREE_C_HEAP_ARRAY(char, _buffer);
+ 454   }
+ 455 }
+ 456 
+ 457 address RelocBuffer::begin() const {
+ 458   if (_buffer != NULL) {
+ 459     return (address) _buffer;
+ 460   }
+ 461   return (address) _static_buffer;
+ 462 }
+ 463 
+ 464 void RelocBuffer::set_size(size_t bytes) {
+ 465   assert(bytes &lt;= _size, "can't grow in size!");
+ 466   _size = bytes;
+ 467 }
+ 468 
+ 469 void RelocBuffer::ensure_size(size_t bytes) {
+ 470   assert(_buffer == NULL, "can only be used once");
+ 471   assert(_size == 0, "can only be used once");
+ 472   if (bytes &gt;= RelocBuffer::stack_size) {
+ 473     _buffer = NEW_C_HEAP_ARRAY(char, bytes, mtInternal);
+ 474   }
+ 475   _size = bytes;
+ 476 }
+ 477 
+ 478 JVMCIEnv::CodeInstallResult CodeInstaller::gather_metadata(Handle target, Handle compiled_code, CodeMetadata&amp; metadata, TRAPS) {
+ 479   CodeBuffer buffer("JVMCI Compiler CodeBuffer for Metadata");
+ 480   jobject compiled_code_obj = JNIHandles::make_local(compiled_code());
+ 481   initialize_dependencies(JNIHandles::resolve(compiled_code_obj), NULL, CHECK_OK);
+ 482 
+ 483   // Get instructions and constants CodeSections early because we need it.
+ 484   _instructions = buffer.insts();
+ 485   _constants = buffer.consts();
+ 486 
+ 487   initialize_fields(target(), JNIHandles::resolve(compiled_code_obj), CHECK_OK);
+ 488   JVMCIEnv::CodeInstallResult result = initialize_buffer(buffer, CHECK_OK);
+ 489   if (result != JVMCIEnv::ok) {
+ 490     return result;
+ 491   }
+ 492   process_exception_handlers();
+ 493 
+ 494   _debug_recorder-&gt;pcs_size(); // ehm, create the sentinel record
+ 495 
+ 496   assert(_debug_recorder-&gt;pcs_length() &gt;= 2, "must be at least 2");
+ 497 
+ 498   metadata.set_pc_desc(_debug_recorder-&gt;pcs(), _debug_recorder-&gt;pcs_length());
+ 499   metadata.set_scopes(_debug_recorder-&gt;stream()-&gt;buffer(), _debug_recorder-&gt;data_size());
+ 500   metadata.set_exception_table(&amp;_exception_handler_table);
+ 501 
+ 502   RelocBuffer* reloc_buffer = metadata.get_reloc_buffer();
+ 503 
+ 504   reloc_buffer-&gt;ensure_size(buffer.total_relocation_size());
+ 505   size_t size = (size_t) buffer.copy_relocations_to(reloc_buffer-&gt;begin(), (CodeBuffer::csize_t) reloc_buffer-&gt;size(), true);
+ 506   reloc_buffer-&gt;set_size(size);
+ 507   return JVMCIEnv::ok;
+ 508 }
+ 509 
+ 510 // constructor used to create a method
+ 511 JVMCIEnv::CodeInstallResult CodeInstaller::install(JVMCICompiler* compiler, Handle target, Handle compiled_code, CodeBlob*&amp; cb, Handle installed_code, Handle speculation_log, TRAPS) {
+ 512   CodeBuffer buffer("JVMCI Compiler CodeBuffer");
+ 513   jobject compiled_code_obj = JNIHandles::make_local(compiled_code());
+ 514   OopRecorder* recorder = new OopRecorder(&amp;_arena, true);
+ 515   initialize_dependencies(JNIHandles::resolve(compiled_code_obj), recorder, CHECK_OK);
+ 516 
+ 517   // Get instructions and constants CodeSections early because we need it.
+ 518   _instructions = buffer.insts();
+ 519   _constants = buffer.consts();
+ 520 
+ 521   initialize_fields(target(), JNIHandles::resolve(compiled_code_obj), CHECK_OK);
+ 522   JVMCIEnv::CodeInstallResult result = initialize_buffer(buffer, CHECK_OK);
+ 523   if (result != JVMCIEnv::ok) {
+ 524     return result;
+ 525   }
+ 526   process_exception_handlers();
+ 527 
+ 528   int stack_slots = _total_frame_size / HeapWordSize; // conversion to words
+ 529 
+ 530   if (!compiled_code-&gt;is_a(HotSpotCompiledNmethod::klass())) {
+ 531     oop stubName = HotSpotCompiledCode::name(compiled_code_obj);
+ 532     char* name = strdup(java_lang_String::as_utf8_string(stubName));
+ 533     cb = RuntimeStub::new_runtime_stub(name,
+ 534                                        &amp;buffer,
+ 535                                        CodeOffsets::frame_never_safe,
+ 536                                        stack_slots,
+ 537                                        _debug_recorder-&gt;_oopmaps,
+ 538                                        false);
+ 539     result = JVMCIEnv::ok;
+ 540   } else {
+ 541     nmethod* nm = NULL;
+ 542     methodHandle method = getMethodFromHotSpotMethod(HotSpotCompiledNmethod::method(compiled_code));
+ 543     jint entry_bci = HotSpotCompiledNmethod::entryBCI(compiled_code);
+ 544     jint id = HotSpotCompiledNmethod::id(compiled_code);
+ 545     bool has_unsafe_access = HotSpotCompiledNmethod::hasUnsafeAccess(compiled_code) == JNI_TRUE;
+ 546     JVMCIEnv* env = (JVMCIEnv*) (address) HotSpotCompiledNmethod::jvmciEnv(compiled_code);
+ 547     if (id == -1) {
+ 548       // Make sure a valid compile_id is associated with every compile
+ 549       id = CompileBroker::assign_compile_id_unlocked(Thread::current(), method, entry_bci);
+ 550     }
+ 551     result = JVMCIEnv::register_method(method, nm, entry_bci, &amp;_offsets, _custom_stack_area_offset, &amp;buffer,
+ 552                                        stack_slots, _debug_recorder-&gt;_oopmaps, &amp;_exception_handler_table,
+ 553                                        compiler, _debug_recorder, _dependencies, env, id,
+ 554                                        has_unsafe_access, _has_wide_vector, installed_code, compiled_code, speculation_log);
+ 555     cb = nm;
+ 556   }
+ 557 
+ 558   if (cb != NULL) {
+ 559     // Make sure the pre-calculated constants section size was correct.
+ 560     guarantee((cb-&gt;code_begin() - cb-&gt;content_begin()) &gt;= _constants_size, "%d &lt; %d", (int)(cb-&gt;code_begin() - cb-&gt;content_begin()), _constants_size);
+ 561   }
+ 562   return result;
+ 563 }
+ 564 
+ 565 void CodeInstaller::initialize_fields(oop target, oop compiled_code, TRAPS) {
+ 566   if (compiled_code-&gt;is_a(HotSpotCompiledNmethod::klass())) {
+ 567     Handle hotspotJavaMethod = HotSpotCompiledNmethod::method(compiled_code);
+ 568     methodHandle method = getMethodFromHotSpotMethod(hotspotJavaMethod());
+ 569     _parameter_count = method-&gt;size_of_parameters();
+ 570     TRACE_jvmci_2("installing code for %s", method-&gt;name_and_sig_as_C_string());
+ 571   } else {
+ 572     // Must be a HotSpotCompiledRuntimeStub.
+ 573     // Only used in OopMap constructor for non-product builds
+ 574     _parameter_count = 0;
+ 575   }
+ 576   _sites_handle = JNIHandles::make_local(HotSpotCompiledCode::sites(compiled_code));
+ 577   _exception_handlers_handle = JNIHandles::make_local(HotSpotCompiledCode::exceptionHandlers(compiled_code));
+ 578 
+ 579   _code_handle = JNIHandles::make_local(HotSpotCompiledCode::targetCode(compiled_code));
+ 580   _code_size = HotSpotCompiledCode::targetCodeSize(compiled_code);
+ 581   _total_frame_size = HotSpotCompiledCode::totalFrameSize(compiled_code);
+ 582   _custom_stack_area_offset = HotSpotCompiledCode::customStackAreaOffset(compiled_code);
+ 583 
+ 584   // Pre-calculate the constants section size.  This is required for PC-relative addressing.
+ 585   _data_section_handle = JNIHandles::make_local(HotSpotCompiledCode::dataSection(compiled_code));
+ 586   if ((_constants-&gt;alignment() % HotSpotCompiledCode::dataSectionAlignment(compiled_code)) != 0) {
+ 587     JVMCI_ERROR("invalid data section alignment: %d", HotSpotCompiledCode::dataSectionAlignment(compiled_code));
+ 588   }
+ 589   _constants_size = data_section()-&gt;length();
+ 590 
+ 591   _data_section_patches_handle = JNIHandles::make_local(HotSpotCompiledCode::dataSectionPatches(compiled_code));
+ 592 
+ 593 #ifndef PRODUCT
+ 594   _comments_handle = JNIHandles::make_local(HotSpotCompiledCode::comments(compiled_code));
+ 595 #endif
+ 596 
+ 597   _next_call_type = INVOKE_INVALID;
+ 598 
+ 599   _has_wide_vector = false;
+ 600 
+ 601   oop arch = TargetDescription::arch(target);
+ 602   _word_kind_handle = JNIHandles::make_local(Architecture::wordKind(arch));
+ 603 }
+ 604 
+ 605 int CodeInstaller::estimate_stubs_size(TRAPS) {
+ 606   // Estimate the number of static call stubs that might be emitted.
+ 607   int static_call_stubs = 0;
+ 608   objArrayOop sites = this-&gt;sites();
+ 609   for (int i = 0; i &lt; sites-&gt;length(); i++) {
+ 610     oop site = sites-&gt;obj_at(i);
+ 611     if (site != NULL &amp;&amp; site-&gt;is_a(CompilationResult_Mark::klass())) {
+ 612       oop id_obj = CompilationResult_Mark::id(site);
+ 613       if (id_obj != NULL) {
+ 614         if (!java_lang_boxing_object::is_instance(id_obj, T_INT)) {
+ 615           JVMCI_ERROR_0("expected Integer id, got %s", id_obj-&gt;klass()-&gt;signature_name());
+ 616         }
+ 617         jint id = id_obj-&gt;int_field(java_lang_boxing_object::value_offset_in_bytes(T_INT));
+ 618         if (id == INVOKESTATIC || id == INVOKESPECIAL) {
+ 619           static_call_stubs++;
+ 620         }
+ 621       }
+ 622     }
+ 623   }
+ 624   return static_call_stubs * CompiledStaticCall::to_interp_stub_size();
+ 625 }
+ 626 
+ 627 // perform data and call relocation on the CodeBuffer
+ 628 JVMCIEnv::CodeInstallResult CodeInstaller::initialize_buffer(CodeBuffer&amp; buffer, TRAPS) {
+ 629   HandleMark hm;
+ 630   objArrayHandle sites = this-&gt;sites();
+ 631   int locs_buffer_size = sites-&gt;length() * (relocInfo::length_limit + sizeof(relocInfo));
+ 632 
+ 633   // Allocate enough space in the stub section for the static call
+ 634   // stubs.  Stubs have extra relocs but they are managed by the stub
+ 635   // section itself so they don't need to be accounted for in the
+ 636   // locs_buffer above.
+ 637   int stubs_size = estimate_stubs_size(CHECK_OK);
+ 638   int total_size = round_to(_code_size, buffer.insts()-&gt;alignment()) + round_to(_constants_size, buffer.consts()-&gt;alignment()) + round_to(stubs_size, buffer.stubs()-&gt;alignment());
+ 639 
+ 640   if (total_size &gt; JVMCINMethodSizeLimit) {
+ 641     return JVMCIEnv::code_too_large;
+ 642   }
+ 643 
+ 644   buffer.initialize(total_size, locs_buffer_size);
+ 645   if (buffer.blob() == NULL) {
+ 646     return JVMCIEnv::cache_full;
+ 647   }
+ 648   buffer.initialize_stubs_size(stubs_size);
+ 649   buffer.initialize_consts_size(_constants_size);
+ 650 
+ 651   _debug_recorder = new DebugInformationRecorder(_oop_recorder);
+ 652   _debug_recorder-&gt;set_oopmaps(new OopMapSet());
+ 653 
+ 654   buffer.initialize_oop_recorder(_oop_recorder);
+ 655 
+ 656   // copy the constant data into the newly created CodeBuffer
+ 657   address end_data = _constants-&gt;start() + _constants_size;
+ 658   memcpy(_constants-&gt;start(), data_section()-&gt;base(T_BYTE), _constants_size);
+ 659   _constants-&gt;set_end(end_data);
+ 660 
+ 661   // copy the code into the newly created CodeBuffer
+ 662   address end_pc = _instructions-&gt;start() + _code_size;
+ 663   guarantee(_instructions-&gt;allocates2(end_pc), "initialize should have reserved enough space for all the code");
+ 664   memcpy(_instructions-&gt;start(), code()-&gt;base(T_BYTE), _code_size);
+ 665   _instructions-&gt;set_end(end_pc);
+ 666 
+ 667   for (int i = 0; i &lt; data_section_patches()-&gt;length(); i++) {
+ 668     Handle patch = data_section_patches()-&gt;obj_at(i);
+ 669     if (patch.is_null()) {
+ 670       THROW_(vmSymbols::java_lang_NullPointerException(), JVMCIEnv::ok);
+ 671     }
+ 672     Handle reference = CompilationResult_DataPatch::reference(patch);
+ 673     if (reference.is_null()) {
+ 674       THROW_(vmSymbols::java_lang_NullPointerException(), JVMCIEnv::ok);
+ 675     }
+ 676     if (!reference-&gt;is_a(CompilationResult_ConstantReference::klass())) {
+ 677       JVMCI_ERROR_OK("invalid patch in data section: %s", reference-&gt;klass()-&gt;signature_name());
+ 678     }
+ 679     Handle constant = CompilationResult_ConstantReference::constant(reference);
+ 680     if (constant.is_null()) {
+ 681       THROW_(vmSymbols::java_lang_NullPointerException(), JVMCIEnv::ok);
+ 682     }
+ 683     address dest = _constants-&gt;start() + CompilationResult_Site::pcOffset(patch);
+ 684     if (constant-&gt;is_a(HotSpotMetaspaceConstantImpl::klass())) {
+ 685       if (HotSpotMetaspaceConstantImpl::compressed(constant)) {
+ 686 #ifdef _LP64
+ 687         *((narrowKlass*) dest) = record_narrow_metadata_reference(constant, CHECK_OK);
+ 688 #else
+ 689         JVMCI_ERROR_OK("unexpected compressed Klass* in 32-bit mode");
+ 690 #endif
+ 691       } else {
+ 692         *((Metadata**) dest) = record_metadata_reference(constant, CHECK_OK);
+ 693       }
+ 694     } else if (constant-&gt;is_a(HotSpotObjectConstantImpl::klass())) {
+ 695       Handle obj = HotSpotObjectConstantImpl::object(constant);
+ 696       jobject value = JNIHandles::make_local(obj());
+ 697       int oop_index = _oop_recorder-&gt;find_index(value);
+ 698 
+ 699       if (HotSpotObjectConstantImpl::compressed(constant)) {
+ 700 #ifdef _LP64
+ 701         _constants-&gt;relocate(dest, oop_Relocation::spec(oop_index), relocInfo::narrow_oop_in_const);
+ 702 #else
+ 703         JVMCI_ERROR_OK("unexpected compressed oop in 32-bit mode");
+ 704 #endif
+ 705       } else {
+ 706         _constants-&gt;relocate(dest, oop_Relocation::spec(oop_index));
+ 707       }
+ 708     } else {
+ 709       JVMCI_ERROR_OK("invalid constant in data section: %s", constant-&gt;klass()-&gt;signature_name());
+ 710     }
+ 711   }
+ 712   jint last_pc_offset = -1;
+ 713   for (int i = 0; i &lt; sites-&gt;length(); i++) {
+ 714     Handle site = sites-&gt;obj_at(i);
+ 715     if (site.is_null()) {
+ 716       THROW_(vmSymbols::java_lang_NullPointerException(), JVMCIEnv::ok);
+ 717     }
+ 718 
+ 719     jint pc_offset = CompilationResult_Site::pcOffset(site);
+ 720 
+ 721     if (site-&gt;is_a(CompilationResult_Call::klass())) {
+ 722       TRACE_jvmci_4("call at %i", pc_offset);
+ 723       site_Call(buffer, pc_offset, site, CHECK_OK);
+ 724     } else if (site-&gt;is_a(CompilationResult_Infopoint::klass())) {
+ 725       // three reasons for infopoints denote actual safepoints
+ 726       oop reason = CompilationResult_Infopoint::reason(site);
+ 727       if (InfopointReason::SAFEPOINT() == reason || InfopointReason::CALL() == reason || InfopointReason::IMPLICIT_EXCEPTION() == reason) {
+ 728         TRACE_jvmci_4("safepoint at %i", pc_offset);
+ 729         site_Safepoint(buffer, pc_offset, site, CHECK_OK);
+<a name="1" id="anc1"></a>
+
+ 730       } else {
+<a name="2" id="anc2"></a><span class="changed"> 731         TRACE_jvmci_4("infopoint at %i", pc_offset);</span>
+<span class="changed"> 732         site_Infopoint(buffer, pc_offset, site, CHECK_OK);</span>
+ 733       }
+ 734     } else if (site-&gt;is_a(CompilationResult_DataPatch::klass())) {
+ 735       TRACE_jvmci_4("datapatch at %i", pc_offset);
+ 736       site_DataPatch(buffer, pc_offset, site, CHECK_OK);
+ 737     } else if (site-&gt;is_a(CompilationResult_Mark::klass())) {
+ 738       TRACE_jvmci_4("mark at %i", pc_offset);
+ 739       site_Mark(buffer, pc_offset, site, CHECK_OK);
+ 740     } else {
+ 741       JVMCI_ERROR_OK("unexpected site subclass: %s", site-&gt;klass()-&gt;signature_name());
+ 742     }
+ 743     last_pc_offset = pc_offset;
+ 744 
+ 745     if (CodeInstallSafepointChecks &amp;&amp; SafepointSynchronize::do_call_back()) {
+ 746       // this is a hacky way to force a safepoint check but nothing else was jumping out at me.
+ 747       ThreadToNativeFromVM ttnfv(JavaThread::current());
+ 748     }
+ 749   }
+ 750 
+ 751 #ifndef PRODUCT
+ 752   if (comments() != NULL) {
+ 753     for (int i = 0; i &lt; comments()-&gt;length(); i++) {
+ 754       oop comment = comments()-&gt;obj_at(i);
+ 755       assert(comment-&gt;is_a(HotSpotCompiledCode_Comment::klass()), "cce");
+ 756       jint offset = HotSpotCompiledCode_Comment::pcOffset(comment);
+ 757       char* text = java_lang_String::as_utf8_string(HotSpotCompiledCode_Comment::text(comment));
+ 758       buffer.block_comment(offset, text);
+ 759     }
+ 760   }
+ 761 #endif
+ 762   return JVMCIEnv::ok;
+ 763 }
+ 764 
+ 765 void CodeInstaller::assumption_NoFinalizableSubclass(Handle assumption) {
+ 766   Handle receiverType_handle = Assumptions_NoFinalizableSubclass::receiverType(assumption());
+ 767   Klass* receiverType = java_lang_Class::as_Klass(HotSpotResolvedObjectTypeImpl::javaClass(receiverType_handle));
+ 768   _dependencies-&gt;assert_has_no_finalizable_subclasses(receiverType);
+ 769 }
+ 770 
+ 771 void CodeInstaller::assumption_ConcreteSubtype(Handle assumption) {
+ 772   Handle context_handle = Assumptions_ConcreteSubtype::context(assumption());
+ 773   Handle subtype_handle = Assumptions_ConcreteSubtype::subtype(assumption());
+ 774   Klass* context = java_lang_Class::as_Klass(HotSpotResolvedObjectTypeImpl::javaClass(context_handle));
+ 775   Klass* subtype = java_lang_Class::as_Klass(HotSpotResolvedObjectTypeImpl::javaClass(subtype_handle));
+ 776 
+ 777   assert(context-&gt;is_abstract(), "");
+ 778   _dependencies-&gt;assert_abstract_with_unique_concrete_subtype(context, subtype);
+ 779 }
+ 780 
+ 781 void CodeInstaller::assumption_LeafType(Handle assumption) {
+ 782   Handle context_handle = Assumptions_LeafType::context(assumption());
+ 783   Klass* context = java_lang_Class::as_Klass(HotSpotResolvedObjectTypeImpl::javaClass(context_handle));
+ 784 
+ 785   _dependencies-&gt;assert_leaf_type(context);
+ 786 }
+ 787 
+ 788 void CodeInstaller::assumption_ConcreteMethod(Handle assumption) {
+ 789   Handle impl_handle = Assumptions_ConcreteMethod::impl(assumption());
+ 790   Handle context_handle = Assumptions_ConcreteMethod::context(assumption());
+ 791 
+ 792   methodHandle impl = getMethodFromHotSpotMethod(impl_handle());
+ 793   Klass* context = java_lang_Class::as_Klass(HotSpotResolvedObjectTypeImpl::javaClass(context_handle));
+ 794 
+ 795   _dependencies-&gt;assert_unique_concrete_method(context, impl());
+ 796 }
+ 797 
+ 798 void CodeInstaller::assumption_CallSiteTargetValue(Handle assumption) {
+ 799   Handle callSite = Assumptions_CallSiteTargetValue::callSite(assumption());
+ 800   Handle methodHandle = Assumptions_CallSiteTargetValue::methodHandle(assumption());
+ 801 
+ 802   _dependencies-&gt;assert_call_site_target_value(callSite(), methodHandle());
+ 803 }
+ 804 
+ 805 void CodeInstaller::process_exception_handlers() {
+ 806   if (exception_handlers() != NULL) {
+ 807     objArrayOop handlers = exception_handlers();
+ 808     for (int i = 0; i &lt; handlers-&gt;length(); i++) {
+ 809       oop exc = handlers-&gt;obj_at(i);
+ 810       jint pc_offset = CompilationResult_Site::pcOffset(exc);
+ 811       jint handler_offset = CompilationResult_ExceptionHandler::handlerPos(exc);
+ 812 
+ 813       // Subtable header
+ 814       _exception_handler_table.add_entry(HandlerTableEntry(1, pc_offset, 0));
+ 815 
+ 816       // Subtable entry
+ 817       _exception_handler_table.add_entry(HandlerTableEntry(-1, handler_offset, 0));
+ 818     }
+ 819   }
+ 820 }
+ 821 
+ 822 // If deoptimization happens, the interpreter should reexecute these bytecodes.
+ 823 // This function mainly helps the compilers to set up the reexecute bit.
+ 824 static bool bytecode_should_reexecute(Bytecodes::Code code) {
+ 825   switch (code) {
+ 826     case Bytecodes::_invokedynamic:
+ 827     case Bytecodes::_invokevirtual:
+ 828     case Bytecodes::_invokeinterface:
+ 829     case Bytecodes::_invokespecial:
+ 830     case Bytecodes::_invokestatic:
+ 831       return false;
+ 832     default:
+ 833       return true;
+ 834     }
+ 835   return true;
+ 836 }
+ 837 
+ 838 GrowableArray&lt;ScopeValue*&gt;* CodeInstaller::record_virtual_objects(Handle debug_info, TRAPS) {
+ 839   objArrayHandle virtualObjects = DebugInfo::virtualObjectMapping(debug_info);
+ 840   if (virtualObjects.is_null()) {
+ 841     return NULL;
+ 842   }
+ 843   GrowableArray&lt;ScopeValue*&gt;* objects = new GrowableArray&lt;ScopeValue*&gt;(virtualObjects-&gt;length(), virtualObjects-&gt;length(), NULL);
+ 844   // Create the unique ObjectValues
+ 845   for (int i = 0; i &lt; virtualObjects-&gt;length(); i++) {
+ 846     Handle value = virtualObjects-&gt;obj_at(i);
+ 847     int id = VirtualObject::id(value);
+ 848     Handle type = VirtualObject::type(value);
+ 849     oop javaMirror = HotSpotResolvedObjectTypeImpl::javaClass(type);
+ 850     ObjectValue* sv = new ObjectValue(id, new ConstantOopWriteValue(JNIHandles::make_local(Thread::current(), javaMirror)));
+ 851     if (id &lt; 0 || id &gt;= objects-&gt;length()) {
+ 852       JVMCI_ERROR_NULL("virtual object id %d out of bounds", id);
+ 853     }
+ 854     if (objects-&gt;at(id) != NULL) {
+ 855       JVMCI_ERROR_NULL("duplicate virtual object id %d", id);
+ 856     }
+ 857     objects-&gt;at_put(id, sv);
+ 858   }
+ 859   // All the values which could be referenced by the VirtualObjects
+ 860   // exist, so now describe all the VirtualObjects themselves.
+ 861   for (int i = 0; i &lt; virtualObjects-&gt;length(); i++) {
+ 862     Handle value = virtualObjects-&gt;obj_at(i);
+ 863     int id = VirtualObject::id(value);
+ 864     record_object_value(objects-&gt;at(id)-&gt;as_ObjectValue(), value, objects, CHECK_NULL);
+ 865   }
+ 866   _debug_recorder-&gt;dump_object_pool(objects);
+ 867   return objects;
+ 868 }
+ 869 
+<a name="3" id="anc3"></a><span class="changed"> 870 void CodeInstaller::record_scope(jint pc_offset, Handle debug_info, ScopeMode scope_mode, TRAPS) {</span>
+ 871   Handle position = DebugInfo::bytecodePosition(debug_info);
+ 872   if (position.is_null()) {
+ 873     // Stubs do not record scope info, just oop maps
+ 874     return;
+ 875   }
+ 876 
+<a name="4" id="anc4"></a><span class="changed"> 877   GrowableArray&lt;ScopeValue*&gt;* objectMapping;</span>
+<span class="changed"> 878   if (scope_mode == CodeInstaller::FullFrame) {</span>
+<span class="changed"> 879     objectMapping = record_virtual_objects(debug_info, CHECK);</span>
+<span class="changed"> 880   } else {</span>
+<span class="changed"> 881     objectMapping = NULL;</span>
+<span class="changed"> 882   }</span>
+<span class="changed"> 883   record_scope(pc_offset, position, scope_mode, objectMapping, CHECK);</span>
+ 884 }
+ 885 
+<a name="5" id="anc5"></a><span class="changed"> 886 void CodeInstaller::record_scope(jint pc_offset, Handle position, ScopeMode scope_mode, GrowableArray&lt;ScopeValue*&gt;* objects, TRAPS) {</span>
+ 887   Handle frame;
+<a name="6" id="anc6"></a><span class="changed"> 888   if (scope_mode == CodeInstaller::FullFrame) {</span>
+<span class="changed"> 889     if (!position-&gt;is_a(BytecodeFrame::klass())) {</span>
+<span class="changed"> 890       JVMCI_ERROR("Full frame expected for debug info at %i", pc_offset);</span>
+<span class="changed"> 891     }</span>
+ 892     frame = position;
+ 893   }
+ 894   Handle caller_frame = BytecodePosition::caller(position);
+ 895   if (caller_frame.not_null()) {
+<a name="7" id="anc7"></a><span class="changed"> 896     record_scope(pc_offset, caller_frame, scope_mode, objects, CHECK);</span>
+ 897   }
+ 898 
+ 899   Handle hotspot_method = BytecodePosition::method(position);
+ 900   Method* method = getMethodFromHotSpotMethod(hotspot_method());
+ 901   jint bci = BytecodePosition::bci(position);
+ 902   if (bci == BytecodeFrame::BEFORE_BCI()) {
+ 903     bci = SynchronizationEntryBCI;
+ 904   }
+ 905 
+ 906   TRACE_jvmci_2("Recording scope pc_offset=%d bci=%d method=%s", pc_offset, bci, method-&gt;name_and_sig_as_C_string());
+ 907 
+ 908   bool reexecute = false;
+ 909   if (frame.not_null()) {
+ 910     if (bci == SynchronizationEntryBCI){
+ 911        reexecute = false;
+ 912     } else {
+ 913       Bytecodes::Code code = Bytecodes::java_code_at(method, method-&gt;bcp_from(bci));
+ 914       reexecute = bytecode_should_reexecute(code);
+ 915       if (frame.not_null()) {
+ 916         reexecute = (BytecodeFrame::duringCall(frame) == JNI_FALSE);
+ 917       }
+ 918     }
+ 919   }
+ 920 
+ 921   DebugToken* locals_token = NULL;
+ 922   DebugToken* expressions_token = NULL;
+ 923   DebugToken* monitors_token = NULL;
+ 924   bool throw_exception = false;
+ 925 
+ 926   if (frame.not_null()) {
+ 927     jint local_count = BytecodeFrame::numLocals(frame);
+ 928     jint expression_count = BytecodeFrame::numStack(frame);
+ 929     jint monitor_count = BytecodeFrame::numLocks(frame);
+ 930     objArrayHandle values = BytecodeFrame::values(frame);
+ 931     objArrayHandle slotKinds = BytecodeFrame::slotKinds(frame);
+ 932 
+ 933     if (values.is_null() || slotKinds.is_null()) {
+ 934       THROW(vmSymbols::java_lang_NullPointerException());
+ 935     }
+ 936     if (local_count + expression_count + monitor_count != values-&gt;length()) {
+ 937       JVMCI_ERROR("unexpected values length %d in scope (%d locals, %d expressions, %d monitors)", values-&gt;length(), local_count, expression_count, monitor_count);
+ 938     }
+ 939     if (local_count + expression_count != slotKinds-&gt;length()) {
+ 940       JVMCI_ERROR("unexpected slotKinds length %d in scope (%d locals, %d expressions)", slotKinds-&gt;length(), local_count, expression_count);
+ 941     }
+ 942 
+ 943     GrowableArray&lt;ScopeValue*&gt;* locals = local_count &gt; 0 ? new GrowableArray&lt;ScopeValue*&gt; (local_count) : NULL;
+ 944     GrowableArray&lt;ScopeValue*&gt;* expressions = expression_count &gt; 0 ? new GrowableArray&lt;ScopeValue*&gt; (expression_count) : NULL;
+ 945     GrowableArray&lt;MonitorValue*&gt;* monitors = monitor_count &gt; 0 ? new GrowableArray&lt;MonitorValue*&gt; (monitor_count) : NULL;
+ 946 
+ 947     TRACE_jvmci_2("Scope at bci %d with %d values", bci, values-&gt;length());
+ 948     TRACE_jvmci_2("%d locals %d expressions, %d monitors", local_count, expression_count, monitor_count);
+ 949 
+ 950     for (jint i = 0; i &lt; values-&gt;length(); i++) {
+ 951       ScopeValue* second = NULL;
+ 952       Handle value = values-&gt;obj_at(i);
+ 953       if (i &lt; local_count) {
+ 954         BasicType type = JVMCIRuntime::kindToBasicType(slotKinds-&gt;obj_at(i), CHECK);
+ 955         ScopeValue* first = get_scope_value(value, type, objects, second, CHECK);
+ 956         if (second != NULL) {
+ 957           locals-&gt;append(second);
+ 958         }
+ 959         locals-&gt;append(first);
+ 960       } else if (i &lt; local_count + expression_count) {
+ 961         BasicType type = JVMCIRuntime::kindToBasicType(slotKinds-&gt;obj_at(i), CHECK);
+ 962         ScopeValue* first = get_scope_value(value, type, objects, second, CHECK);
+ 963         if (second != NULL) {
+ 964           expressions-&gt;append(second);
+ 965         }
+ 966         expressions-&gt;append(first);
+ 967       } else {
+ 968         MonitorValue *monitor = get_monitor_value(value, objects, CHECK);
+ 969         monitors-&gt;append(monitor);
+ 970       }
+ 971       if (second != NULL) {
+ 972         i++;
+ 973         if (i &gt;= values-&gt;length() || values-&gt;obj_at(i) != Value::ILLEGAL()) {
+ 974           JVMCI_ERROR("double-slot value not followed by Value.ILLEGAL");
+ 975         }
+ 976       }
+ 977     }
+ 978 
+ 979     locals_token = _debug_recorder-&gt;create_scope_values(locals);
+ 980     expressions_token = _debug_recorder-&gt;create_scope_values(expressions);
+ 981     monitors_token = _debug_recorder-&gt;create_monitor_values(monitors);
+ 982 
+ 983     throw_exception = BytecodeFrame::rethrowException(frame) == JNI_TRUE;
+ 984   }
+ 985 
+ 986   _debug_recorder-&gt;describe_scope(pc_offset, method, NULL, bci, reexecute, throw_exception, false, false,
+ 987                                   locals_token, expressions_token, monitors_token);
+ 988 }
+ 989 
+ 990 void CodeInstaller::site_Safepoint(CodeBuffer&amp; buffer, jint pc_offset, Handle site, TRAPS) {
+ 991   Handle debug_info = CompilationResult_Infopoint::debugInfo(site);
+ 992   if (debug_info.is_null()) {
+ 993     JVMCI_ERROR("debug info expected at safepoint at %i", pc_offset);
+ 994   }
+ 995 
+ 996   // address instruction = _instructions-&gt;start() + pc_offset;
+ 997   // jint next_pc_offset = Assembler::locate_next_instruction(instruction) - _instructions-&gt;start();
+ 998   OopMap *map = create_oop_map(debug_info, CHECK);
+ 999   _debug_recorder-&gt;add_safepoint(pc_offset, map);
+<a name="8" id="anc8"></a><span class="changed">1000   record_scope(pc_offset, debug_info, CodeInstaller::FullFrame, CHECK);</span>
+1001   _debug_recorder-&gt;end_safepoint(pc_offset);
+1002 }
+1003 
+1004 void CodeInstaller::site_Infopoint(CodeBuffer&amp; buffer, jint pc_offset, Handle site, TRAPS) {
+1005   Handle debug_info = CompilationResult_Infopoint::debugInfo(site);
+1006   if (debug_info.is_null()) {
+1007     JVMCI_ERROR("debug info expected at infopoint at %i", pc_offset);
+1008   }
+1009 
+<a name="9" id="anc9"></a><span class="new">1010   // We'd like to check that pc_offset is greater than the</span>
+<span class="new">1011   // last pc recorded with _debug_recorder (raising an exception if not)</span>
+<span class="new">1012   // but DebugInformationRecorder doesn't have sufficient public API.</span>
+<span class="new">1013 </span>
+1014   _debug_recorder-&gt;add_non_safepoint(pc_offset);
+<a name="10" id="anc10"></a><span class="changed">1015   record_scope(pc_offset, debug_info, CodeInstaller::BytecodePosition, CHECK);</span>
+1016   _debug_recorder-&gt;end_non_safepoint(pc_offset);
+1017 }
+1018 
+1019 void CodeInstaller::site_Call(CodeBuffer&amp; buffer, jint pc_offset, Handle site, TRAPS) {
+1020   Handle target = CompilationResult_Call::target(site);
+1021   InstanceKlass* target_klass = InstanceKlass::cast(target-&gt;klass());
+1022 
+1023   Handle hotspot_method; // JavaMethod
+1024   Handle foreign_call;
+1025 
+1026   if (target_klass-&gt;is_subclass_of(SystemDictionary::HotSpotForeignCallTarget_klass())) {
+1027     foreign_call = target;
+1028   } else {
+1029     hotspot_method = target;
+1030   }
+1031 
+1032   Handle debug_info = CompilationResult_Call::debugInfo(site);
+1033 
+1034   assert(hotspot_method.not_null() ^ foreign_call.not_null(), "Call site needs exactly one type");
+1035 
+1036   NativeInstruction* inst = nativeInstruction_at(_instructions-&gt;start() + pc_offset);
+1037   jint next_pc_offset = CodeInstaller::pd_next_offset(inst, pc_offset, hotspot_method, CHECK);
+1038 
+1039   if (debug_info.not_null()) {
+1040     OopMap *map = create_oop_map(debug_info, CHECK);
+1041     _debug_recorder-&gt;add_safepoint(next_pc_offset, map);
+<a name="11" id="anc11"></a><span class="changed">1042     record_scope(next_pc_offset, debug_info, CodeInstaller::FullFrame, CHECK);</span>
+1043   }
+1044 
+1045   if (foreign_call.not_null()) {
+1046     jlong foreign_call_destination = HotSpotForeignCallTarget::address(foreign_call);
+1047     CodeInstaller::pd_relocate_ForeignCall(inst, foreign_call_destination, CHECK);
+1048   } else { // method != NULL
+1049     if (debug_info.is_null()) {
+1050       JVMCI_ERROR("debug info expected at call at %i", pc_offset);
+1051     }
+1052 
+1053     TRACE_jvmci_3("method call");
+1054     CodeInstaller::pd_relocate_JavaMethod(hotspot_method, pc_offset, CHECK);
+1055     if (_next_call_type == INVOKESTATIC || _next_call_type == INVOKESPECIAL) {
+1056       // Need a static call stub for transitions from compiled to interpreted.
+1057       CompiledStaticCall::emit_to_interp_stub(buffer, _instructions-&gt;start() + pc_offset);
+1058     }
+1059   }
+1060 
+1061   _next_call_type = INVOKE_INVALID;
+1062 
+1063   if (debug_info.not_null()) {
+1064     _debug_recorder-&gt;end_safepoint(next_pc_offset);
+1065   }
+1066 }
+1067 
+1068 void CodeInstaller::site_DataPatch(CodeBuffer&amp; buffer, jint pc_offset, Handle site, TRAPS) {
+1069   Handle reference = CompilationResult_DataPatch::reference(site);
+1070   if (reference.is_null()) {
+1071     THROW(vmSymbols::java_lang_NullPointerException());
+1072   } else if (reference-&gt;is_a(CompilationResult_ConstantReference::klass())) {
+1073     Handle constant = CompilationResult_ConstantReference::constant(reference);
+1074     if (constant.is_null()) {
+1075       THROW(vmSymbols::java_lang_NullPointerException());
+1076     } else if (constant-&gt;is_a(HotSpotObjectConstantImpl::klass())) {
+1077       pd_patch_OopConstant(pc_offset, constant, CHECK);
+1078     } else if (constant-&gt;is_a(HotSpotMetaspaceConstantImpl::klass())) {
+1079       pd_patch_MetaspaceConstant(pc_offset, constant, CHECK);
+1080     } else {
+1081       JVMCI_ERROR("unknown constant type in data patch: %s", constant-&gt;klass()-&gt;signature_name());
+1082     }
+1083   } else if (reference-&gt;is_a(CompilationResult_DataSectionReference::klass())) {
+1084     int data_offset = CompilationResult_DataSectionReference::offset(reference);
+1085     if (0 &lt;= data_offset &amp;&amp; data_offset &lt; _constants_size) {
+1086       pd_patch_DataSectionReference(pc_offset, data_offset);
+1087     } else {
+1088       JVMCI_ERROR("data offset 0x%X points outside data section (size 0x%X)", data_offset, _constants_size);
+1089     }
+1090   } else {
+1091     JVMCI_ERROR("unknown data patch type: %s", reference-&gt;klass()-&gt;signature_name());
+1092   }
+1093 }
+1094 
+1095 void CodeInstaller::site_Mark(CodeBuffer&amp; buffer, jint pc_offset, Handle site, TRAPS) {
+1096   Handle id_obj = CompilationResult_Mark::id(site);
+1097 
+1098   if (id_obj.not_null()) {
+1099     if (!java_lang_boxing_object::is_instance(id_obj(), T_INT)) {
+1100       JVMCI_ERROR("expected Integer id, got %s", id_obj-&gt;klass()-&gt;signature_name());
+1101     }
+1102     jint id = id_obj-&gt;int_field(java_lang_boxing_object::value_offset_in_bytes(T_INT));
+1103 
+1104     address pc = _instructions-&gt;start() + pc_offset;
+1105 
+1106     switch (id) {
+1107       case UNVERIFIED_ENTRY:
+1108         _offsets.set_value(CodeOffsets::Entry, pc_offset);
+1109         break;
+1110       case VERIFIED_ENTRY:
+1111         _offsets.set_value(CodeOffsets::Verified_Entry, pc_offset);
+1112         break;
+1113       case OSR_ENTRY:
+1114         _offsets.set_value(CodeOffsets::OSR_Entry, pc_offset);
+1115         break;
+1116       case EXCEPTION_HANDLER_ENTRY:
+1117         _offsets.set_value(CodeOffsets::Exceptions, pc_offset);
+1118         break;
+1119       case DEOPT_HANDLER_ENTRY:
+1120         _offsets.set_value(CodeOffsets::Deopt, pc_offset);
+1121         break;
+1122       case INVOKEVIRTUAL:
+1123       case INVOKEINTERFACE:
+1124       case INLINE_INVOKE:
+1125       case INVOKESTATIC:
+1126       case INVOKESPECIAL:
+1127         _next_call_type = (MarkId) id;
+1128         _invoke_mark_pc = pc;
+1129         break;
+1130       case POLL_NEAR:
+1131       case POLL_FAR:
+1132       case POLL_RETURN_NEAR:
+1133       case POLL_RETURN_FAR:
+1134         pd_relocate_poll(pc, id, CHECK);
+1135         break;
+1136       case CARD_TABLE_SHIFT:
+1137       case CARD_TABLE_ADDRESS:
+1138       case HEAP_TOP_ADDRESS:
+1139       case HEAP_END_ADDRESS:
+1140       case NARROW_KLASS_BASE_ADDRESS:
+1141       case CRC_TABLE_ADDRESS:
+1142         break;
+1143       default:
+1144         JVMCI_ERROR("invalid mark id: %d", id);
+1145         break;
+1146     }
+1147   }
+1148 }
+1149 
+<a name="12" id="anc12"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="12" type="hidden" /></form></body></html>

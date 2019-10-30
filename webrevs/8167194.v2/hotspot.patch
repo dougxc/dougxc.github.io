@@ -1,0 +1,282 @@
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java	2016-10-05 21:59:46.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java	2016-10-05 21:59:46.000000000 +0200
+@@ -90,14 +90,17 @@
+      * A list of all supported JVMCI options.
+      */
+     public enum Option {
++        // @formatter:off
+         Compiler(String.class, null, "Selects the system compiler."),
+         // Note: The following one is not used (see InitTimer.ENABLED). It is added here
+-        // so that -Djvmci.PrintFlags=true shows the option.
+-        InitTimer(boolean.class, false, "Specifies if initialization timing is enabled."),
+-        PrintConfig(boolean.class, false, "Prints VM configuration available via JVMCI and exits."),
+-        PrintFlags(boolean.class, false, "Prints all JVMCI flags and exits."),
+-        ShowFlags(boolean.class, false, "Prints all JVMCI flags and continues."),
+-        TraceMethodDataFilter(String.class, null, "");
++        // so that -XX:+JVMCIPrintProperties shows the option.
++        InitTimer(Boolean.class, false, "Specifies if initialization timing is enabled."),
++        PrintConfig(Boolean.class, false, "Prints VM configuration available via JVMCI."),
++        TraceMethodDataFilter(String.class, null,
++                        "Enables tracing of profiling info when read by JVMCI.",
++                        "Empty value: trace all methods",
++                        "Non-empty value: trace methods whose fully qualified name contains the value.");
++        // @formatter:on
+ 
+         /**
+          * The prefix for system properties that are JVMCI options.
+@@ -113,25 +116,25 @@
+         private Object value;
+         private final Object defaultValue;
+         private boolean isDefault;
+-        private final String help;
++        private final String[] helpLines;
+ 
+-        Option(Class<?> type, Object defaultValue, String help) {
++        Option(Class<?> type, Object defaultValue, String... helpLines) {
+             assert Character.isUpperCase(name().charAt(0)) : "Option name must start with upper-case letter: " + name();
+             this.type = type;
+             this.value = UNINITIALIZED;
+             this.defaultValue = defaultValue;
+-            this.help = help;
++            this.helpLines = helpLines;
+         }
+ 
+         @SuppressFBWarnings(value = "ES_COMPARING_STRINGS_WITH_EQ", justification = "sentinel must be String since it's a static final in an enum")
+         private Object getValue() {
+             if (value == UNINITIALIZED) {
+-                String propertyValue = VM.getSavedProperty(JVMCI_OPTION_PROPERTY_PREFIX + name());
++                String propertyValue = VM.getSavedProperty(getPropertyName());
+                 if (propertyValue == null) {
+                     this.value = defaultValue;
+                     this.isDefault = true;
+                 } else {
+-                    if (type == boolean.class) {
++                    if (type == Boolean.class) {
+                         this.value = Boolean.parseBoolean(propertyValue);
+                     } else if (type == String.class) {
+                         this.value = propertyValue;
+@@ -147,6 +150,13 @@
+         }
+ 
+         /**
++         * Gets the name of system property from which this option gets its value.
++         */
++        public String getPropertyName() {
++            return JVMCI_OPTION_PROPERTY_PREFIX + name();
++        }
++
++        /**
+          * Returns the option's value as boolean.
+          *
+          * @return option's value
+@@ -165,16 +175,31 @@
+         }
+ 
+         /**
+-         * Prints all option flags to {@code out}.
++         * Prints a description of the properties used to configure shared JVMCI code.
+          *
+          * @param out stream to print to
+          */
+-        public static void printFlags(PrintStream out) {
+-            out.println("[List of JVMCI options]");
+-            for (Option option : values()) {
++        public static void printProperties(PrintStream out) {
++            out.println("[JVMCI properties]");
++            int typeWidth = 0;
++            int nameWidth = 0;
++            Option[] values = values();
++            for (Option option : values) {
++                typeWidth = Math.max(typeWidth, option.type.getSimpleName().length());
++                nameWidth = Math.max(nameWidth, option.getPropertyName().length());
++            }
++            for (Option option : values) {
+                 Object value = option.getValue();
+-                String assign = option.isDefault ? ":=" : " =";
+-                out.printf("%9s %-40s %s %-14s %s%n", option.type.getSimpleName(), option, assign, value, option.help);
++                if (value instanceof String) {
++                    value = '"' + String.valueOf(value) + '"';
++                }
++                String assign = option.isDefault ? " =" : ":=";
++                String format = "%" + (typeWidth + 1) + "s %-" + (nameWidth + 1) + "s %s %s%n";
++                out.printf(format, option.type.getSimpleName(), option.getPropertyName(), assign, value);
++                String helpFormat = "%" + (typeWidth + 1) + "s %s%n";
++                for (String line : option.helpLines) {
++                    out.printf(helpFormat, "", line);
++                }
+             }
+         }
+     }
+@@ -239,7 +264,6 @@
+     @SuppressWarnings("unused") private final String[] trivialPrefixes;
+ 
+     @SuppressWarnings("try")
+-    @SuppressFBWarnings(value = "DM_EXIT", justification = "PrintFlags is meant to exit the VM")
+     private HotSpotJVMCIRuntime() {
+         compilerToVm = new CompilerToVM();
+ 
+@@ -261,20 +285,6 @@
+ 
+         metaAccessContext = new HotSpotJVMCIMetaAccessContext();
+ 
+-        boolean printFlags = Option.PrintFlags.getBoolean();
+-        boolean showFlags = Option.ShowFlags.getBoolean();
+-        if (printFlags || showFlags) {
+-            Option.printFlags(System.out);
+-            if (printFlags) {
+-                System.exit(0);
+-            }
+-        }
+-
+-        if (Option.PrintConfig.getBoolean()) {
+-            printConfig(configStore, compilerToVm);
+-            System.exit(0);
+-        }
+-
+         compilerFactory = HotSpotJVMCICompilerConfig.getCompilerFactory();
+         if (compilerFactory instanceof HotSpotJVMCICompilerFactory) {
+             hsCompilerFactory = (HotSpotJVMCICompilerFactory) compilerFactory;
+@@ -298,6 +308,16 @@
+             trivialPrefixes = null;
+             compilationLevelAdjustment = config.compLevelAdjustmentNone;
+         }
++
++        if (config.getFlag("JVMCIPrintProperties", Boolean.class)) {
++            PrintStream out = new PrintStream(getLogStream());
++            Option.printProperties(out);
++            compilerFactory.printProperties(out);
++        }
++
++        if (Option.PrintConfig.getBoolean()) {
++            printConfig(configStore, compilerToVm);
++        }
+     }
+ 
+     private JVMCIBackend registerBackend(JVMCIBackend backend) {
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/services/JVMCICompilerFactory.java	2016-10-05 21:59:47.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/services/JVMCICompilerFactory.java	2016-10-05 21:59:47.000000000 +0200
+@@ -22,6 +22,8 @@
+  */
+ package jdk.vm.ci.runtime.services;
+ 
++import java.io.PrintStream;
++
+ import jdk.vm.ci.runtime.JVMCICompiler;
+ import jdk.vm.ci.runtime.JVMCIRuntime;
+ import jdk.vm.ci.services.JVMCIPermission;
+@@ -70,4 +72,12 @@
+      * Create a new instance of a {@link JVMCICompiler}.
+      */
+     public abstract JVMCICompiler createCompiler(JVMCIRuntime runtime);
++
++    /**
++     * Prints a description of the properties used to configure this compiler.
++     *
++     * @param out where to print the message
++     */
++    public void printProperties(PrintStream out) {
++    }
+ }
+--- old/src/share/vm/jvmci/jvmci_globals.cpp	2016-10-05 21:59:47.000000000 +0200
++++ new/src/share/vm/jvmci/jvmci_globals.cpp	2016-10-05 21:59:47.000000000 +0200
+@@ -85,6 +85,7 @@
+   CHECK_NOT_SET(JVMCIUseFastLocking,          EnableJVMCI)
+   CHECK_NOT_SET(JVMCINMethodSizeLimit,        EnableJVMCI)
+   CHECK_NOT_SET(MethodProfileWidth,           EnableJVMCI)
++  CHECK_NOT_SET(JVMCIPrintProperties,         EnableJVMCI)
+   CHECK_NOT_SET(TraceUncollectedSpeculations, EnableJVMCI)
+ 
+ #ifndef PRODUCT
+--- old/src/share/vm/jvmci/jvmci_globals.hpp	2016-10-05 21:59:48.000000000 +0200
++++ new/src/share/vm/jvmci/jvmci_globals.hpp	2016-10-05 21:59:48.000000000 +0200
+@@ -49,6 +49,9 @@
+   experimental(bool, UseJVMCICompiler, false,                               \
+           "Use JVMCI as the default compiler")                              \
+                                                                             \
++  experimental(bool, JVMCIPrintProperties, false,                           \
++          "Prints properties used by the JVMCI compiler")                   \
++                                                                            \
+   experimental(bool, BootstrapJVMCI, false,                                 \
+           "Bootstrap JVMCI before running Java main method")                \
+                                                                             \
+--- old/src/share/vm/runtime/thread.cpp	2016-10-05 21:59:49.000000000 +0200
++++ new/src/share/vm/runtime/thread.cpp	2016-10-05 21:59:49.000000000 +0200
+@@ -3768,10 +3768,21 @@
+   SystemDictionary::compute_java_system_loader(CHECK_(JNI_ERR));
+ 
+ #if INCLUDE_JVMCI
+-  if (EnableJVMCI && UseJVMCICompiler && (!UseInterpreter || !BackgroundCompilation)) {
+-    // 8145270: Force initialization of JVMCI runtime otherwise requests for blocking
+-    // compilations via JVMCI will not actually block until JVMCI is initialized.
+-    JVMCIRuntime::force_initialization(CHECK_JNI_ERR);
++  if (EnableJVMCI) {
++    // Initialize JVMCI eagerly if JVMCIPrintProperties is enabled.
++    // The JVMCI Java initialization code will read this flag and
++    // do the printing if it's set.
++    bool init = JVMCIPrintProperties;
++
++    if (!init) {
++      // 8145270: Force initialization of JVMCI runtime otherwise requests for blocking
++      // compilations via JVMCI will not actually block until JVMCI is initialized.
++      init = UseJVMCICompiler && (!UseInterpreter || !BackgroundCompilation);
++    }
++
++    if (init) {
++      JVMCIRuntime::force_initialization(CHECK_JNI_ERR);
++    }
+   }
+ #endif
+ 
+--- /dev/null	2016-10-05 21:59:51.000000000 +0200
++++ new/test/compiler/jvmci/TestJVMCIPrintProperties.java	2016-10-05 21:59:51.000000000 +0200
+@@ -0,0 +1,50 @@
++/*
++ * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++/*
++ * @test TestBasicLogOutput
++ * @summary Ensure -XX:-JVMCIPrintProperties can be enabled and successfully prints expected output to stdout.
++ * @requires (vm.simpleArch == "x64" | vm.simpleArch == "sparcv9" | vm.simpleArch == "aarch64")
++ * @library /test/lib
++ */
++
++import jdk.test.lib.process.ProcessTools;
++import jdk.test.lib.process.OutputAnalyzer;
++
++public class TestJVMCIPrintProperties {
++
++    public static void main(String[] args) throws Exception {
++        ProcessBuilder pb = ProcessTools.createJavaProcessBuilder(
++            "-XX:+UnlockExperimentalVMOptions",
++            "-XX:+EnableJVMCI",
++            "-XX:+JVMCIPrintProperties",
++            "-version");
++        OutputAnalyzer output = new OutputAnalyzer(pb.start());
++        output.shouldContain("[JVMCI system properties]"); // expected message
++        output.shouldContain("String jvmci.Compiler"); // expected message
++        output.shouldContain("Boolean jvmci.InitTimer"); // expected message
++        output.shouldContain("Boolean jvmci.PrintConfig"); // expected message
++        output.shouldContain("String jvmci.TraceMethodDataFilter"); // expected message
++        output.shouldHaveExitValue(0);
++    }
++}

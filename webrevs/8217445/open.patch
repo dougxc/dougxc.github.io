@@ -1,0 +1,153 @@
+--- old/src/hotspot/share/compiler/compileBroker.cpp	2019-01-21 13:41:52.000000000 +0100
++++ new/src/hotspot/share/compiler/compileBroker.cpp	2019-01-21 13:41:52.000000000 +0100
+@@ -2045,6 +2045,7 @@
+   Method* target_handle = task->method();
+   int compilable = ciEnv::MethodCompilable;
+   const char* failure_reason = NULL;
++  bool failure_reason_on_C_heap = false;
+   const char* retry_message = NULL;
+ 
+   int system_dictionary_modification_counter;
+@@ -2071,6 +2072,7 @@
+         jvmci->compile_method(method, osr_bci, &env);
+ 
+         failure_reason = env.failure_reason();
++        failure_reason_on_C_heap = env.failure_reason_on_C_heap();
+         if (!env.retryable()) {
+           retry_message = "not retryable";
+           compilable = ciEnv::MethodCompilable_not_at_tier;
+@@ -2146,7 +2148,7 @@
+   pop_jni_handle_block();
+ 
+   if (failure_reason != NULL) {
+-    task->set_failure_reason(failure_reason);
++    task->set_failure_reason(failure_reason, failure_reason_on_C_heap);
+     if (_compilation_log != NULL) {
+       _compilation_log->log_failure(thread, task, failure_reason, retry_message);
+     }
+--- old/src/hotspot/share/compiler/compileTask.cpp	2019-01-21 13:41:53.000000000 +0100
++++ new/src/hotspot/share/compiler/compileTask.cpp	2019-01-21 13:41:53.000000000 +0100
+@@ -72,6 +72,12 @@
+    JNIHandles::destroy_global(task->_method_holder);
+    JNIHandles::destroy_global(task->_hot_method_holder);
+ 
++   if (task->_failure_reason_on_C_heap && task->_failure_reason != NULL) {
++     os::free((void*) task->_failure_reason);
++   }
++   task->_failure_reason = NULL;
++   task->_failure_reason_on_C_heap = false;
++
+    task->set_is_free(true);
+    task->set_next(_task_free_list);
+    _task_free_list = task;
+@@ -110,6 +116,7 @@
+   _time_queued = 0;  // tidy
+   _compile_reason = compile_reason;
+   _failure_reason = NULL;
++  _failure_reason_on_C_heap = false;
+ 
+   if (LogCompilation) {
+     _time_queued = os::elapsed_counter();
+--- old/src/hotspot/share/compiler/compileTask.hpp	2019-01-21 13:41:54.000000000 +0100
++++ new/src/hotspot/share/compiler/compileTask.hpp	2019-01-21 13:41:54.000000000 +0100
+@@ -104,9 +104,11 @@
+   int          _hot_count;    // information about its invocation counter
+   CompileReason _compile_reason;      // more info about the task
+   const char*  _failure_reason;
++  // Specifies if _failure_reason is on the C heap.
++  bool         _failure_reason_on_C_heap;
+ 
+  public:
+-  CompileTask() {
++  CompileTask() : _failure_reason(NULL), _failure_reason_on_C_heap(false) {
+     _lock = new Monitor(Mutex::nonleaf+2, "CompileTaskLock");
+   }
+ 
+@@ -199,8 +201,9 @@
+   void         log_task_start(CompileLog* log);
+   void         log_task_done(CompileLog* log);
+ 
+-  void         set_failure_reason(const char* reason) {
++  void         set_failure_reason(const char* reason, bool on_C_heap = false) {
+     _failure_reason = reason;
++    _failure_reason_on_C_heap = on_C_heap;
+   }
+ 
+   bool         check_break_at_flags();
+--- old/src/hotspot/share/jvmci/jvmciCompiler.cpp	2019-01-21 13:41:55.000000000 +0100
++++ new/src/hotspot/share/jvmci/jvmciCompiler.cpp	2019-01-21 13:41:54.000000000 +0100
+@@ -122,6 +122,7 @@
+   if (_bootstrapping && is_osr) {
+       // no OSR compilations during bootstrap - the compiler is just too slow at this point,
+       // and we know that there are no endless loops
++      env->set_failure(true, "No OSR during boostrap");
+       return;
+   }
+ 
+@@ -160,17 +161,21 @@
+       CLEAR_PENDING_EXCEPTION;
+     }
+ 
+-    env->set_failure("exception throw", false);
++    env->set_failure(false, "unexpected exception thrown");
+   } else {
+     oop result_object = (oop) result.get_jobject();
+     if (result_object != NULL) {
+       oop failure_message = HotSpotCompilationRequestResult::failureMessage(result_object);
+       if (failure_message != NULL) {
++        // Copy failure reason into resource memory first ...
+         const char* failure_reason = java_lang_String::as_utf8_string(failure_message);
+-        env->set_failure(failure_reason, HotSpotCompilationRequestResult::retry(result_object) != 0);
++        // ... and then into the C heap.
++        failure_reason = os::strdup(failure_reason, mtCompiler);
++        bool retryable = HotSpotCompilationRequestResult::retry(result_object) != 0;
++        env->set_failure(retryable, failure_reason, true);
+       } else {
+         if (env->task()->code() == NULL) {
+-          env->set_failure("no nmethod produced", true);
++          env->set_failure(true, "no nmethod produced");
+         } else {
+           env->task()->set_num_inlined_bytecodes(HotSpotCompilationRequestResult::inlinedBytecodes(result_object));
+           Atomic::inc(&_methods_compiled);
+--- old/src/hotspot/share/jvmci/jvmciEnv.cpp	2019-01-21 13:41:55.000000000 +0100
++++ new/src/hotspot/share/jvmci/jvmciEnv.cpp	2019-01-21 13:41:55.000000000 +0100
+@@ -57,8 +57,9 @@
+ JVMCIEnv::JVMCIEnv(CompileTask* task, int system_dictionary_modification_counter):
+   _task(task),
+   _system_dictionary_modification_counter(system_dictionary_modification_counter),
++  _retryable(true),
+   _failure_reason(NULL),
+-  _retryable(true)
++  _failure_reason_on_C_heap(false)
+ {
+   // Get Jvmti capabilities under lock to get consistent values.
+   MutexLocker mu(JvmtiThreadState_lock);
+--- old/src/hotspot/share/jvmci/jvmciEnv.hpp	2019-01-21 13:41:56.000000000 +0100
++++ new/src/hotspot/share/jvmci/jvmciEnv.hpp	2019-01-21 13:41:56.000000000 +0100
+@@ -99,8 +99,11 @@
+   int              _system_dictionary_modification_counter;
+ 
+   // Compilation result values
+-  const char*      _failure_reason;
+   bool             _retryable;
++  const char*      _failure_reason;
++
++  // Specifies if _failure_reason is on the C heap.
++  bool             _failure_reason_on_C_heap;
+ 
+   // Cache JVMTI state
+   bool  _jvmti_can_hotswap_or_post_breakpoint;
+@@ -145,10 +148,12 @@
+   CompileTask* task() { return _task; }
+ 
+   const char* failure_reason() { return _failure_reason; }
++  bool failure_reason_on_C_heap() { return _failure_reason_on_C_heap; }
+   bool retryable() { return _retryable; }
+ 
+-  void set_failure(const char* reason, bool retryable) {
++  void set_failure(bool retryable, const char* reason, bool reason_on_C_heap = false) {
+     _failure_reason = reason;
++    _failure_reason_on_C_heap = reason_on_C_heap;
+     _retryable = retryable;
+   }
+ 

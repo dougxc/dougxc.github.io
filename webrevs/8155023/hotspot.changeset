@@ -1,0 +1,1163 @@
+# HG changeset patch
+# User Doug Simon <doug.simon@oracle.com>
+# Date 1462873610 -7200
+#      Tue May 10 11:46:50 2016 +0200
+# Node ID 3aa5ee814e680707ec0b9dfdc1bf961e5ec1cadc
+# Parent  cb23e08014a8ae8f88edada24f37c8d64c2f2aa8
+8155023: jdk.vm.ci needs to securely export services
+
+diff --git a/.mx.jvmci/mx_jvmci.py b/.mx.jvmci/mx_jvmci.py
+--- a/.mx.jvmci/mx_jvmci.py
++++ b/.mx.jvmci/mx_jvmci.py
+@@ -194,7 +194,7 @@
+         # JDK9 must be bootstrapped with a JDK8
+         compliance = mx.JavaCompliance('8')
+         jdk8 = mx.get_jdk(compliance.exactMatch, versionDescription=compliance.value)
+-        cmd = ['sh', 'configure', '--with-debug-level=' + _vm.debugLevel, '--with-native-debug-symbols=none', '--disable-precompiled-headers',
++        cmd = ['sh', 'configure', '--with-debug-level=' + _vm.debugLevel, '--with-native-debug-symbols=external', '--disable-precompiled-headers',
+                '--with-jvm-variants=' + _vm.jvmVariant, '--disable-warnings-as-errors', '--with-boot-jdk=' + jdk8.home]
+         mx.run(cmd, cwd=_jdkSourceRoot)
+     cmd = [mx.gmake_cmd(), 'CONF=' + _vm.debugLevel]
+diff --git a/.mx.jvmci/suite.py b/.mx.jvmci/suite.py
+--- a/.mx.jvmci/suite.py
++++ b/.mx.jvmci/suite.py
+@@ -103,6 +103,7 @@
+       "sourceDirs" : ["src"],
+       "dependencies" : [
+         "jdk.vm.ci.code",
++        "jdk.vm.ci.services",
+       ],
+       "checkstyle" : "jdk.vm.ci.services",
+       "javaCompliance" : "1.8",
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java
+@@ -22,27 +22,31 @@
+  */
+ package jdk.vm.ci.hotspot;
+ 
++import java.lang.reflect.Module;
++
+ import jdk.vm.ci.code.CompilationRequest;
+ import jdk.vm.ci.code.CompilationRequestResult;
+ import jdk.vm.ci.common.JVMCIError;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.Option;
+ import jdk.vm.ci.runtime.JVMCICompiler;
+-import jdk.vm.ci.runtime.JVMCICompilerFactory;
+ import jdk.vm.ci.runtime.JVMCIRuntime;
++import jdk.vm.ci.runtime.services.JVMCICompilerFactory;
+ import jdk.vm.ci.services.Services;
+ 
+ final class HotSpotJVMCICompilerConfig {
+ 
+-    private static class DummyCompilerFactory implements JVMCICompilerFactory, JVMCICompiler {
++    private static class DummyCompilerFactory extends JVMCICompilerFactory implements JVMCICompiler {
+ 
+         public CompilationRequestResult compileMethod(CompilationRequest request) {
+             throw new JVMCIError("no JVMCI compiler selected");
+         }
+ 
++        @Override
+         public String getCompilerName() {
+             return "<none>";
+         }
+ 
++        @Override
+         public JVMCICompiler createCompiler(JVMCIRuntime runtime) {
+             return this;
+         }
+@@ -65,6 +69,9 @@
+             if (compilerName != null) {
+                 for (JVMCICompilerFactory f : Services.load(JVMCICompilerFactory.class)) {
+                     if (f.getCompilerName().equals(compilerName)) {
++                        Module jvmciModule = JVMCICompilerFactory.class.getModule();
++                        Services.exportJVMCITo(f.getClass());
++                        f.onSelection();
+                         factory = f;
+                     }
+                 }
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java
+@@ -42,6 +42,7 @@
+ import jdk.vm.ci.code.CompiledCode;
+ import jdk.vm.ci.code.InstalledCode;
+ import jdk.vm.ci.common.JVMCIError;
++import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
+ import jdk.vm.ci.inittimer.InitTimer;
+ import jdk.vm.ci.inittimer.SuppressFBWarnings;
+ import jdk.vm.ci.meta.JVMCIMetaAccessContext;
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMEventListener.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMEventListener.java
+deleted file mode 100644
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMEventListener.java
++++ /dev/null
+@@ -1,59 +0,0 @@
+-/*
+- * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.hotspot;
+-
+-import jdk.vm.ci.code.CompiledCode;
+-import jdk.vm.ci.code.InstalledCode;
+-import jdk.vm.ci.meta.JVMCIMetaAccessContext;
+-import jdk.vm.ci.meta.ResolvedJavaType;
+-
+-public interface HotSpotVMEventListener {
+-
+-    /**
+-     * Notifies this client that the VM is shutting down.
+-     */
+-    default void notifyShutdown() {
+-    }
+-
+-    /**
+-     * Notify on successful install into the code cache.
+-     *
+-     * @param hotSpotCodeCacheProvider
+-     * @param installedCode
+-     * @param compiledCode
+-     */
+-    default void notifyInstall(HotSpotCodeCacheProvider hotSpotCodeCacheProvider, InstalledCode installedCode, CompiledCode compiledCode) {
+-    }
+-
+-    /**
+-     * Create a custom {@link JVMCIMetaAccessContext} to be used for managing the lifetime of loaded
+-     * metadata. It a custom one isn't created then the default implementation will be a single
+-     * context with globally shared instances of {@link ResolvedJavaType} that are never released.
+-     *
+-     * @param hotSpotJVMCIRuntime
+-     * @return a custom context or null
+-     */
+-    default JVMCIMetaAccessContext createMetaAccessContext(HotSpotJVMCIRuntime hotSpotJVMCIRuntime) {
+-        return null;
+-    }
+-}
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/events/EmptyEventProvider.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/events/EmptyEventProvider.java
+deleted file mode 100644
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/events/EmptyEventProvider.java
++++ /dev/null
+@@ -1,105 +0,0 @@
+-/*
+- * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.hotspot.events;
+-
+-import jdk.vm.ci.common.JVMCIError;
+-
+-/**
+- * An empty implementation for {@link EventProvider}. This implementation is used when no logging is
+- * requested.
+- */
+-public final class EmptyEventProvider implements EventProvider {
+-
+-    public CompilationEvent newCompilationEvent() {
+-        return new EmptyCompilationEvent();
+-    }
+-
+-    public static class EmptyCompilationEvent implements CompilationEvent {
+-        public void commit() {
+-            throw JVMCIError.shouldNotReachHere();
+-        }
+-
+-        public boolean shouldWrite() {
+-            // Events of this class should never been written.
+-            return false;
+-        }
+-
+-        public void begin() {
+-        }
+-
+-        public void end() {
+-        }
+-
+-        public void setMethod(String method) {
+-            throw JVMCIError.shouldNotReachHere();
+-        }
+-
+-        public void setCompileId(int compileId) {
+-            throw JVMCIError.shouldNotReachHere();
+-        }
+-
+-        public void setCompileLevel(int compileLevel) {
+-            throw JVMCIError.shouldNotReachHere();
+-        }
+-
+-        public void setSucceeded(boolean succeeded) {
+-            throw JVMCIError.shouldNotReachHere();
+-        }
+-
+-        public void setIsOsr(boolean isOsr) {
+-            throw JVMCIError.shouldNotReachHere();
+-        }
+-
+-        public void setCodeSize(int codeSize) {
+-            throw JVMCIError.shouldNotReachHere();
+-        }
+-
+-        public void setInlinedBytes(int inlinedBytes) {
+-            throw JVMCIError.shouldNotReachHere();
+-        }
+-    }
+-
+-    public CompilerFailureEvent newCompilerFailureEvent() {
+-        return new EmptyCompilerFailureEvent();
+-    }
+-
+-    public static class EmptyCompilerFailureEvent implements CompilerFailureEvent {
+-        public void commit() {
+-            throw JVMCIError.shouldNotReachHere();
+-        }
+-
+-        public boolean shouldWrite() {
+-            // Events of this class should never been written.
+-            return false;
+-        }
+-
+-        public void setCompileId(int compileId) {
+-            throw JVMCIError.shouldNotReachHere();
+-        }
+-
+-        public void setMessage(String message) {
+-            throw JVMCIError.shouldNotReachHere();
+-        }
+-    }
+-
+-}
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/events/EventProvider.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/events/EventProvider.java
+deleted file mode 100644
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/events/EventProvider.java
++++ /dev/null
+@@ -1,105 +0,0 @@
+-/*
+- * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.hotspot.events;
+-
+-/**
+- * A provider that provides a specific implementation for events that can be logged in the compiler.
+- */
+-public interface EventProvider {
+-
+-    /**
+-     * An instant event is an event that is not considered to have taken any time.
+-     */
+-    interface InstantEvent {
+-        /**
+-         * Commits the event.
+-         */
+-        void commit();
+-
+-        /**
+-         * Determines if this particular event instance would be committed to the data stream right
+-         * now if application called {@link #commit()}. This in turn depends on whether the event is
+-         * enabled and possible other factors.
+-         *
+-         * @return if this event would be committed on a call to {@link #commit()}.
+-         */
+-        boolean shouldWrite();
+-    }
+-
+-    /**
+-     * Timed events describe an operation that somehow consumes time.
+-     */
+-    interface TimedEvent extends InstantEvent {
+-        /**
+-         * Starts the timing for this event.
+-         */
+-        void begin();
+-
+-        /**
+-         * Ends the timing period for this event.
+-         */
+-        void end();
+-    }
+-
+-    /**
+-     * Creates a new {@link CompilationEvent}.
+-     *
+-     * @return a compilation event
+-     */
+-    CompilationEvent newCompilationEvent();
+-
+-    /**
+-     * A compilation event.
+-     */
+-    interface CompilationEvent extends TimedEvent {
+-        void setMethod(String method);
+-
+-        void setCompileId(int compileId);
+-
+-        void setCompileLevel(int compileLevel);
+-
+-        void setSucceeded(boolean succeeded);
+-
+-        void setIsOsr(boolean isOsr);
+-
+-        void setCodeSize(int codeSize);
+-
+-        void setInlinedBytes(int inlinedBytes);
+-    }
+-
+-    /**
+-     * Creates a new {@link CompilerFailureEvent}.
+-     *
+-     * @return a compiler failure event
+-     */
+-    CompilerFailureEvent newCompilerFailureEvent();
+-
+-    /**
+-     * A compiler failure event.
+-     */
+-    interface CompilerFailureEvent extends InstantEvent {
+-        void setCompileId(int compileId);
+-
+-        void setMessage(String message);
+-    }
+-}
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/logging/package-info.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/logging/package-info.java
+deleted file mode 100644
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/logging/package-info.java
++++ /dev/null
+@@ -1,27 +0,0 @@
+-/*
+- * Copyright (c) 2011, 2015, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-/**
+- * Logging framework for the HotSpot CRI implementation.
+- */
+-package jdk.vm.ci.hotspot.logging;
+-
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/EmptyEventProvider.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/EmptyEventProvider.java
+new file mode 100644
+--- /dev/null
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/EmptyEventProvider.java
+@@ -0,0 +1,113 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package jdk.vm.ci.hotspot.services;
++
++/**
++ * An empty implementation for {@link EventProvider}. This implementation is used when no logging is
++ * requested.
++ */
++final class EmptyEventProvider extends EventProvider {
++
++    EmptyEventProvider() {
++        super(null);
++    }
++
++    static InternalError shouldNotReachHere() {
++        throw new InternalError("should not reach here");
++    }
++
++    @Override
++    public CompilationEvent newCompilationEvent() {
++        return new EmptyCompilationEvent();
++    }
++
++    static class EmptyCompilationEvent implements CompilationEvent {
++        public void commit() {
++            throw shouldNotReachHere();
++        }
++
++        public boolean shouldWrite() {
++            // Events of this class should never been written.
++            return false;
++        }
++
++        public void begin() {
++        }
++
++        public void end() {
++        }
++
++        public void setMethod(String method) {
++            throw shouldNotReachHere();
++        }
++
++        public void setCompileId(int compileId) {
++            throw shouldNotReachHere();
++        }
++
++        public void setCompileLevel(int compileLevel) {
++            throw shouldNotReachHere();
++        }
++
++        public void setSucceeded(boolean succeeded) {
++            throw shouldNotReachHere();
++        }
++
++        public void setIsOsr(boolean isOsr) {
++            throw shouldNotReachHere();
++        }
++
++        public void setCodeSize(int codeSize) {
++            throw shouldNotReachHere();
++        }
++
++        public void setInlinedBytes(int inlinedBytes) {
++            throw shouldNotReachHere();
++        }
++    }
++
++    @Override
++    public CompilerFailureEvent newCompilerFailureEvent() {
++        return new EmptyCompilerFailureEvent();
++    }
++
++    static class EmptyCompilerFailureEvent implements CompilerFailureEvent {
++        public void commit() {
++            throw shouldNotReachHere();
++        }
++
++        public boolean shouldWrite() {
++            // Events of this class should never been written.
++            return false;
++        }
++
++        public void setCompileId(int compileId) {
++            throw shouldNotReachHere();
++        }
++
++        public void setMessage(String message) {
++            throw shouldNotReachHere();
++        }
++    }
++
++}
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/EventProvider.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/EventProvider.java
+new file mode 100644
+--- /dev/null
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/EventProvider.java
+@@ -0,0 +1,153 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package jdk.vm.ci.hotspot.services;
++
++import jdk.vm.ci.hotspot.services.EmptyEventProvider.EmptyCompilationEvent;
++import jdk.vm.ci.hotspot.services.EmptyEventProvider.EmptyCompilerFailureEvent;
++import jdk.vm.ci.services.JVMCIPermission;
++
++/**
++ * Service-provider class for logging compiler related events.
++ */
++public abstract class EventProvider {
++
++    private static Void checkPermission() {
++        SecurityManager sm = System.getSecurityManager();
++        if (sm != null) {
++            sm.checkPermission(new JVMCIPermission());
++        }
++        return null;
++    }
++
++    @SuppressWarnings("unused")
++    EventProvider(Void ignore) {
++    }
++
++    /**
++     * Initializes a new instance of this class.
++     *
++     * @throws SecurityException if a security manager has been installed and it denies
++     *             {@link JVMCIPermission}
++     */
++    protected EventProvider() {
++        this(checkPermission());
++    }
++
++    /**
++     * Creates and returns an empty implementation for {@link EventProvider}. This implementation
++     * can be used when no logging is requested.
++     */
++    public static EventProvider createEmptyEventProvider() {
++        return new EmptyEventProvider();
++    }
++
++    /**
++     * Creates and returns an empty implementation for {@link CompilationEvent}.
++     */
++    public static CompilationEvent createEmptyCompilationEvent() {
++        return new EmptyCompilationEvent();
++    }
++
++    /**
++     * Creates and returns an empty implementation for {@link CompilationEvent}.
++     */
++    public static CompilerFailureEvent createEmptyCompilerFailureEvent() {
++        return new EmptyCompilerFailureEvent();
++    }
++
++    /**
++     * An instant event is an event that is not considered to have taken any time.
++     */
++    public interface InstantEvent {
++        /**
++         * Commits the event.
++         */
++        void commit();
++
++        /**
++         * Determines if this particular event instance would be committed to the data stream right
++         * now if application called {@link #commit()}. This in turn depends on whether the event is
++         * enabled and possible other factors.
++         *
++         * @return if this event would be committed on a call to {@link #commit()}.
++         */
++        boolean shouldWrite();
++    }
++
++    /**
++     * Timed events describe an operation that somehow consumes time.
++     */
++    public interface TimedEvent extends InstantEvent {
++        /**
++         * Starts the timing for this event.
++         */
++        void begin();
++
++        /**
++         * Ends the timing period for this event.
++         */
++        void end();
++    }
++
++    /**
++     * Creates a new {@link CompilationEvent}.
++     *
++     * @return a compilation event
++     */
++    public abstract CompilationEvent newCompilationEvent();
++
++    /**
++     * A compilation event.
++     */
++    public interface CompilationEvent extends TimedEvent {
++        void setMethod(String method);
++
++        void setCompileId(int compileId);
++
++        void setCompileLevel(int compileLevel);
++
++        void setSucceeded(boolean succeeded);
++
++        void setIsOsr(boolean isOsr);
++
++        void setCodeSize(int codeSize);
++
++        void setInlinedBytes(int inlinedBytes);
++    }
++
++    /**
++     * Creates a new {@link CompilerFailureEvent}.
++     *
++     * @return a compiler failure event
++     */
++    public abstract CompilerFailureEvent newCompilerFailureEvent();
++
++    /**
++     * A compiler failure event.
++     */
++    public interface CompilerFailureEvent extends InstantEvent {
++        void setCompileId(int compileId);
++
++        void setMessage(String message);
++    }
++}
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/HotSpotVMEventListener.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/HotSpotVMEventListener.java
+new file mode 100644
+--- /dev/null
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/HotSpotVMEventListener.java
+@@ -0,0 +1,88 @@
++/*
++ * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package jdk.vm.ci.hotspot.services;
++
++import jdk.vm.ci.code.CompiledCode;
++import jdk.vm.ci.code.InstalledCode;
++import jdk.vm.ci.hotspot.HotSpotCodeCacheProvider;
++import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
++import jdk.vm.ci.meta.JVMCIMetaAccessContext;
++import jdk.vm.ci.meta.ResolvedJavaType;
++import jdk.vm.ci.services.JVMCIPermission;
++
++/**
++ * Service-provider class for responding to VM events and for creating
++ * {@link JVMCIMetaAccessContext}s.
++ */
++public abstract class HotSpotVMEventListener {
++
++    private static Void checkPermission() {
++        SecurityManager sm = System.getSecurityManager();
++        if (sm != null) {
++            sm.checkPermission(new JVMCIPermission());
++        }
++        return null;
++    }
++
++    @SuppressWarnings("unused")
++    HotSpotVMEventListener(Void ignore) {
++    }
++
++    /**
++     * Initializes a new instance of this class.
++     *
++     * @throws SecurityException if a security manager has been installed and it denies
++     *             {@link JVMCIPermission}
++     */
++    protected HotSpotVMEventListener() {
++        this(checkPermission());
++    }
++
++    /**
++     * Notifies this client that the VM is shutting down.
++     */
++    public void notifyShutdown() {
++    }
++
++    /**
++     * Notify on successful install into the code cache.
++     *
++     * @param hotSpotCodeCacheProvider
++     * @param installedCode
++     * @param compiledCode
++     */
++    public void notifyInstall(HotSpotCodeCacheProvider hotSpotCodeCacheProvider, InstalledCode installedCode, CompiledCode compiledCode) {
++    }
++
++    /**
++     * Create a custom {@link JVMCIMetaAccessContext} to be used for managing the lifetime of loaded
++     * metadata. It a custom one isn't created then the default implementation will be a single
++     * context with globally shared instances of {@link ResolvedJavaType} that are never released.
++     *
++     * @param runtime the runtime instance that will use the returned context
++     * @return a custom context or null
++     */
++    public JVMCIMetaAccessContext createMetaAccessContext(HotSpotJVMCIRuntime runtime) {
++        return null;
++    }
++}
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/JVMCICompilerFactory.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/JVMCICompilerFactory.java
+deleted file mode 100644
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/JVMCICompilerFactory.java
++++ /dev/null
+@@ -1,52 +0,0 @@
+-/*
+- * Copyright (c) 2015, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.runtime;
+-
+-/**
+- * Factory for a JVMCI compiler.
+- */
+-public interface JVMCICompilerFactory {
+-
+-    /**
+-     * Get the name of this compiler.
+-     */
+-    String getCompilerName();
+-
+-    /**
+-     * Create a new instance of the {@link JVMCICompiler}.
+-     */
+-    JVMCICompiler createCompiler(JVMCIRuntime runtime);
+-
+-    /**
+-     * In a tiered system it might be advantageous for startup to keep the JVMCI compiler from
+-     * compiling itself so provide a hook to request that certain packages are compiled only by an
+-     * optimizing first tier. The prefixes should class or package names using / as the separator,
+-     * i.e. jdk/vm/ci for instance.
+-     *
+-     * @return 0 or more Strings identifying packages that should by compiled by the first tier
+-     *         only.
+-     */
+-    default String[] getTrivialPrefixes() {
+-        return null;
+-    }
+-}
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/services/JVMCICompilerFactory.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/services/JVMCICompilerFactory.java
+new file mode 100644
+--- /dev/null
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.runtime/src/jdk/vm/ci/runtime/services/JVMCICompilerFactory.java
+@@ -0,0 +1,86 @@
++/*
++ * Copyright (c) 2015, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package jdk.vm.ci.runtime.services;
++
++import jdk.vm.ci.runtime.JVMCICompiler;
++import jdk.vm.ci.runtime.JVMCIRuntime;
++import jdk.vm.ci.services.JVMCIPermission;
++
++/**
++ * Service-provider class for creating JVMCI compilers.
++ */
++public abstract class JVMCICompilerFactory {
++
++    private static Void checkPermission() {
++        SecurityManager sm = System.getSecurityManager();
++        if (sm != null) {
++            sm.checkPermission(new JVMCIPermission());
++        }
++        return null;
++    }
++
++    @SuppressWarnings("unused")
++    private JVMCICompilerFactory(Void ignore) {
++    }
++
++    /**
++     * Initializes a new instance of this class.
++     *
++     * @throws SecurityException if a security manager has been installed and it denies
++     *             {@link JVMCIPermission}
++     */
++    protected JVMCICompilerFactory() {
++        this(checkPermission());
++    }
++
++    /**
++     * Get the name of this compiler. The name is used by JVMCI to determine which factory to use.
++     */
++    public abstract String getCompilerName();
++
++    /**
++     * Notifies this object that it has been selected to {@linkplain #createCompiler(JVMCIRuntime)
++     * create} a compiler and it should now perform any heavy weight initialization that it deferred
++     * during construction.
++     */
++    public void onSelection() {
++    }
++
++    /**
++     * Create a new instance of a {@link JVMCICompiler}.
++     */
++    public abstract JVMCICompiler createCompiler(JVMCIRuntime runtime);
++
++    /**
++     * In a tiered system it might be advantageous for startup to keep the JVMCI compiler from
++     * compiling itself so provide a hook to request that certain packages are compiled only by an
++     * optimizing first tier. The prefixes should class or package names using / as the separator,
++     * i.e. jdk/vm/ci for instance.
++     *
++     * @return 0 or more Strings identifying packages that should by compiled by the first tier only
++     *         or null if no redirection to C1 should be performed.
++     */
++    public String[] getTrivialPrefixes() {
++        return null;
++    }
++}
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.services/src/jdk/vm/ci/services/JVMCIPermission.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.services/src/jdk/vm/ci/services/JVMCIPermission.java
+new file mode 100644
+--- /dev/null
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.services/src/jdk/vm/ci/services/JVMCIPermission.java
+@@ -0,0 +1,37 @@
++/*
++ * Copyright (c) 2016, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package jdk.vm.ci.services;
++
++import java.security.BasicPermission;
++
++/**
++ * This class represents the permission to access JVMCI services.
++ */
++public class JVMCIPermission extends BasicPermission {
++
++    private static final long serialVersionUID = 6346818963934448226L;
++
++    public JVMCIPermission() {
++        super("jvmci");
++    }
++}
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.services/src/jdk/vm/ci/services/Services.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.services/src/jdk/vm/ci/services/Services.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.services/src/jdk/vm/ci/services/Services.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.services/src/jdk/vm/ci/services/Services.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2014, 2015, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2014, 2016, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -22,6 +22,7 @@
+  */
+ package jdk.vm.ci.services;
+ 
++import java.lang.reflect.Module;
+ import java.util.Formatter;
+ import java.util.Iterator;
+ import java.util.ServiceConfigurationError;
+@@ -36,10 +37,51 @@
+     }
+ 
+     /**
++     * Performs any required security checks and dynamic reconfiguration to allow the module of a
++     * given class to access the classes in the JVMCI module.
++     *
++     * Note: This API uses {@link Class} instead of {@link Module} to provide backwards
++     * compatibility for JVMCI clients compiled against a JDK release earlier than 9.
++     *
++     * @param requestor a class requesting access to the JVMCI module for its module
++     * @throws SecurityException if a security manager is present and it denies
++     *             {@link JVMCIPermission}
++     */
++    public static void exportJVMCITo(Class<?> requestor) {
++        SecurityManager sm = System.getSecurityManager();
++        if (sm != null) {
++            sm.checkPermission(new JVMCIPermission());
++        }
++        Module jvmci = Services.class.getModule();
++        Module requestorModule = requestor.getModule();
++        if (jvmci != requestorModule) {
++            for (String pkg : jvmci.getPackages()) {
++                // Export all JVMCI packages dynamically instead
++                // of requiring a long list of -XaddExports
++                // options on the JVM command line.
++                if (!jvmci.isExported(pkg, requestorModule)) {
++                    jvmci.addExports(pkg, requestorModule);
++                }
++            }
++        }
++    }
++
++    /**
+      * Gets an {@link Iterable} of the JVMCI providers available for a given service.
++     *
++     * @throws SecurityException if a security manager is present and it denies
++     *             {@link JVMCIPermission}
+      */
+     public static <S> Iterable<S> load(Class<S> service) {
+-        return ServiceLoader.load(service);
++        SecurityManager sm = System.getSecurityManager();
++        if (sm != null) {
++            sm.checkPermission(new JVMCIPermission());
++        }
++        Module jvmci = Services.class.getModule();
++        jvmci.addUses(service);
++
++        // Restrict JVMCI clients to be on the class path or module path
++        return ServiceLoader.load(service, ClassLoader.getSystemClassLoader());
+     }
+ 
+     /**
+@@ -48,9 +90,18 @@
+      * @param service the service whose provider is being requested
+      * @param required specifies if an {@link InternalError} should be thrown if no provider of
+      *            {@code service} is available
++     * @throws SecurityException if a security manager is present and it denies
++     *             {@link JVMCIPermission}
+      */
+     public static <S> S loadSingle(Class<S> service, boolean required) {
+-        Iterable<S> providers = ServiceLoader.load(service);
++        SecurityManager sm = System.getSecurityManager();
++        if (sm != null) {
++            sm.checkPermission(new JVMCIPermission());
++        }
++        Module jvmci = Services.class.getModule();
++        jvmci.addUses(service);
++        // Restrict JVMCI clients to be on the class path or module path
++        Iterable<S> providers = ServiceLoader.load(service, ClassLoader.getSystemClassLoader());
+         S singleProvider = null;
+         try {
+             for (Iterator<S> it = providers.iterator(); it.hasNext();) {
+diff --git a/src/jdk.vm.ci/share/classes/module-info.java b/src/jdk.vm.ci/share/classes/module-info.java
+--- a/src/jdk.vm.ci/share/classes/module-info.java
++++ b/src/jdk.vm.ci/share/classes/module-info.java
+@@ -24,9 +24,13 @@
+  */
+ 
+ module jdk.vm.ci {
+-    uses jdk.vm.ci.hotspot.HotSpotVMEventListener;
++    exports jdk.vm.ci.services;
++    exports jdk.vm.ci.runtime.services;
++    exports jdk.vm.ci.hotspot.services;
++
++    uses jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
+     uses jdk.vm.ci.hotspot.HotSpotJVMCIBackendFactory;
+-    uses jdk.vm.ci.runtime.JVMCICompilerFactory;
++    uses jdk.vm.ci.runtime.services.JVMCICompilerFactory;
+ 
+     provides jdk.vm.ci.hotspot.HotSpotJVMCIBackendFactory with
+         jdk.vm.ci.hotspot.aarch64.AArch64HotSpotJVMCIBackendFactory;
+diff --git a/test/compiler/jvmci/common/JVMCIHelpers.java b/test/compiler/jvmci/common/JVMCIHelpers.java
+--- a/test/compiler/jvmci/common/JVMCIHelpers.java
++++ b/test/compiler/jvmci/common/JVMCIHelpers.java
+@@ -26,10 +26,10 @@
+ import jdk.vm.ci.code.Architecture;
+ import jdk.vm.ci.code.CompilationRequest;
+ import jdk.vm.ci.code.CompilationRequestResult;
+-import jdk.vm.ci.hotspot.HotSpotVMEventListener;
++import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+ import jdk.vm.ci.runtime.JVMCICompiler;
+-import jdk.vm.ci.runtime.JVMCICompilerFactory;
++import jdk.vm.ci.runtime.services.JVMCICompilerFactory;
+ import jdk.vm.ci.runtime.JVMCIRuntime;
+ 
+ /*
+@@ -37,7 +37,7 @@
+  */
+ public class JVMCIHelpers {
+ 
+-    public static class EmptyVMEventListener implements HotSpotVMEventListener {
++    public static class EmptyVMEventListener extends HotSpotVMEventListener {
+         // just empty, using default interface methods
+     }
+ 
+@@ -50,7 +50,7 @@
+         }
+     }
+ 
+-    public static class EmptyCompilerFactory implements JVMCICompilerFactory {
++    public static class EmptyCompilerFactory extends JVMCICompilerFactory {
+ 
+         @Override
+         public String getCompilerName() {
+diff --git a/test/compiler/jvmci/events/JvmciCreateMetaAccessContextTest.java b/test/compiler/jvmci/events/JvmciCreateMetaAccessContextTest.java
+--- a/test/compiler/jvmci/events/JvmciCreateMetaAccessContextTest.java
++++ b/test/compiler/jvmci/events/JvmciCreateMetaAccessContextTest.java
+@@ -38,7 +38,7 @@
+  * @run main jdk.test.lib.FileInstaller ../common/services/ ./META-INF/services/
+  * @run main jdk.test.lib.FileInstaller
+  *     ./JvmciCreateMetaAccessContextTest.config
+- *     ./META-INF/services/jdk.vm.ci.hotspot.HotSpotVMEventListener
++ *     ./META-INF/services/jdk.vm.ci.hotspot.services.HotSpotVMEventListener
+  * @run main ClassFileInstaller
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyHotspotCompiler
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyCompilerFactory
+@@ -57,13 +57,13 @@
+ package compiler.jvmci.events;
+ 
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
+-import jdk.vm.ci.hotspot.HotSpotVMEventListener;
++import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
+ import jdk.vm.ci.hotspot.MetaAccessWrapper;
+ import jdk.vm.ci.meta.JVMCIMetaAccessContext;
+ import jdk.test.lib.Asserts;
+ 
+ public class JvmciCreateMetaAccessContextTest
+-        implements HotSpotVMEventListener {
++        extends HotSpotVMEventListener {
+     private static final boolean PROVIDE_NULL_CONTEXT = Boolean.getBoolean(
+             "compiler.jvmci.events.JvmciCreateMetaAccessContextTest"
+                     + ".providenull");
+diff --git a/test/compiler/jvmci/events/JvmciShutdownEventListener.java b/test/compiler/jvmci/events/JvmciShutdownEventListener.java
+--- a/test/compiler/jvmci/events/JvmciShutdownEventListener.java
++++ b/test/compiler/jvmci/events/JvmciShutdownEventListener.java
+@@ -24,9 +24,9 @@
+ package compiler.jvmci.events;
+ 
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
+-import jdk.vm.ci.hotspot.HotSpotVMEventListener;
++import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
+ 
+-public class JvmciShutdownEventListener implements HotSpotVMEventListener {
++public class JvmciShutdownEventListener extends HotSpotVMEventListener {
+     public static final String MESSAGE = "Shutdown notified";
+     public static final String GOT_INTERNAL_ERROR = "Got internal error";
+ 
+diff --git a/test/compiler/jvmci/events/JvmciShutdownEventTest.java b/test/compiler/jvmci/events/JvmciShutdownEventTest.java
+--- a/test/compiler/jvmci/events/JvmciShutdownEventTest.java
++++ b/test/compiler/jvmci/events/JvmciShutdownEventTest.java
+@@ -36,7 +36,7 @@
+  *        compiler.jvmci.events.JvmciShutdownEventTest
+  * @run main jdk.test.lib.FileInstaller ../common/services/ ./META-INF/services/
+  * @run main jdk.test.lib.FileInstaller ./JvmciShutdownEventTest.config
+- *     ./META-INF/services/jdk.vm.ci.hotspot.HotSpotVMEventListener
++ *     ./META-INF/services/jdk.vm.ci.hotspot.services.HotSpotVMEventListener
+  * @run main ClassFileInstaller
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyHotspotCompiler
+  *     compiler.jvmci.common.JVMCIHelpers$EmptyCompilerFactory

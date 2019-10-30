@@ -1,0 +1,359 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+<a name="1" id="anc1"></a><span class="changed">   2  * Copyright (c) 1999, 2017, Oracle and/or its affiliates. All rights reserved.</span>
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #ifndef SHARE_VM_JVMCI_JVMCIENV_HPP
+  26 #define SHARE_VM_JVMCI_JVMCIENV_HPP
+  27 
+  28 #include "classfile/systemDictionary.hpp"
+  29 #include "code/debugInfoRec.hpp"
+  30 #include "code/dependencies.hpp"
+  31 #include "code/exceptionHandlerTable.hpp"
+  32 #include "compiler/oopMap.hpp"
+  33 #include "runtime/thread.hpp"
+  34 
+  35 class CompileTask;
+  36 
+  37 // Bring the JVMCI compiler thread into the VM state.
+  38 #define JVMCI_VM_ENTRY_MARK                       \
+  39   JavaThread* thread = JavaThread::current(); \
+  40   ThreadInVMfromNative __tiv(thread);       \
+  41   ResetNoHandleMark rnhm;                   \
+  42   HandleMarkCleaner __hm(thread);           \
+  43   Thread* THREAD = thread;                  \
+  44   debug_only(VMNativeEntryWrapper __vew;)
+  45 
+  46 #define JVMCI_EXCEPTION_CONTEXT \
+  47   JavaThread* thread=JavaThread::current(); \
+  48   Thread* THREAD = thread;
+  49 
+  50 //
+  51 // This class is the top level broker for requests from the compiler
+  52 // to the VM.
+  53 class JVMCIEnv : StackObj {
+  54   CI_PACKAGE_ACCESS_TO
+  55 
+  56   friend class JVMCIVMStructs;
+  57   friend class CompileBroker;
+  58   friend class Dependencies;  // for get_object, during logging
+  59 
+  60 public:
+  61 
+  62   enum CodeInstallResult {
+  63      ok,
+  64      dependencies_failed,
+  65      dependencies_invalid,
+  66      cache_full,
+  67      code_too_large
+  68   };
+  69 
+  70   // Look up a klass by name from a particular class loader (the accessor's).
+  71   // If require_local, result must be defined in that class loader, or NULL.
+  72   // If !require_local, a result from remote class loader may be reported,
+  73   // if sufficient class loader constraints exist such that initiating
+  74   // a class loading request from the given loader is bound to return
+  75   // the class defined in the remote loader (or throw an error).
+  76   //
+  77   // Return an unloaded klass if !require_local and no class at all is found.
+  78   //
+  79   // The CI treats a klass as loaded if it is consistently defined in
+  80   // another loader, even if it hasn't yet been loaded in all loaders
+  81   // that could potentially see it via delegation.
+  82   static Klass* get_klass_by_name(Klass* accessing_klass, Symbol* klass_name, bool require_local);
+  83 
+  84   // Constant pool access.
+  85   static Klass* get_klass_by_index(const constantPoolHandle&amp; cpool,
+  86                                    int klass_index,
+  87                                    bool&amp; is_accessible,
+  88                                    Klass* loading_klass);
+  89   static void   get_field_by_index(InstanceKlass* loading_klass, fieldDescriptor&amp; fd,
+  90                                    int field_index);
+  91   static methodHandle  get_method_by_index(const constantPoolHandle&amp; cpool,
+  92                                     int method_index, Bytecodes::Code bc,
+  93                                     InstanceKlass* loading_klass);
+  94 
+  95   JVMCIEnv(CompileTask* task, int system_dictionary_modification_counter);
+  96 
+  97 private:
+  98   CompileTask*     _task;
+  99   int              _system_dictionary_modification_counter;
+ 100 
+ 101   // Compilation result values
+ 102   const char*      _failure_reason;
+ 103   bool             _retryable;
+ 104 
+<a name="2" id="anc2"></a><span class="changed"> 105   // Cache JVMTI state</span>
+<span class="changed"> 106   bool  _jvmti_can_hotswap_or_post_breakpoint;</span>
+<span class="changed"> 107   bool  _jvmti_can_access_local_variables;</span>
+<span class="changed"> 108   bool  _jvmti_can_post_on_exceptions;</span>
+
+
+
+ 109 
+ 110   // Implementation methods for loading and constant pool access.
+ 111   static Klass* get_klass_by_name_impl(Klass* accessing_klass,
+ 112                                   const constantPoolHandle&amp; cpool,
+ 113                                   Symbol* klass_name,
+ 114                                   bool require_local);
+ 115   static Klass* get_klass_by_index_impl(const constantPoolHandle&amp; cpool,
+ 116                                      int klass_index,
+ 117                                      bool&amp; is_accessible,
+ 118                                      Klass* loading_klass);
+ 119   static void   get_field_by_index_impl(InstanceKlass* loading_klass, fieldDescriptor&amp; fd,
+ 120                                      int field_index);
+ 121   static methodHandle  get_method_by_index_impl(const constantPoolHandle&amp; cpool,
+ 122                                       int method_index, Bytecodes::Code bc,
+ 123                                       InstanceKlass* loading_klass);
+ 124 
+ 125   // Helper methods
+ 126   static bool       check_klass_accessibility(Klass* accessing_klass, Klass* resolved_klass);
+ 127   static methodHandle  lookup_method(InstanceKlass*  accessor,
+ 128                            Klass*         holder,
+ 129                            Symbol*        name,
+ 130                            Symbol*        sig,
+ 131                            Bytecodes::Code bc,
+ 132                            constantTag     tag);
+ 133 
+ 134   private:
+ 135 
+ 136   // Is this thread currently in the VM state?
+ 137   static bool is_in_vm();
+ 138 
+ 139   // Helper routine for determining the validity of a compilation
+ 140   // with respect to concurrent class loading.
+ 141   static JVMCIEnv::CodeInstallResult validate_compile_task_dependencies(Dependencies* target, Handle compiled_code,
+ 142                                                                         JVMCIEnv* env, char** failure_detail);
+ 143 
+ 144 public:
+ 145   CompileTask* task() { return _task; }
+ 146 
+<a name="3" id="anc3"></a>
+
+
+
+
+
+ 147   const char* failure_reason() { return _failure_reason; }
+ 148   bool retryable() { return _retryable; }
+ 149 
+ 150   void set_failure(const char* reason, bool retryable) {
+ 151     _failure_reason = reason;
+ 152     _retryable = retryable;
+ 153   }
+ 154 
+ 155   // Register the result of a compilation.
+ 156   static JVMCIEnv::CodeInstallResult register_method(
+ 157                        const methodHandle&amp;       target,
+ 158                        nmethod*&amp;                 nm,
+ 159                        int                       entry_bci,
+ 160                        CodeOffsets*              offsets,
+ 161                        int                       orig_pc_offset,
+ 162                        CodeBuffer*               code_buffer,
+ 163                        int                       frame_words,
+ 164                        OopMapSet*                oop_map_set,
+ 165                        ExceptionHandlerTable*    handler_table,
+ 166                        AbstractCompiler*         compiler,
+ 167                        DebugInformationRecorder* debug_info,
+ 168                        Dependencies*             dependencies,
+ 169                        JVMCIEnv*                 env,
+ 170                        int                       compile_id,
+ 171                        bool                      has_unsafe_access,
+ 172                        bool                      has_wide_vector,
+ 173                        Handle                    installed_code,
+ 174                        Handle                    compiled_code,
+ 175                        Handle                    speculation_log);
+ 176 
+ 177   // converts the Klass* representing the holder of a method into a
+ 178   // InstanceKlass*.  This is needed since the holder of a method in
+ 179   // the bytecodes could be an array type.  Basically this converts
+ 180   // array types into java/lang/Object and other types stay as they are.
+ 181   static InstanceKlass* get_instance_klass_for_declared_method_holder(Klass* klass);
+ 182 };
+ 183 
+ 184 #endif // SHARE_VM_JVMCI_JVMCIENV_HPP
+<a name="4" id="anc4"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="4" type="hidden" /></form></body></html>

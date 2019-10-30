@@ -1,0 +1,202 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>Old graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotLoweringProvider.java</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2013, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package com.oracle.graal.hotspot.hsail;
+  24 
+  25 import java.util.*;
+  26 
+  27 import com.oracle.graal.api.code.*;
+  28 import com.oracle.graal.api.meta.*;
+  29 import com.oracle.graal.graph.*;
+  30 import com.oracle.graal.hotspot.*;
+  31 import com.oracle.graal.hotspot.meta.*;
+  32 import com.oracle.graal.nodes.*;
+  33 import com.oracle.graal.nodes.calc.*;
+  34 import com.oracle.graal.nodes.extended.*;
+  35 import com.oracle.graal.nodes.java.*;
+  36 import com.oracle.graal.nodes.spi.*;
+  37 
+  38 public class HSAILHotSpotLoweringProvider extends HotSpotLoweringProvider {
+  39 
+  40     abstract static class LoweringStrategy {
+  41         abstract void lower(Node n, LoweringTool tool);
+  42     }
+  43 
+  44     static LoweringStrategy PassThruStrategy = new LoweringStrategy() {
+  45         @Override
+  46         void lower(Node n, LoweringTool tool) {
+  47             return;
+  48         }
+  49     };
+  50 
+  51     static LoweringStrategy RejectStrategy = new LoweringStrategy() {
+  52         @Override
+  53         void lower(Node n, LoweringTool tool) {
+  54             throw new GraalInternalError("Node implementing Lowerable not handled in HSAIL Backend: " + n);
+  55         }
+  56     };
+  57 
+  58     // strategy to replace an UnwindNode with a DeoptNode
+  59     static LoweringStrategy UnwindNodeStrategy = new LoweringStrategy() {
+  60         @Override
+  61         void lower(Node n, LoweringTool tool) {
+  62             StructuredGraph graph = (StructuredGraph) n.graph();
+  63             UnwindNode unwind = (UnwindNode) n;
+  64             ValueNode exception = unwind.exception();
+  65             if (exception instanceof ForeignCallNode) {
+  66                 // build up action and reason
+  67                 String callName = ((ForeignCallNode) exception).getDescriptor().getName();
+  68                 DeoptimizationReason reason;
+  69                 switch (callName) {
+  70                     case "createOutOfBoundsException":
+  71                         reason = DeoptimizationReason.BoundsCheckException;
+  72                         break;
+  73                     case "createNullPointerException":
+  74                         reason = DeoptimizationReason.NullCheckException;
+  75                         break;
+  76                     default:
+  77                         reason = DeoptimizationReason.None;
+  78                 }
+  79                 unwind.replaceAtPredecessor(graph.add(new DeoptimizeNode(DeoptimizationAction.InvalidateReprofile, reason)));
+  80                 unwind.safeDelete();
+  81             } else {
+  82                 // unwind whose exception is not an instance of ForeignCallNode
+  83                 throw new GraalInternalError("UnwindNode seen without ForeignCallNode: " + exception);
+  84             }
+  85         }
+  86     };
+  87 
+  88     private static HashMap&lt;Class&lt;?&gt;, LoweringStrategy&gt; strategyMap = new HashMap&lt;&gt;();
+  89     static {
+  90         strategyMap.put(ConvertNode.class, PassThruStrategy);
+  91         strategyMap.put(FloatConvertNode.class, PassThruStrategy);
+  92         strategyMap.put(NewInstanceNode.class, RejectStrategy);
+  93         strategyMap.put(NewArrayNode.class, RejectStrategy);
+  94         strategyMap.put(NewMultiArrayNode.class, RejectStrategy);
+  95         strategyMap.put(DynamicNewArrayNode.class, RejectStrategy);
+  96         strategyMap.put(MonitorEnterNode.class, RejectStrategy);
+  97         strategyMap.put(MonitorExitNode.class, RejectStrategy);
+  98         strategyMap.put(UnwindNode.class, UnwindNodeStrategy);
+  99     }
+ 100 
+ 101     private static LoweringStrategy getStrategy(Node n) {
+ 102         return strategyMap.get(n.getClass());
+ 103     }
+ 104 
+ 105     public HSAILHotSpotLoweringProvider(HotSpotGraalRuntime runtime, MetaAccessProvider metaAccess, ForeignCallsProvider foreignCalls, HotSpotRegistersProvider registers) {
+ 106         super(runtime, metaAccess, foreignCalls, registers);
+ 107     }
+ 108 
+ 109     @Override
+ 110     public void lower(Node n, LoweringTool tool) {
+ 111         LoweringStrategy strategy = getStrategy(n);
+ 112         // if not in map, let superclass handle it
+ 113         if (strategy == null) {
+ 114             super.lower(n, tool);
+ 115         } else {
+ 116             strategy.lower(n, tool);
+ 117         }
+ 118     }
+ 119 
+ 120 }
+</pre></body></html>

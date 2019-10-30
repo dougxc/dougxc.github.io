@@ -1,0 +1,154 @@
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2017-08-23 23:10:09.000000000 +0200
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2017-08-23 23:10:09.000000000 +0200
+@@ -153,9 +153,9 @@
+      * @param resolve force resolution to a {@link ResolvedJavaType}. If true, this method will
+      *            either return a {@link ResolvedJavaType} or throw an exception
+      * @return the type for {@code name} or 0 if resolution failed and {@code resolve == false}
+-     * @throws LinkageError if {@code resolve == true} and the resolution failed
++     * @throws ClassNotFoundException if {@code resolve == true} and the resolution failed
+      */
+-    native HotSpotResolvedObjectTypeImpl lookupType(String name, Class<?> accessingClass, boolean resolve);
++    native HotSpotResolvedObjectTypeImpl lookupType(String name, Class<?> accessingClass, boolean resolve) throws ClassNotFoundException;
+ 
+     /**
+      * Resolves the entry at index {@code cpi} in {@code constantPool} to an object.
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java	2017-08-23 23:10:10.000000000 +0200
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java	2017-08-23 23:10:09.000000000 +0200
+@@ -367,13 +367,17 @@
+ 
+         // Resolve non-primitive types in the VM.
+         HotSpotResolvedObjectTypeImpl hsAccessingType = (HotSpotResolvedObjectTypeImpl) accessingType;
+-        final HotSpotResolvedObjectTypeImpl klass = compilerToVm.lookupType(name, hsAccessingType.mirror(), resolve);
++        try {
++            final HotSpotResolvedObjectTypeImpl klass = compilerToVm.lookupType(name, hsAccessingType.mirror(), resolve);
+ 
+-        if (klass == null) {
+-            assert resolve == false;
+-            return HotSpotUnresolvedJavaType.create(this, name);
++            if (klass == null) {
++                assert resolve == false;
++                return HotSpotUnresolvedJavaType.create(this, name);
++            }
++            return klass;
++        } catch (ClassNotFoundException e) {
++            throw (NoClassDefFoundError) new NoClassDefFoundError().initCause(e);
+         }
+-        return klass;
+     }
+ 
+     public JVMCIBackend getHostJVMCIBackend() {
+--- old/test/compiler/jvmci/common/patches/jdk.internal.vm.ci/jdk/vm/ci/hotspot/CompilerToVMHelper.java	2017-08-23 23:10:10.000000000 +0200
++++ new/test/compiler/jvmci/common/patches/jdk.internal.vm.ci/jdk/vm/ci/hotspot/CompilerToVMHelper.java	2017-08-23 23:10:10.000000000 +0200
+@@ -79,10 +79,19 @@
+     }
+ 
+     public static HotSpotResolvedObjectType lookupType(String name,
+-            Class<?> accessingClass, boolean resolve) {
++            Class<?> accessingClass, boolean resolve) throws ClassNotFoundException {
+         return CTVM.lookupType(name, accessingClass, resolve);
+     }
+ 
++    public static HotSpotResolvedObjectType lookupTypeHelper(String name,
++            Class<?> accessingClass, boolean resolve) {
++        try {
++            return lookupType(name, accessingClass, resolve);
++        } catch (ClassNotFoundException e) {
++            throw (NoClassDefFoundError) new NoClassDefFoundError().initCause(e);
++        }
++    }
++
+     public static Object resolveConstantInPool(ConstantPool constantPool, int cpi) {
+         return CTVM.resolveConstantInPool((HotSpotConstantPool) constantPool, cpi);
+     }
+--- old/test/compiler/jvmci/compilerToVM/FindUniqueConcreteMethodTest.java	2017-08-23 23:10:11.000000000 +0200
++++ new/test/compiler/jvmci/compilerToVM/FindUniqueConcreteMethodTest.java	2017-08-23 23:10:11.000000000 +0200
+@@ -107,7 +107,7 @@
+         HotSpotResolvedJavaMethod testMethod = CTVMUtilities.getResolvedMethod(method);
+ 
+         HotSpotResolvedObjectType resolvedType = CompilerToVMHelper
+-                .lookupType(Utils.toJVMTypeSignature(tcase.receiver), getClass(),
++                .lookupTypeHelper(Utils.toJVMTypeSignature(tcase.receiver), getClass(),
+                 /* resolve = */ true);
+         HotSpotResolvedJavaMethod concreteMethod = CompilerToVMHelper
+                 .findUniqueConcreteMethod(resolvedType, testMethod);
+--- old/test/compiler/jvmci/compilerToVM/GetClassInitializerTest.java	2017-08-23 23:10:11.000000000 +0200
++++ new/test/compiler/jvmci/compilerToVM/GetClassInitializerTest.java	2017-08-23 23:10:11.000000000 +0200
+@@ -82,7 +82,7 @@
+         System.out.println(tcase);
+         String className = tcase.holder.getName();
+         HotSpotResolvedObjectType resolvedClazz = CompilerToVMHelper
+-                .lookupType(Utils.toJVMTypeSignature(tcase.holder),
++                .lookupTypeHelper(Utils.toJVMTypeSignature(tcase.holder),
+                         getClass(), /* resolve = */ true);
+         HotSpotResolvedJavaMethod initializer = CompilerToVMHelper
+                 .getClassInitializer(resolvedClazz);
+--- old/test/compiler/jvmci/compilerToVM/GetConstantPoolTest.java	2017-08-23 23:10:12.000000000 +0200
++++ new/test/compiler/jvmci/compilerToVM/GetConstantPoolTest.java	2017-08-23 23:10:12.000000000 +0200
+@@ -65,7 +65,7 @@
+ 
+     public static void testClass(Class cls) {
+         HotSpotResolvedObjectType type = CompilerToVMHelper
+-                .lookupType(Utils.toJVMTypeSignature(cls),
++                .lookupTypeHelper(Utils.toJVMTypeSignature(cls),
+                         GetConstantPoolTest.class, /* resolve = */ true);
+         test(type);
+     }
+--- old/test/compiler/jvmci/compilerToVM/GetImplementorTest.java	2017-08-23 23:10:12.000000000 +0200
++++ new/test/compiler/jvmci/compilerToVM/GetImplementorTest.java	2017-08-23 23:10:12.000000000 +0200
+@@ -101,13 +101,13 @@
+     private void runTest(TestCase tcase) {
+         System.out.println(tcase);
+         HotSpotResolvedObjectType resolvedIface = CompilerToVMHelper
+-                .lookupType(Utils.toJVMTypeSignature(tcase.anInterface),
++                .lookupTypeHelper(Utils.toJVMTypeSignature(tcase.anInterface),
+                         getClass(), /* resolve = */ true);
+         HotSpotResolvedObjectType resolvedImplementer = CompilerToVMHelper
+                 .getImplementor(resolvedIface);
+         HotSpotResolvedObjectType resolvedExpected = null;
+         if (tcase.expectedImplementer != null) {
+-            resolvedExpected = CompilerToVMHelper.lookupType(Utils
++            resolvedExpected = CompilerToVMHelper.lookupTypeHelper(Utils
+                     .toJVMTypeSignature(tcase.expectedImplementer),
+                     getClass(), /* resolve = */ true);
+         }
+--- old/test/compiler/jvmci/compilerToVM/GetVtableIndexForInterfaceTest.java	2017-08-23 23:10:13.000000000 +0200
++++ new/test/compiler/jvmci/compilerToVM/GetVtableIndexForInterfaceTest.java	2017-08-23 23:10:13.000000000 +0200
+@@ -131,7 +131,7 @@
+         System.out.println(tcase);
+         Method method = tcase.holder.getDeclaredMethod(tcase.methodName);
+         HotSpotResolvedObjectType metaspaceKlass = CompilerToVMHelper
+-                .lookupType(Utils.toJVMTypeSignature(tcase.receiver),
++                .lookupTypeHelper(Utils.toJVMTypeSignature(tcase.receiver),
+                         getClass(), /* resolve = */ true);
+         HotSpotResolvedJavaMethod metaspaceMethod = CTVMUtilities
+                 .getResolvedMethod(tcase.holder, method);
+--- old/test/compiler/jvmci/compilerToVM/HasFinalizableSubclassTest.java	2017-08-23 23:10:13.000000000 +0200
++++ new/test/compiler/jvmci/compilerToVM/HasFinalizableSubclassTest.java	2017-08-23 23:10:13.000000000 +0200
+@@ -85,7 +85,7 @@
+     private void runTest(TestCase tcase) {
+         System.out.println(tcase);
+         HotSpotResolvedObjectType metaspaceKlass = CompilerToVMHelper
+-                .lookupType(Utils.toJVMTypeSignature(tcase.aClass),
++                .lookupTypeHelper(Utils.toJVMTypeSignature(tcase.aClass),
+                         getClass(), /* resolve = */ true);
+         Asserts.assertEQ(tcase.expected,
+                 CompilerToVMHelper.hasFinalizableSubclass(metaspaceKlass),
+--- old/test/compiler/jvmci/compilerToVM/ResolveMethodTest.java	2017-08-23 23:10:14.000000000 +0200
++++ new/test/compiler/jvmci/compilerToVM/ResolveMethodTest.java	2017-08-23 23:10:14.000000000 +0200
+@@ -134,13 +134,13 @@
+                 .getResolvedMethod(tcase.holder,
+                         tcase.holder.getDeclaredMethod(tcase.methodName));
+         HotSpotResolvedObjectType holderMetaspace = CompilerToVMHelper
+-                .lookupType(Utils.toJVMTypeSignature(tcase.holder),
++                .lookupTypeHelper(Utils.toJVMTypeSignature(tcase.holder),
+                         getClass(), /* resolve = */ true);
+         HotSpotResolvedObjectType callerMetaspace = CompilerToVMHelper
+-                .lookupType(Utils.toJVMTypeSignature(tcase.caller),
++                .lookupTypeHelper(Utils.toJVMTypeSignature(tcase.caller),
+                         getClass(), /* resolve = */ true);
+         HotSpotResolvedObjectType receiverMetaspace = CompilerToVMHelper
+-                .lookupType(Utils.toJVMTypeSignature(tcase.receiver),
++                .lookupTypeHelper(Utils.toJVMTypeSignature(tcase.receiver),
+                         getClass(), /* resolve = */ true);
+ 
+         // Can only resolve methods on a linked class so force initialization

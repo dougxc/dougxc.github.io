@@ -1,0 +1,997 @@
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2016-09-05 18:31:10.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2016-09-05 18:31:10.000000000 +0200
+@@ -26,8 +26,7 @@
+ import static jdk.vm.ci.common.InitTimer.timer;
+ import static jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.runtime;
+ 
+-import java.lang.reflect.Constructor;
+-import java.lang.reflect.Method;
++import java.lang.reflect.Executable;
+ 
+ import jdk.vm.ci.code.BytecodeFrame;
+ import jdk.vm.ci.code.InstalledCode;
+@@ -385,10 +384,9 @@
+     native boolean hasFinalizableSubclass(HotSpotResolvedObjectTypeImpl type);
+ 
+     /**
+-     * Gets the method corresponding to {@code holder} and slot number {@code slot} (i.e.
+-     * {@link Method#slot} or {@link Constructor#slot}).
++     * Gets the method corresponding to {@code executable}.
+      */
+-    native HotSpotResolvedJavaMethodImpl getResolvedJavaMethodAtSlot(Class<?> holder, int slot);
++    native HotSpotResolvedJavaMethodImpl asResolvedJavaMethod(Executable executable);
+ 
+     /**
+      * Gets the maximum absolute offset of a PC relative call to {@code address} from any position
+@@ -616,4 +614,9 @@
+      */
+     native int interpreterFrameSize(BytecodeFrame frame);
+ 
++    /**
++     * Invokes non-public method {@code java.lang.invoke.LambdaForm.compileToBytecode()} on
++     * {@code lambdaForm} (which must be a {@code java.lang.invoke.LambdaForm} instance).
++     */
++    native void compileToBytecode(Object lambdaForm);
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotCodeCacheProvider.java	2016-09-05 18:31:11.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotCodeCacheProvider.java	2016-09-05 18:31:11.000000000 +0200
+@@ -22,7 +22,7 @@
+  */
+ package jdk.vm.ci.hotspot;
+ 
+-import java.lang.reflect.Field;
++import java.util.Map;
+ 
+ import jdk.vm.ci.code.BailoutException;
+ import jdk.vm.ci.code.BytecodeFrame;
+@@ -56,16 +56,11 @@
+     @Override
+     public String getMarkName(Mark mark) {
+         int markId = (int) mark.id;
+-        Field[] fields = runtime.getConfig().getClass().getDeclaredFields();
+-        for (Field f : fields) {
+-            if (f.getName().startsWith("MARKID_")) {
+-                f.setAccessible(true);
+-                try {
+-                    if (f.getInt(runtime.getConfig()) == markId) {
+-                        return f.getName();
+-                    }
+-                } catch (Exception e) {
+-                }
++        HotSpotVMConfigStore store = runtime.getConfigStore();
++        for (Map.Entry<String, Long> e : store.getConstants().entrySet()) {
++            String name = e.getKey();
++            if (name.startsWith("MARKID_") && e.getValue() == markId) {
++                return name;
+             }
+         }
+         return CodeCacheProvider.super.getMarkName(mark);
+@@ -76,17 +71,13 @@
+      */
+     @Override
+     public String getTargetName(Call call) {
+-        Field[] fields = runtime.getConfig().getClass().getDeclaredFields();
+-        for (Field f : fields) {
+-            if (f.getName().endsWith("Stub")) {
+-                f.setAccessible(true);
+-                Object address;
+-                try {
+-                    address = f.get(runtime.getConfig());
+-                    if (address.equals(call.target)) {
+-                        return f.getName() + ":0x" + Long.toHexString((Long) address);
+-                    }
+-                } catch (IllegalArgumentException | IllegalAccessException e) {
++        if (call.target instanceof HotSpotForeignCallTarget) {
++            long address = ((HotSpotForeignCallTarget) call.target).address;
++            HotSpotVMConfigStore store = runtime.getConfigStore();
++            for (Map.Entry<String, VMField> e : store.getFields().entrySet()) {
++                VMField field = e.getValue();
++                if (field.isStatic() && field.value == address) {
++                    return e.getValue() + ":0x" + Long.toHexString(address);
+                 }
+             }
+         }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMetaAccessProvider.java	2016-09-05 18:31:12.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMetaAccessProvider.java	2016-09-05 18:31:11.000000000 +0200
+@@ -28,11 +28,10 @@
+ import static jdk.vm.ci.hotspot.UnsafeAccess.UNSAFE;
+ 
+ import java.lang.reflect.Array;
+-import java.lang.reflect.Constructor;
+ import java.lang.reflect.Executable;
+ import java.lang.reflect.Field;
+-import java.lang.reflect.Method;
+ import java.lang.reflect.Modifier;
++import java.util.Objects;
+ 
+ import jdk.vm.ci.code.CodeUtil;
+ import jdk.vm.ci.code.TargetDescription;
+@@ -78,35 +77,8 @@
+         return new HotSpotSignature(runtime, signature);
+     }
+ 
+-    /**
+-     * {@link Field} object of {@link Method#slot}.
+-     */
+-    private Field reflectionMethodSlot = getReflectionSlotField(Method.class);
+-
+-    /**
+-     * {@link Field} object of {@link Constructor#slot}.
+-     */
+-    private Field reflectionConstructorSlot = getReflectionSlotField(Constructor.class);
+-
+-    private static Field getReflectionSlotField(Class<?> reflectionClass) {
+-        try {
+-            Field field = reflectionClass.getDeclaredField("slot");
+-            field.setAccessible(true);
+-            return field;
+-        } catch (NoSuchFieldException | SecurityException e) {
+-            throw new JVMCIError(e);
+-        }
+-    }
+-
+     public ResolvedJavaMethod lookupJavaMethod(Executable reflectionMethod) {
+-        try {
+-            Class<?> holder = reflectionMethod.getDeclaringClass();
+-            Field slotField = reflectionMethod instanceof Constructor ? reflectionConstructorSlot : reflectionMethodSlot;
+-            final int slot = slotField.getInt(reflectionMethod);
+-            return runtime.getCompilerToVM().getResolvedJavaMethodAtSlot(holder, slot);
+-        } catch (IllegalArgumentException | IllegalAccessException e) {
+-            throw new JVMCIError(e);
+-        }
++        return runtime.getCompilerToVM().asResolvedJavaMethod(Objects.requireNonNull(reflectionMethod));
+     }
+ 
+     public ResolvedJavaField lookupJavaField(Field reflectionField) {
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethodHandleAccessProvider.java	2016-09-05 18:31:12.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethodHandleAccessProvider.java	2016-09-05 18:31:12.000000000 +0200
+@@ -24,16 +24,17 @@
+ 
+ import static jdk.vm.ci.hotspot.CompilerToVM.compilerToVM;
+ import static jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.runtime;
+-import static jdk.vm.ci.hotspot.HotSpotResolvedObjectTypeImpl.fromObjectClass;
++
++import java.lang.invoke.MethodHandle;
++import java.util.Objects;
++
+ import jdk.vm.ci.common.JVMCIError;
+ import jdk.vm.ci.meta.ConstantReflectionProvider;
+ import jdk.vm.ci.meta.JavaConstant;
+-import jdk.vm.ci.meta.JavaKind;
+ import jdk.vm.ci.meta.MethodHandleAccessProvider;
+ import jdk.vm.ci.meta.ResolvedJavaField;
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+ import jdk.vm.ci.meta.ResolvedJavaType;
+-import jdk.vm.ci.meta.Signature;
+ 
+ public class HotSpotMethodHandleAccessProvider implements MethodHandleAccessProvider {
+ 
+@@ -48,88 +49,46 @@
+      * possible after the {@link HotSpotJVMCIRuntime} is fully initialized.
+      */
+     static class LazyInitialization {
++        static final ResolvedJavaType lambdaFormType;
+         static final ResolvedJavaField methodHandleFormField;
+         static final ResolvedJavaField lambdaFormVmentryField;
+-        static final ResolvedJavaMethod lambdaFormCompileToBytecodeMethod;
+         static final HotSpotResolvedJavaField memberNameVmtargetField;
+ 
+-        static final ResolvedJavaType CLASS = fromObjectClass(LazyInitialization.class);
+-
+         /**
+          * Search for an instance field with the given name in a class.
+          *
+-         * @param className name of the class to search in
++         * @param declaringType the type declaring the field
+          * @param fieldName name of the field to be searched
+          * @param fieldType resolved Java type of the field
+          * @return resolved Java field
+-         * @throws ClassNotFoundException
+          * @throws NoSuchFieldError
+          */
+-        private static ResolvedJavaField findFieldInClass(String className, String fieldName, ResolvedJavaType fieldType)
+-                throws ClassNotFoundException {
+-            Class<?> clazz = Class.forName(className);
+-            ResolvedJavaType type = runtime().fromClass(clazz);
+-            ResolvedJavaField[] fields = type.getInstanceFields(false);
++        private static ResolvedJavaField findFieldInClass(ResolvedJavaType declaringType, String fieldName, ResolvedJavaType fieldType) {
++            ResolvedJavaField[] fields = declaringType.getInstanceFields(false);
+             for (ResolvedJavaField field : fields) {
+                 if (field.getName().equals(fieldName) && field.getType().equals(fieldType)) {
+                     return field;
+                 }
+             }
+-            throw new NoSuchFieldError(fieldType.getName() + " " + className + "." + fieldName);
++            throw new NoSuchFieldError(fieldType.getName() + " " + declaringType + "." + fieldName);
+         }
+ 
+-        private static ResolvedJavaMethod findMethodInClass(String className, String methodName,
+-                ResolvedJavaType resultType, ResolvedJavaType[] parameterTypes) throws ClassNotFoundException {
+-            Class<?> clazz = Class.forName(className);
+-            HotSpotResolvedObjectTypeImpl type = fromObjectClass(clazz);
+-            ResolvedJavaMethod result = null;
+-            for (ResolvedJavaMethod method : type.getDeclaredMethods()) {
+-                if (method.getName().equals(methodName) && signatureMatches(method, resultType, parameterTypes)) {
+-                    result = method;
+-                }
+-            }
+-            if (result == null) {
+-                StringBuilder sig = new StringBuilder("(");
+-                for (ResolvedJavaType t : parameterTypes) {
+-                    sig.append(t.getName()).append(",");
+-                }
+-                if (sig.length() > 1) {
+-                    sig.replace(sig.length() - 1, sig.length(), ")");
+-                } else {
+-                    sig.append(')');
+-                }
+-                throw new NoSuchMethodError(resultType.getName() + " " + className + "." + methodName + sig.toString());
+-            }
+-            return result;
++        private static ResolvedJavaType resolveType(Class<?> c) {
++            return runtime().fromClass(c);
+         }
+ 
+-        private static boolean signatureMatches(ResolvedJavaMethod m, ResolvedJavaType resultType,
+-                ResolvedJavaType[] parameterTypes) {
+-            Signature s = m.getSignature();
+-            if (!s.getReturnType(CLASS).equals(resultType)) {
+-                return false;
+-            }
+-            if (s.getParameterCount(false) != parameterTypes.length) {
+-                return false;
+-            }
+-            for (int i = 0; i < s.getParameterCount(false); ++i) {
+-                if (!s.getParameterType(i, CLASS).equals(parameterTypes[i])) {
+-                    return false;
+-                }
+-            }
+-            return true;
++        private static ResolvedJavaType resolveType(String className) throws ClassNotFoundException {
++            return resolveType(Class.forName(className));
+         }
+ 
+         static {
+             try {
+-                methodHandleFormField = findFieldInClass("java.lang.invoke.MethodHandle", "form",
+-                    fromObjectClass(Class.forName("java.lang.invoke.LambdaForm")));
+-                lambdaFormVmentryField = findFieldInClass("java.lang.invoke.LambdaForm", "vmentry",
+-                    fromObjectClass(Class.forName("java.lang.invoke.MemberName")));
+-                lambdaFormCompileToBytecodeMethod = findMethodInClass("java.lang.invoke.LambdaForm", "compileToBytecode",
+-                    new HotSpotResolvedPrimitiveType(JavaKind.Void), new ResolvedJavaType[]{});
+-                memberNameVmtargetField = (HotSpotResolvedJavaField) findFieldInClass("java.lang.invoke.MemberName", "vmtarget",
+-                    new HotSpotResolvedPrimitiveType(JavaKind.Long));
++                ResolvedJavaType methodHandleType = resolveType(MethodHandle.class);
++                ResolvedJavaType memberNameType = resolveType("java.lang.invoke.MemberName");
++                lambdaFormType = resolveType("java.lang.invoke.LambdaForm");
++                methodHandleFormField = findFieldInClass(methodHandleType, "form", lambdaFormType);
++                lambdaFormVmentryField = findFieldInClass(lambdaFormType, "vmentry", memberNameType);
++                memberNameVmtargetField = (HotSpotResolvedJavaField) findFieldInClass(memberNameType, "vmtarget", resolveType(long.class));
+             } catch (Throwable ex) {
+                 throw new JVMCIError(ex);
+             }
+@@ -173,12 +132,14 @@
+             return null;
+         }
+ 
+-        if (forceBytecodeGeneration) {
+-            /* Invoke non-public method: MemberName LambdaForm.compileToBytecode() */
+-            LazyInitialization.lambdaFormCompileToBytecodeMethod.invoke(lambdaForm, new JavaConstant[0]);
++        JavaConstant memberName = constantReflection.readFieldValue(LazyInitialization.lambdaFormVmentryField, lambdaForm);
++        if (memberName.isNull() && forceBytecodeGeneration) {
++            Object lf = ((HotSpotObjectConstant) lambdaForm).asObject(LazyInitialization.lambdaFormType);
++            compilerToVM().compileToBytecode(Objects.requireNonNull(lf));
++            memberName = constantReflection.readFieldValue(LazyInitialization.lambdaFormVmentryField, lambdaForm);
++            assert memberName.isNonNull();
+         }
+         /* Load non-public field: MemberName LambdaForm.vmentry */
+-        JavaConstant memberName = constantReflection.readFieldValue(LazyInitialization.lambdaFormVmentryField, lambdaForm);
+         return getTargetMethod(memberName);
+     }
+ 
+@@ -200,4 +161,3 @@
+         return compilerToVM().getResolvedJavaMethod(object, LazyInitialization.memberNameVmtargetField.offset());
+     }
+ }
+-
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaFieldImpl.java	2016-09-05 18:31:13.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaFieldImpl.java	2016-09-05 18:31:13.000000000 +0200
+@@ -137,11 +137,6 @@
+         return format("HotSpotField<%H.%n %t:") + offset + ">";
+     }
+ 
+-    @Override
+-    public boolean isSynthetic() {
+-        return (config().jvmAccSynthetic & modifiers) != 0;
+-    }
+-
+     /**
+      * Checks if this field has the {@link Stable} annotation.
+      *
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java	2016-09-05 18:31:14.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java	2016-09-05 18:31:14.000000000 +0200
+@@ -29,8 +29,6 @@
+ 
+ import java.lang.annotation.Annotation;
+ import java.lang.reflect.Executable;
+-import java.lang.reflect.InvocationTargetException;
+-import java.lang.reflect.Method;
+ import java.lang.reflect.Modifier;
+ import java.lang.reflect.Type;
+ import java.util.HashMap;
+@@ -42,7 +40,6 @@
+ import jdk.vm.ci.meta.ConstantPool;
+ import jdk.vm.ci.meta.DefaultProfilingInfo;
+ import jdk.vm.ci.meta.ExceptionHandler;
+-import jdk.vm.ci.meta.JavaConstant;
+ import jdk.vm.ci.meta.JavaMethod;
+ import jdk.vm.ci.meta.JavaType;
+ import jdk.vm.ci.meta.LineNumberTable;
+@@ -697,27 +694,6 @@
+         return (getFlags() & config().methodFlagsIntrinsicCandidate) != 0;
+     }
+ 
+-    @Override
+-    public JavaConstant invoke(JavaConstant receiver, JavaConstant[] arguments) {
+-        assert !isConstructor();
+-        Method javaMethod = (Method) toJava();
+-        javaMethod.setAccessible(true);
+-
+-        Object[] objArguments = new Object[arguments.length];
+-        for (int i = 0; i < arguments.length; i++) {
+-            objArguments[i] = HotSpotObjectConstantImpl.asBoxedValue(arguments[i]);
+-        }
+-        Object objReceiver = receiver != null && !receiver.isNull() ? ((HotSpotObjectConstantImpl) receiver).object() : null;
+-
+-        try {
+-            Object objResult = javaMethod.invoke(objReceiver, objArguments);
+-            return javaMethod.getReturnType() == void.class ? null : HotSpotObjectConstantImpl.forBoxedValue(getSignature().getReturnKind(), objResult);
+-
+-        } catch (IllegalAccessException | InvocationTargetException ex) {
+-            throw new IllegalArgumentException(ex);
+-        }
+-    }
+-
+     /**
+      * Allocates a compile id for this method by asking the VM for one.
+      *
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java	2016-09-05 18:31:15.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java	2016-09-05 18:31:15.000000000 +0200
+@@ -26,6 +26,7 @@
+ import static jdk.vm.ci.hotspot.UnsafeAccess.UNSAFE;
+ 
+ import jdk.internal.misc.Unsafe;
++import jdk.vm.ci.meta.ModifiersProvider;
+ 
+ /**
+  * Used to access native configuration details.
+@@ -45,6 +46,11 @@
+ 
+     HotSpotVMConfig(HotSpotVMConfigStore store) {
+         super(store);
++        assert ModifiersProvider.SYNTHETIC == getConstant("JVM_ACC_SYNTHETIC", Integer.class);
++        assert ModifiersProvider.ANNOTATION == getConstant("JVM_ACC_ANNOTATION", Integer.class);
++        assert ModifiersProvider.BRIDGE == getConstant("JVM_ACC_BRIDGE", Integer.class);
++        assert ModifiersProvider.VARARGS == getConstant("JVM_ACC_VARARGS", Integer.class);
++        assert ModifiersProvider.ENUM == getConstant("JVM_ACC_ENUM", Integer.class);
+     }
+ 
+     /**
+@@ -117,9 +123,6 @@
+     final int jvmAccFieldHasGenericSignature = getConstant("JVM_ACC_FIELD_HAS_GENERIC_SIGNATURE", Integer.class);
+     final int jvmAccIsCloneableFast = getConstant("JVM_ACC_IS_CLONEABLE_FAST", Integer.class);
+ 
+-    // Modifier.SYNTHETIC is not public so we get it via vmStructs.
+-    final int jvmAccSynthetic = getConstant("JVM_ACC_SYNTHETIC", Integer.class);
+-
+     // This is only valid on AMD64.
+     final int runtimeCallStackSize = getConstant("frame::arg_reg_save_area_bytes", Integer.class, osArch.equals("amd64") ? null : 0);
+ 
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/UnsafeAccess.java	2016-09-05 18:31:16.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/UnsafeAccess.java	2016-09-05 18:31:16.000000000 +0200
+@@ -22,8 +22,6 @@
+  */
+ package jdk.vm.ci.hotspot;
+ 
+-import java.lang.reflect.Field;
+-
+ import jdk.internal.misc.Unsafe;
+ 
+ /**
+@@ -31,21 +29,5 @@
+  */
+ class UnsafeAccess {
+ 
+-    static final Unsafe UNSAFE = initUnsafe();
+-
+-    private static Unsafe initUnsafe() {
+-        try {
+-            // Fast path when we are trusted.
+-            return Unsafe.getUnsafe();
+-        } catch (SecurityException se) {
+-            // Slow path when we are not trusted.
+-            try {
+-                Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
+-                theUnsafe.setAccessible(true);
+-                return (Unsafe) theUnsafe.get(Unsafe.class);
+-            } catch (Exception e) {
+-                throw new RuntimeException("exception while trying to get Unsafe", e);
+-            }
+-        }
+-    }
++    static final Unsafe UNSAFE = Unsafe.getUnsafe();
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/MetaUtil.java	2016-09-05 18:31:16.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/MetaUtil.java	2016-09-05 18:31:16.000000000 +0200
+@@ -22,9 +22,6 @@
+  */
+ package jdk.vm.ci.meta;
+ 
+-import java.lang.reflect.Field;
+-import java.lang.reflect.Modifier;
+-
+ /**
+  * Miscellaneous collection of utility methods used by {@code jdk.vm.ci.meta} and its clients.
+  */
+@@ -226,17 +223,4 @@
+         }
+         return obj.getClass().getName() + "@" + System.identityHashCode(obj);
+     }
+-
+-    /**
+-     * Used to lookup constants from {@link Modifier} that are not public (VARARGS, SYNTHETIC etc.).
+-     */
+-    static int getNonPublicModifierStaticField(String name) {
+-        try {
+-            Field field = Modifier.class.getDeclaredField(name);
+-            field.setAccessible(true);
+-            return field.getInt(null);
+-        } catch (NoSuchFieldException | SecurityException | IllegalArgumentException | IllegalAccessException e) {
+-            throw new InternalError(e);
+-        }
+-    }
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ModifiersProvider.java	2016-09-05 18:31:17.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ModifiersProvider.java	2016-09-05 18:31:17.000000000 +0200
+@@ -42,12 +42,11 @@
+  * language {@linkplain #getModifiers() modifiers}.
+  */
+ public interface ModifiersProvider {
+-    int BRIDGE = MetaUtil.getNonPublicModifierStaticField("BRIDGE");
+-    int VARARGS = MetaUtil.getNonPublicModifierStaticField("VARARGS");
+-    int SYNTHETIC = MetaUtil.getNonPublicModifierStaticField("SYNTHETIC");
+-    int ANNOTATION = MetaUtil.getNonPublicModifierStaticField("ANNOTATION");
+-    int ENUM = MetaUtil.getNonPublicModifierStaticField("ENUM");
+-    int MANDATED = MetaUtil.getNonPublicModifierStaticField("MANDATED");
++    int BRIDGE = 0x0040;
++    int VARARGS = 0x0080;
++    int SYNTHETIC = 0x1000;
++    int ANNOTATION = 0x2000;
++    int ENUM = 0x4000;
+ 
+     /**
+      * Returns the Java Virtual Machine modifiers for this element. Note that this can differ from
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaField.java	2016-09-05 18:31:18.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaField.java	2016-09-05 18:31:18.000000000 +0200
+@@ -52,7 +52,9 @@
+     /**
+      * Determines if this field is a synthetic field as defined by the Java Language Specification.
+      */
+-    boolean isSynthetic();
++    default boolean isSynthetic() {
++        return (SYNTHETIC & getModifiers()) == SYNTHETIC;
++    }
+ 
+     /**
+      * Returns the {@link ResolvedJavaType} object representing the class or interface that declares
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaMethod.java	2016-09-05 18:31:19.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaMethod.java	2016-09-05 18:31:19.000000000 +0200
+@@ -228,18 +228,6 @@
+     LocalVariableTable getLocalVariableTable();
+ 
+     /**
+-     * Invokes the underlying method represented by this object, on the specified object with the
+-     * specified parameters. This method is similar to a reflective method invocation by
+-     * {@link Method#invoke}.
+-     *
+-     * @param receiver The receiver for the invocation, or {@code null} if it is a static method.
+-     * @param arguments The arguments for the invocation.
+-     * @return The value returned by the method invocation, or {@code null} if the return type is
+-     *         {@code void}.
+-     */
+-    JavaConstant invoke(JavaConstant receiver, JavaConstant[] arguments);
+-
+-    /**
+      * Gets the encoding of (that is, a constant representing the value of) this method.
+      *
+      * @return a constant representing a reference to this method
+--- old/src/share/vm/jvmci/jvmciCompilerToVM.cpp	2016-09-05 18:31:19.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciCompilerToVM.cpp	2016-09-05 18:31:19.000000000 +0200
+@@ -473,9 +473,20 @@
+   return (jlong) (address) method->exception_table_start();
+ C2V_END
+ 
+-C2V_VMENTRY(jobject, getResolvedJavaMethodAtSlot, (JNIEnv *, jobject, jclass holder_handle, jint slot))
+-  oop java_class = JNIHandles::resolve(holder_handle);
+-  Klass* holder = java_lang_Class::as_Klass(java_class);
++C2V_VMENTRY(jobject, asResolvedJavaMethod, (JNIEnv *, jobject, jobject executable_handle))
++  oop executable = JNIHandles::resolve(executable_handle);
++  oop mirror = NULL;
++  int slot = 0;
++
++  if (executable->klass() == SystemDictionary::reflect_Constructor_klass()) {
++    mirror = java_lang_reflect_Constructor::clazz(executable);
++    slot = java_lang_reflect_Constructor::slot(executable);
++  } else {
++    assert(executable->klass() == SystemDictionary::reflect_Method_klass(), "wrong type");
++    mirror = java_lang_reflect_Method::clazz(executable);
++    slot = java_lang_reflect_Method::slot(executable);
++  }
++  Klass* holder = java_lang_Class::as_Klass(mirror);
+   methodHandle method = InstanceKlass::cast(holder)->method_with_idnum(slot);
+   oop result = CompilerToVM::get_jvmci_method(method, CHECK_NULL);
+   return JNIHandles::make_local(THREAD, result);
+@@ -1518,6 +1529,17 @@
+   return size + Deoptimization::last_frame_adjust(0, callee_locals) * BytesPerWord;
+ C2V_END
+ 
++C2V_VMENTRY(void, compileToBytecode, (JNIEnv*, jobject, jobject lambda_form_handle))
++  Handle lambda_form = JNIHandles::resolve_non_null(lambda_form_handle);
++  if (lambda_form->is_a(SystemDictionary::LambdaForm_klass())) {
++    TempNewSymbol compileToBytecode = SymbolTable::new_symbol("compileToBytecode", CHECK);
++    JavaValue result(T_VOID);
++    JavaCalls::call_special(&result, lambda_form, SystemDictionary::LambdaForm_klass(), compileToBytecode, vmSymbols::void_method_signature(), CHECK);
++  } else {
++    THROW_MSG(vmSymbols::java_lang_IllegalArgumentException(),
++                err_msg("Unexpected type: %s", lambda_form->klass()->external_name()));
++  }
++C2V_END
+ 
+ #define CC (char*)  /*cast a literal from (const char*)*/
+ #define FN_PTR(f) CAST_FROM_FN_PTR(void*, &(c2v_ ## f))
+@@ -1525,6 +1547,7 @@
+ #define STRING                "Ljava/lang/String;"
+ #define OBJECT                "Ljava/lang/Object;"
+ #define CLASS                 "Ljava/lang/Class;"
++#define EXECUTABLE            "Ljava/lang/reflect/Executable;"
+ #define STACK_TRACE_ELEMENT   "Ljava/lang/StackTraceElement;"
+ #define INSTALLED_CODE        "Ljdk/vm/ci/code/InstalledCode;"
+ #define TARGET_DESCRIPTION    "Ljdk/vm/ci/code/TargetDescription;"
+@@ -1572,7 +1595,7 @@
+   {CC "getClassInitializer",                          CC "(" HS_RESOLVED_KLASS ")" HS_RESOLVED_METHOD,                                      FN_PTR(getClassInitializer)},
+   {CC "hasFinalizableSubclass",                       CC "(" HS_RESOLVED_KLASS ")Z",                                                        FN_PTR(hasFinalizableSubclass)},
+   {CC "getMaxCallTargetOffset",                       CC "(J)J",                                                                            FN_PTR(getMaxCallTargetOffset)},
+-  {CC "getResolvedJavaMethodAtSlot",                  CC "(" CLASS "I)" HS_RESOLVED_METHOD,                                                 FN_PTR(getResolvedJavaMethodAtSlot)},
++  {CC "asResolvedJavaMethod",                         CC "(" EXECUTABLE ")" HS_RESOLVED_METHOD,                                             FN_PTR(asResolvedJavaMethod)},
+   {CC "getResolvedJavaMethod",                        CC "(Ljava/lang/Object;J)" HS_RESOLVED_METHOD,                                        FN_PTR(getResolvedJavaMethod)},
+   {CC "getConstantPool",                              CC "(Ljava/lang/Object;)" HS_CONSTANT_POOL,                                           FN_PTR(getConstantPool)},
+   {CC "getResolvedJavaType",                          CC "(Ljava/lang/Object;JZ)" HS_RESOLVED_KLASS,                                        FN_PTR(getResolvedJavaType)},
+@@ -1599,6 +1622,7 @@
+   {CC "flushDebugOutput",                             CC "()V",                                                                             FN_PTR(flushDebugOutput)},
+   {CC "methodDataProfileDataSize",                    CC "(JI)I",                                                                           FN_PTR(methodDataProfileDataSize)},
+   {CC "interpreterFrameSize",                         CC "(" BYTECODE_FRAME ")I",                                                           FN_PTR(interpreterFrameSize)},
++  {CC "compileToBytecode",                            CC "(" OBJECT ")V",                                                                   FN_PTR(compileToBytecode)},
+ };
+ 
+ int CompilerToVM::methods_count() {
+--- old/src/share/vm/jvmci/vmStructs_jvmci.cpp	2016-09-05 18:31:20.000000000 +0200
++++ new/src/share/vm/jvmci/vmStructs_jvmci.cpp	2016-09-05 18:31:20.000000000 +0200
+@@ -327,8 +327,11 @@
+   declare_constant(JVM_ACC_FIELD_INTERNAL)                                \
+   declare_constant(JVM_ACC_FIELD_STABLE)                                  \
+   declare_constant(JVM_ACC_FIELD_HAS_GENERIC_SIGNATURE)                   \
++  declare_preprocessor_constant("JVM_ACC_VARARGS", JVM_ACC_VARARGS)       \
++  declare_preprocessor_constant("JVM_ACC_BRIDGE", JVM_ACC_BRIDGE)   \
++  declare_preprocessor_constant("JVM_ACC_ANNOTATION", JVM_ACC_ANNOTATION)   \
++  declare_preprocessor_constant("JVM_ACC_ENUM", JVM_ACC_ENUM)   \
+   declare_preprocessor_constant("JVM_ACC_SYNTHETIC", JVM_ACC_SYNTHETIC)   \
+-  declare_preprocessor_constant("JVM_RECOGNIZED_FIELD_MODIFIERS", JVM_RECOGNIZED_FIELD_MODIFIERS) \
+                                                                           \
+   declare_constant(JVM_CONSTANT_Utf8)                                     \
+   declare_constant(JVM_CONSTANT_Unicode)                                  \
+--- old/test/compiler/jvmci/common/CTVMUtilities.java	2016-09-05 18:31:21.000000000 +0200
++++ new/test/compiler/jvmci/common/CTVMUtilities.java	2016-09-05 18:31:21.000000000 +0200
+@@ -57,18 +57,7 @@
+         if (!(method instanceof Method || method instanceof Constructor)) {
+             throw new Error("wrong executable type " + method.getClass());
+         }
+-        Field slotField;
+-        int slot;
+-        try {
+-            slotField = method.getClass().getDeclaredField("slot");
+-            boolean old = slotField.isAccessible();
+-            slotField.setAccessible(true);
+-            slot = slotField.getInt(method);
+-            slotField.setAccessible(old);
+-        } catch (ReflectiveOperationException e) {
+-            throw new Error("TEST BUG: Can't get slot field", e);
+-        }
+-        return CompilerToVMHelper.getResolvedJavaMethodAtSlot(cls, slot);
++        return CompilerToVMHelper.asResolvedJavaMethod(method);
+     }
+ 
+     public static HotSpotResolvedJavaMethod getResolvedMethod(
+--- old/test/compiler/jvmci/common/patches/jdk.vm.ci/jdk/vm/ci/hotspot/CompilerToVMHelper.java	2016-09-05 18:31:22.000000000 +0200
++++ new/test/compiler/jvmci/common/patches/jdk.vm.ci/jdk/vm/ci/hotspot/CompilerToVMHelper.java	2016-09-05 18:31:22.000000000 +0200
+@@ -28,6 +28,7 @@
+ import jdk.vm.ci.code.TargetDescription;
+ import jdk.vm.ci.meta.ConstantPool;
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
++import java.lang.reflect.Executable;
+ 
+ /**
+  * A simple "proxy" class to get test access to CompilerToVM package-private methods
+@@ -171,9 +172,9 @@
+         return CTVM.hasFinalizableSubclass((HotSpotResolvedObjectTypeImpl) type);
+     }
+ 
+-    public static HotSpotResolvedJavaMethodImpl getResolvedJavaMethodAtSlot(
+-            Class<?> holder, int slot) {
+-        return CTVM.getResolvedJavaMethodAtSlot(holder, slot);
++    public static HotSpotResolvedJavaMethodImpl asResolvedJavaMethod(
++            Executable executable) {
++        return CTVM.asResolvedJavaMethod(executable);
+     }
+ 
+     public static long getMaxCallTargetOffset(long address) {
+--- old/test/compiler/jvmci/compilerToVM/GetResolvedJavaMethodTest.java	2016-09-05 18:31:23.000000000 +0200
++++ new/test/compiler/jvmci/compilerToVM/GetResolvedJavaMethodTest.java	2016-09-05 18:31:23.000000000 +0200
+@@ -52,6 +52,7 @@
+ import sun.hotspot.WhiteBox;
+ 
+ import java.lang.reflect.Field;
++import java.lang.reflect.Method;
+ 
+ public class GetResolvedJavaMethodTest {
+     private static enum TestCase {
+@@ -65,9 +66,7 @@
+         JAVA_METHOD_BASE {
+             @Override
+             HotSpotResolvedJavaMethod getResolvedJavaMethod() {
+-                HotSpotResolvedJavaMethod methodInstance
+-                        = CompilerToVMHelper.getResolvedJavaMethodAtSlot(
+-                                TEST_CLASS, 0);
++                HotSpotResolvedJavaMethod methodInstance = TEST_METHOD;
+                 try {
+                     METASPACE_METHOD_FIELD.set(methodInstance,
+                             getPtrToMethod());
+@@ -82,9 +81,7 @@
+             @Override
+             HotSpotResolvedJavaMethod getResolvedJavaMethod() {
+                 long ptr = getPtrToMethod();
+-                HotSpotResolvedJavaMethod methodInstance
+-                        = CompilerToVMHelper.getResolvedJavaMethodAtSlot(
+-                        TEST_CLASS, 0);
++                HotSpotResolvedJavaMethod methodInstance = TEST_METHOD;
+                 try {
+                     METASPACE_METHOD_FIELD.set(methodInstance, ptr / 2L);
+                 } catch (ReflectiveOperationException e) {
+@@ -98,9 +95,7 @@
+             @Override
+             HotSpotResolvedJavaMethod getResolvedJavaMethod() {
+                 long ptr = getPtrToMethod();
+-                HotSpotResolvedJavaMethod methodInstance
+-                        = CompilerToVMHelper.getResolvedJavaMethodAtSlot(
+-                        TEST_CLASS, 0);
++                HotSpotResolvedJavaMethod methodInstance = TEST_METHOD;
+                 try {
+                     METASPACE_METHOD_FIELD.set(methodInstance, 0L);
+                 } catch (ReflectiveOperationException e) {
+@@ -118,16 +113,21 @@
+     private static final WhiteBox WB = WhiteBox.getWhiteBox();
+     private static final Field METASPACE_METHOD_FIELD;
+     private static final Class<?> TEST_CLASS = GetResolvedJavaMethodTest.class;
++    private static final HotSpotResolvedJavaMethod TEST_METHOD;
+     private static final long PTR;
+     static  {
+-        HotSpotResolvedJavaMethod method
+-                = CompilerToVMHelper.getResolvedJavaMethodAtSlot(TEST_CLASS, 0);
++        try {
++            Method method = TEST_CLASS.getDeclaredMethod("test", TestCase.class);
++            TEST_METHOD = CompilerToVMHelper.asResolvedJavaMethod(method);
++        } catch (NoSuchMethodException e) {
++            throw new Error("TESTBUG : " + e, e);
++        }
+         try {
+             // jdk.vm.ci.hotspot.HotSpotResolvedJavaMethodImpl.metaspaceMethod
+-            METASPACE_METHOD_FIELD = method.getClass()
++            METASPACE_METHOD_FIELD = TEST_METHOD.getClass()
+                     .getDeclaredField("metaspaceMethod");
+             METASPACE_METHOD_FIELD.setAccessible(true);
+-            PTR = (long) METASPACE_METHOD_FIELD.get(method);
++            PTR = (long) METASPACE_METHOD_FIELD.get(TEST_METHOD);
+         } catch (ReflectiveOperationException e) {
+             throw new Error("TESTBUG : " + e, e);
+         }
+--- old/test/compiler/jvmci/jdk.vm.ci.hotspot.test/src/jdk/vm/ci/hotspot/test/MemoryAccessProviderData.java	2016-09-05 18:31:23.000000000 +0200
++++ new/test/compiler/jvmci/jdk.vm.ci.hotspot.test/src/jdk/vm/ci/hotspot/test/MemoryAccessProviderData.java	2016-09-05 18:31:23.000000000 +0200
+@@ -23,6 +23,10 @@
+ 
+ package jdk.vm.ci.hotspot.test;
+ 
++import java.lang.reflect.Field;
++
++import org.testng.annotations.DataProvider;
++
+ import jdk.internal.misc.Unsafe;
+ import jdk.vm.ci.hotspot.HotSpotConstantReflectionProvider;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntimeProvider;
+@@ -32,27 +36,14 @@
+ import jdk.vm.ci.meta.JavaConstant;
+ import jdk.vm.ci.meta.JavaKind;
+ import jdk.vm.ci.runtime.JVMCI;
+-import org.testng.annotations.DataProvider;
+-
+-import java.lang.reflect.Field;
+ 
+ public class MemoryAccessProviderData {
+-    private static final Unsafe UNSAFE = getUnsafe();
++    private static final Unsafe UNSAFE = Unsafe.getUnsafe();
+     private static final HotSpotConstantReflectionProvider CONSTANT_REFLECTION = (HotSpotConstantReflectionProvider) JVMCI.getRuntime().getHostJVMCIBackend().getConstantReflection();
+     private static final TestClass TEST_OBJECT = new TestClass();
+     private static final JavaConstant TEST_CONSTANT = CONSTANT_REFLECTION.forObject(TEST_OBJECT);
+     private static final JavaConstant TEST_CLASS_CONSTANT = CONSTANT_REFLECTION.forObject(TestClass.class);
+ 
+-    private static Unsafe getUnsafe() {
+-        try {
+-            Field f = Unsafe.class.getDeclaredField("theUnsafe");
+-            f.setAccessible(true);
+-            return (Unsafe) f.get(null);
+-        } catch (NoSuchFieldException | IllegalAccessException e) {
+-            throw new RuntimeException("Unable to get Unsafe instance.", e);
+-        }
+-    }
+-
+     @DataProvider(name = "positiveObject")
+     public static Object[][] getPositiveObjectJavaKind() {
+         HotSpotJVMCIRuntimeProvider runtime = (HotSpotJVMCIRuntimeProvider) JVMCI.getRuntime();
+--- old/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaMethod.java	2016-09-05 18:31:24.000000000 +0200
++++ new/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaMethod.java	2016-09-05 18:31:24.000000000 +0200
+@@ -438,7 +438,6 @@
+ 
+     // @formatter:off
+     private static final String[] untestedApiMethods = {
+-        "invoke",
+         "newInstance",
+         "getDeclaringClass",
+         "getEncoding",
+--- old/test/compiler/jvmci/compilerToVM/GetResolvedJavaMethodAtSlotTest.java	2016-09-05 18:31:25.000000000 +0200
++++ /dev/null	2016-09-05 18:31:25.000000000 +0200
+@@ -1,121 +0,0 @@
+-/*
+- * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- *
+- */
+-
+-/**
+- * @test
+- * @bug 8136421
+- * @requires (vm.simpleArch == "x64" | vm.simpleArch == "sparcv9" | vm.simpleArch == "aarch64")
+- * @library /test/lib /
+- * @library ../common/patches
+- * @modules java.base/jdk.internal.misc
+- * @modules java.base/jdk.internal.org.objectweb.asm
+- *          java.base/jdk.internal.org.objectweb.asm.tree
+- *          jdk.vm.ci/jdk.vm.ci.hotspot
+- *          jdk.vm.ci/jdk.vm.ci.code
+- *          jdk.vm.ci/jdk.vm.ci.meta
+- * @build jdk.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper
+- * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
+- *                   compiler.jvmci.compilerToVM.GetResolvedJavaMethodAtSlotTest
+- */
+-
+-package compiler.jvmci.compilerToVM;
+-
+-import jdk.test.lib.Asserts;
+-import jdk.vm.ci.hotspot.CompilerToVMHelper;
+-import jdk.vm.ci.hotspot.HotSpotResolvedJavaMethod;
+-
+-import java.util.HashMap;
+-import java.util.Map;
+-
+-public class GetResolvedJavaMethodAtSlotTest {
+-
+-    private static class A {
+-        {
+-            System.out.println("Dummy");
+-        }
+-        public void f1() {}
+-        public int f2() { return 0; }
+-        public String f3() { return ""; }
+-    }
+-
+-
+-    private static class S {
+-        static {
+-            System.out.println("Dummy static");
+-        }
+-        public S() {}
+-        public void f1() {}
+-        public int f2() { return 0; }
+-        public String f3() { return ""; }
+-    }
+-
+-    private class B extends A {
+-        public void f4() {}
+-    }
+-
+-    private interface I {
+-        void f1();
+-        int f2();
+-        String f3();
+-    }
+-
+-    public static void main(String[] args) {
+-        Map<Class<?>, Integer> testCases = getTestCases();
+-        testCases.forEach(GetResolvedJavaMethodAtSlotTest::test);
+-    }
+-
+-    private static Map<Class<?>, Integer> getTestCases() {
+-        Map<Class<?>, Integer> testCases = new HashMap<>();
+-        testCases.put(A.class, 5); // ctor, init, f1, f2, f3
+-        testCases.put(S.class, 5); // ctor, cinit, f1, f2, f3
+-        testCases.put(I.class, 3); // f1, f2, f3
+-        testCases.put(B.class, 2); // ctor, f4
+-        return testCases;
+-    }
+-
+-    private static void test(Class<?> aClass, int methodNumber) {
+-        testSlotBigger(aClass);
+-        testCorrectMethods(aClass, methodNumber);
+-    }
+-
+-    private static void testSlotBigger(Class<?> holder) {
+-        HotSpotResolvedJavaMethod method
+-                = CompilerToVMHelper.getResolvedJavaMethodAtSlot(holder, 50);
+-        Asserts.assertNull(method, "Got method for non existing slot 50 in "
+-                + holder);
+-    }
+-
+-    private static void testCorrectMethods(Class<?> holder, int methodsNumber) {
+-        for (int i = 0; i < methodsNumber; i++) {
+-            String caseName = String.format("slot %d in %s",
+-                    i, holder.getCanonicalName());
+-            HotSpotResolvedJavaMethod method = CompilerToVMHelper
+-                    .getResolvedJavaMethodAtSlot(holder, i);
+-            Asserts.assertNotNull(method, caseName + " did not got method");
+-            Asserts.assertEQ(holder,
+-                    CompilerToVMHelper.getMirror(method.getDeclaringClass()),
+-                    caseName + " : unexpected declaring class");
+-        }
+-    }
+-}
+--- /dev/null	2016-09-05 18:31:25.000000000 +0200
++++ new/test/compiler/jvmci/compilerToVM/AsResolvedJavaMethodTest.java	2016-09-05 18:31:25.000000000 +0200
+@@ -0,0 +1,113 @@
++/*
++ * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ *
++ */
++
++/**
++ * @test
++ * @bug 8136421
++ * @requires (vm.simpleArch == "x64" | vm.simpleArch == "sparcv9" | vm.simpleArch == "aarch64")
++ * @library /test/lib /
++ * @library ../common/patches
++ * @modules java.base/jdk.internal.misc
++ * @modules java.base/jdk.internal.org.objectweb.asm
++ *          java.base/jdk.internal.org.objectweb.asm.tree
++ *          jdk.vm.ci/jdk.vm.ci.hotspot
++ *          jdk.vm.ci/jdk.vm.ci.code
++ *          jdk.vm.ci/jdk.vm.ci.meta
++ * @build jdk.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper
++ * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
++ *                   compiler.jvmci.compilerToVM.AsResolvedJavaMethodTest
++ */
++
++package compiler.jvmci.compilerToVM;
++
++import jdk.test.lib.Asserts;
++import jdk.vm.ci.hotspot.CompilerToVMHelper;
++import jdk.vm.ci.hotspot.HotSpotResolvedJavaMethod;
++
++import java.lang.reflect.Executable;
++import java.util.Arrays;
++import java.util.ArrayList;
++import java.util.List;
++
++public class AsResolvedJavaMethodTest {
++
++    private static class A {
++        {
++            System.out.println("Dummy");
++        }
++        public void f1() {}
++        public int f2() { return 0; }
++        public String f3() { return ""; }
++    }
++
++
++    private static class S {
++        static {
++            System.out.println("Dummy static");
++        }
++        public S() {}
++        public void f1() {}
++        public int f2() { return 0; }
++        public String f3() { return ""; }
++    }
++
++    private class B extends A {
++        public void f4() {}
++    }
++
++    private interface I {
++        void f1();
++        int f2();
++        String f3();
++    }
++
++    public static void main(String[] args) {
++        List<Class<?>> testCases = getTestCases();
++        testCases.forEach(AsResolvedJavaMethodTest::test);
++    }
++
++    private static List<Class<?>> getTestCases() {
++        List<Class<?>> testCases = new ArrayList<>();
++        testCases.add(A.class);
++        testCases.add(S.class);
++        testCases.add(I.class);
++        testCases.add(B.class);
++        return testCases;
++    }
++
++    private static void test(Class<?> aClass) {
++        testCorrectMethods(aClass);
++    }
++
++    private static void testCorrectMethods(Class<?> holder) {
++        List<Executable> executables = new ArrayList<>();
++        executables.addAll(Arrays.asList(holder.getDeclaredMethods()));
++        executables.addAll(Arrays.asList(holder.getDeclaredConstructors()));
++        for (Executable executable : executables) {
++            HotSpotResolvedJavaMethod method = CompilerToVMHelper
++                    .asResolvedJavaMethod(executable);
++            Asserts.assertNotNull(method, "could not convert " + method);
++        }
++    }
++}

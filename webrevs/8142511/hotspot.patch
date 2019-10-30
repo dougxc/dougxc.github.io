@@ -1,0 +1,80 @@
+--- old/src/share/vm/jvmci/jvmciJavaClasses.cpp	2015-11-11 22:23:07.000000000 +0100
++++ new/src/share/vm/jvmci/jvmciJavaClasses.cpp	2015-11-11 22:23:06.000000000 +0100
+@@ -30,7 +30,7 @@
+ // This function is similar to javaClasses.cpp, it computes the field offset of a (static or instance) field.
+ // It looks up the name and signature symbols without creating new ones, all the symbols of these classes need to be already loaded.
+ 
+-void compute_offset(int &dest_offset, Klass* klass, const char* name, const char* signature, bool static_field) {
++void compute_offset(int &dest_offset, Klass* klass, const char* name, const char* signature, bool static_field, TRAPS) {
+   InstanceKlass* ik = InstanceKlass::cast(klass);
+   Symbol* name_symbol = SymbolTable::probe(name, (int)strlen(name));
+   Symbol* signature_symbol = SymbolTable::probe(signature, (int)strlen(signature));
+@@ -49,6 +49,11 @@
+   guarantee(fd.is_static() == static_field, "static/instance mismatch");
+   dest_offset = fd.offset();
+   assert(dest_offset != 0, "must be valid offset");
++  if (static_field) {
++    // Must ensure classes for static fields are initialized as the
++    // accessor itself does not include a class initialization check.
++    ik->initialize(CHECK);
++  }
+ }
+ 
+ // This piece of macro magic creates the contents of the jvmci_compute_offsets method that initializes the field indices of all the access classes.
+@@ -57,7 +62,7 @@
+ 
+ #define END_CLASS }
+ 
+-#define FIELD(klass, name, signature, static_field) compute_offset(klass::_##name##_offset, k, #name, signature, static_field);
++#define FIELD(klass, name, signature, static_field) compute_offset(klass::_##name##_offset, k, #name, signature, static_field, CHECK);
+ #define CHAR_FIELD(klass, name) FIELD(klass, name, "C", false)
+ #define INT_FIELD(klass, name) FIELD(klass, name, "I", false)
+ #define BOOLEAN_FIELD(klass, name) FIELD(klass, name, "Z", false)
+@@ -69,7 +74,7 @@
+ #define STATIC_BOOLEAN_FIELD(klass, name) FIELD(klass, name, "Z", true)
+ 
+ 
+-void JVMCIJavaClasses::compute_offsets() {
++void JVMCIJavaClasses::compute_offsets(TRAPS) {
+   COMPILER_CLASSES_DO(START_CLASS, END_CLASS, CHAR_FIELD, INT_FIELD, BOOLEAN_FIELD, LONG_FIELD, FLOAT_FIELD, OOP_FIELD, OOP_FIELD, OOP_FIELD, STATIC_OOP_FIELD, STATIC_OOP_FIELD, STATIC_INT_FIELD, STATIC_BOOLEAN_FIELD)
+ }
+ 
+--- old/src/share/vm/jvmci/jvmciJavaClasses.hpp	2015-11-11 22:23:07.000000000 +0100
++++ new/src/share/vm/jvmci/jvmciJavaClasses.hpp	2015-11-11 22:23:07.000000000 +0100
+@@ -29,7 +29,7 @@
+ 
+ class JVMCIJavaClasses : AllStatic {
+  public:
+-  static void compute_offsets();
++  static void compute_offsets(TRAPS);
+ };
+ 
+ /* This macro defines the structure of the CompilationResult - classes.
+@@ -306,7 +306,7 @@
+         assert(obj->is_a(SystemDictionary::name##_klass()), "wrong class, " #name " expected, found %s", obj->klass()->external_name());                       \
+         assert(offset != 0, "must be valid offset");                                                                                                           \
+     }                                                                                                                                                          \
+-    static void compute_offsets();                                                                                                                             \
++    static void compute_offsets(TRAPS);                                                                                                                             \
+   public:                                                                                                                                                      \
+     static InstanceKlass* klass() { return SystemDictionary::name##_klass() == NULL ? NULL : InstanceKlass::cast(SystemDictionary::name##_klass()); }
+ 
+@@ -392,6 +392,6 @@
+ #undef STATIC_BOOLEAN_FIELD
+ #undef EMPTY_CAST
+ 
+-void compute_offset(int &dest_offset, Klass* klass, const char* name, const char* signature, bool static_field);
++void compute_offset(int &dest_offset, Klass* klass, const char* name, const char* signature, bool static_field, TRAPS);
+ 
+ #endif // SHARE_VM_JVMCI_JVMCIJAVACLASSES_HPP
+--- old/src/share/vm/jvmci/jvmciRuntime.cpp	2015-11-11 22:23:08.000000000 +0100
++++ new/src/share/vm/jvmci/jvmciRuntime.cpp	2015-11-11 22:23:08.000000000 +0100
+@@ -720,7 +720,7 @@
+   if (JVMCIRuntime::_well_known_classes_initialized == false) {
+     SystemDictionary::WKID scan = SystemDictionary::FIRST_JVMCI_WKID;
+     SystemDictionary::initialize_wk_klasses_through(SystemDictionary::LAST_JVMCI_WKID, scan, CHECK);
+-    JVMCIJavaClasses::compute_offsets();
++    JVMCIJavaClasses::compute_offsets(CHECK);
+     JVMCIRuntime::_well_known_classes_initialized = true;
+   }
+ }

@@ -1,0 +1,329 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>Old test/tools/jimage/VerifyJimage.java</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2014, 2017, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 
+  24 import java.io.File;
+  25 import java.io.IOException;
+  26 import java.io.UncheckedIOException;
+  27 import java.nio.file.DirectoryStream;
+  28 import java.nio.file.Files;
+  29 import java.nio.file.Path;
+  30 import java.nio.file.Paths;
+  31 import java.nio.file.attribute.BasicFileAttributes;
+  32 import java.util.ArrayList;
+  33 import java.util.Arrays;
+  34 import java.util.Deque;
+  35 import java.util.List;
+  36 import java.util.Set;
+  37 import java.util.concurrent.ConcurrentLinkedDeque;
+  38 import java.util.concurrent.ExecutorService;
+  39 import java.util.concurrent.Executors;
+  40 import java.util.concurrent.TimeUnit;
+  41 import java.util.concurrent.atomic.AtomicInteger;
+  42 import java.util.stream.Collectors;
+  43 import java.util.stream.Stream;
+  44 
+  45 import jdk.internal.jimage.BasicImageReader;
+  46 import jdk.internal.jimage.ImageLocation;
+  47 
+  48 /*
+  49  * @test
+  50  * @summary Verify jimage
+  51  * @modules java.base/jdk.internal.jimage
+  52  * @run main/othervm --add-modules ALL-SYSTEM VerifyJimage
+  53  */
+  54 
+  55 /**
+  56  * This test runs in two modes:
+  57  * (1) No argument: it verifies the jimage by loading all classes in the runtime
+  58  * (2) path of exploded modules: it compares bytes of each file in the exploded
+  59  *     module with the entry in jimage
+  60  *
+  61  * FIXME: exception thrown when findLocation from jimage by multiple threads
+  62  * -Djdk.test.threads=&lt;n&gt; to specify the number of threads.
+  63  */
+  64 public class VerifyJimage {
+  65     private static final String MODULE_INFO = "module-info.class";
+  66     private static final Deque&lt;String&gt; failed = new ConcurrentLinkedDeque&lt;&gt;();
+  67 
+  68     public static void main(String... args) throws Exception {
+  69 
+  70         String home = System.getProperty("java.home");
+  71         Path bootimagePath = Paths.get(home, "lib", "modules");
+  72         if (Files.notExists(bootimagePath)) {
+  73              System.out.println("Test skipped, not an images build");
+  74              return;
+  75         }
+  76 
+  77         long start = System.nanoTime();
+  78         int numThreads = Integer.getInteger("jdk.test.threads", 1);
+  79         JImageReader reader = newJImageReader();
+  80         VerifyJimage verify = new VerifyJimage(reader, numThreads);
+  81         if (args.length == 0) {
+  82             // load classes from jimage
+  83             verify.loadClasses();
+  84         } else {
+  85             Path dir = Paths.get(args[0]);
+  86             if (Files.notExists(dir) || !Files.isDirectory(dir)) {
+  87                 throw new RuntimeException("Invalid argument: " + dir);
+  88             }
+  89             verify.compareExplodedModules(dir);
+  90         }
+  91         verify.waitForCompletion();
+  92         long end = System.nanoTime();
+  93         int entries = reader.entries();
+  94         System.out.format("%d entries %d files verified: %d ms %d errors%n",
+  95                           entries, verify.count.get(),
+  96                           TimeUnit.NANOSECONDS.toMillis(end - start), failed.size());
+  97         for (String f : failed) {
+  98             System.err.println(f);
+  99         }
+ 100         if (!failed.isEmpty()) {
+ 101             throw new AssertionError("Test failed");
+ 102         }
+ 103     }
+ 104 
+ 105     private final AtomicInteger count = new AtomicInteger(0);
+ 106     private final JImageReader reader;
+ 107     private final ExecutorService pool;
+ 108 
+ 109     VerifyJimage(JImageReader reader, int numThreads) {
+ 110         this.reader = reader;
+ 111         this.pool = Executors.newFixedThreadPool(numThreads);
+ 112     }
+ 113 
+ 114     private void waitForCompletion() throws InterruptedException {
+ 115         pool.shutdown();
+ 116         pool.awaitTermination(20, TimeUnit.SECONDS);
+ 117     }
+ 118 
+ 119     private void compareExplodedModules(Path dir) throws IOException {
+ 120         System.out.println("comparing jimage with " + dir);
+ 121 
+ 122         try (DirectoryStream&lt;Path&gt; stream = Files.newDirectoryStream(dir)) {
+ 123             for (Path mdir : stream) {
+ 124                 if (Files.isDirectory(mdir)) {
+ 125                     pool.execute(new Runnable() {
+ 126                         @Override
+ 127                         public void run() {
+ 128                             try {
+ 129                                 Files.find(mdir, Integer.MAX_VALUE, (Path p, BasicFileAttributes attr)
+ 130                                            -&gt; !Files.isDirectory(p) &amp;&amp;
+ 131                                               !mdir.relativize(p).toString().startsWith("_") &amp;&amp;
+ 132                                               !p.getFileName().toString().equals("MANIFEST.MF"))
+ 133                                      .forEach(p -&gt; compare(mdir, p, reader));
+ 134                             } catch (IOException e) {
+ 135                                 throw new UncheckedIOException(e);
+ 136                             }
+ 137                         }
+ 138                     });
+ 139                 }
+ 140             }
+ 141         }
+ 142     }
+ 143 
+ 144     private final List&lt;String&gt; BOOT_RESOURCES = Arrays.asList(
+ 145         "java.base/META-INF/services/java.nio.file.spi.FileSystemProvider"
+ 146     );
+ 147     private final List&lt;String&gt; EXT_RESOURCES = Arrays.asList(
+ 148         "jdk.zipfs/META-INF/services/java.nio.file.spi.FileSystemProvider"
+ 149     );
+ 150     private final List&lt;String&gt; APP_RESOURCES = Arrays.asList(
+ 151         "jdk.hotspot.agent/META-INF/services/com.sun.jdi.connect.Connector",
+ 152         "jdk.jdi/META-INF/services/com.sun.jdi.connect.Connector"
+ 153     );
+ 154 
+ 155     private void compare(Path mdir, Path p, JImageReader reader) {
+ 156         String entry = p.getFileName().toString().equals(MODULE_INFO)
+ 157                 ? mdir.getFileName().toString() + "/" + MODULE_INFO
+ 158                 : mdir.relativize(p).toString().replace(File.separatorChar, '/');
+ 159 
+ 160         count.incrementAndGet();
+ 161         String file = mdir.getFileName().toString() + "/" + entry;
+ 162         if (APP_RESOURCES.contains(file)) {
+ 163             // skip until the service config file is merged
+ 164             System.out.println("Skipped " + file);
+ 165             return;
+ 166         }
+ 167 
+ 168         if (reader.findLocation(entry) != null) {
+ 169             reader.compare(entry, p);
+ 170         }
+ 171     }
+ 172 
+ 173     private void loadClasses() {
+ 174         ClassLoader loader = ClassLoader.getSystemClassLoader();
+ 175         Stream.of(reader.getEntryNames())
+ 176               .filter(this::accept)
+ 177               .map(this::toClassName)
+ 178               .forEach(cn -&gt; {
+ 179                   count.incrementAndGet();
+ 180                   try {
+ 181                       System.out.println("Loading " + cn);
+ 182                       Class.forName(cn, false, loader);
+ 183                   } catch (VerifyError ve) {
+ 184                       System.err.println("VerifyError for " + cn);
+ 185                       failed.add(reader.imageName() + ": " + cn + " not verified: " + ve.getMessage());
+ 186                   } catch (ClassNotFoundException e) {
+ 187                       failed.add(reader.imageName() + ": " + cn + " not found");
+ 188                   }
+ 189               });
+ 190     }
+ 191 
+ 192     private String toClassName(String entry) {
+ 193         int index = entry.indexOf('/', 1);
+ 194         return entry.substring(index + 1, entry.length())
+ 195                     .replaceAll("\\.class$", "").replace('/', '.');
+ 196     }
+ 197 
+ 198     private static Set&lt;String&gt; DEPLOY_MODULES =
+ 199         Set.of("javafx.deploy", "jdk.deploy", "jdk.plugin", "jdk.javaws");
+ 200 
+ 201     private boolean accept(String entry) {
+ 202         int index = entry.indexOf('/', 1);
+ 203         String mn = index &gt; 1 ? entry.substring(1, index) : "";
+ 204         // filter deployment modules
+ 205 
+ 206         if (mn.isEmpty() || DEPLOY_MODULES.contains(mn)) {
+ 207             return false;
+ 208         }
+ 209         return entry.endsWith(".class") &amp;&amp; !entry.endsWith(MODULE_INFO);
+ 210     }
+ 211 
+ 212     private static JImageReader newJImageReader() throws IOException {
+ 213         String home = System.getProperty("java.home");
+ 214         Path jimage = Paths.get(home, "lib", "modules");
+ 215         System.out.println("opened " + jimage);
+ 216         return new JImageReader(jimage);
+ 217     }
+ 218 
+ 219     static class JImageReader extends BasicImageReader {
+ 220         final Path jimage;
+ 221         JImageReader(Path p) throws IOException {
+ 222             super(p);
+ 223             this.jimage = p;
+ 224         }
+ 225 
+ 226         String imageName() {
+ 227             return jimage.getFileName().toString();
+ 228         }
+ 229 
+ 230         int entries() {
+ 231             return getHeader().getTableLength();
+ 232         }
+ 233 
+ 234         void compare(String entry, Path p) {
+ 235             try {
+ 236                 byte[] bytes = Files.readAllBytes(p);
+ 237                 byte[] imagebytes = getResource(entry);
+ 238                 if (!Arrays.equals(bytes, imagebytes)) {
+ 239                     failed.add(imageName() + ": bytes differs than " + p.toString());
+ 240                 }
+ 241             } catch (IOException e) {
+ 242                 throw new UncheckedIOException(e);
+ 243             }
+ 244         }
+ 245     }
+ 246 }
+</pre></body></html>

@@ -1,0 +1,150 @@
+--- old/make/launcher/Launcher-jdk.aot.gmk	2017-04-28 10:29:14.000000000 +0200
++++ new/make/launcher/Launcher-jdk.aot.gmk	2017-04-28 10:29:14.000000000 +0200
+@@ -25,9 +25,25 @@
+ 
+ include LauncherCommon.gmk
+ 
++# The JVMCI exports are needed since JVMCI is normally dynamically exported
++# (see jdk.vm.ci.services.internal.ReflectionAccessJDK::openJVMCITo).
++
+ $(eval $(call SetupBuildLauncher, jaotc, \
+     MAIN_CLASS := jdk.tools.jaotc.Main, \
+     JAVA_ARGS := -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.aarch64=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.amd64=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.code=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.code.site=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.code.stack=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.common=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.hotspot=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.hotspot.aarch64=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.hotspot.amd64=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.hotspot.sparc=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.meta=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.runtime=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
++        --add-exports=jdk.internal.vm.ci/jdk.vm.ci.sparc=$(call CommaList, jdk.internal.vm.compiler  jdk.aot) \
+         -XX:+UseAOT \
+         -Djvmci.UseProfilingInformation=false \
+         -Dgraal.UseExceptionProbability=false \
+--- old/src/java.base/share/classes/jdk/internal/misc/VM.java	2017-04-28 10:29:15.000000000 +0200
++++ new/src/java.base/share/classes/jdk/internal/misc/VM.java	2017-04-28 10:29:15.000000000 +0200
+@@ -26,7 +26,10 @@
+ package jdk.internal.misc;
+ 
+ import static java.lang.Thread.State.*;
++import java.util.Map;
++import java.util.HashMap;
+ import java.util.Properties;
++import java.util.Collections;
+ 
+ public class VM {
+ 
+@@ -132,25 +135,33 @@
+      * Returns the system property of the specified key saved at
+      * system initialization time.  This method should only be used
+      * for the system properties that are not changed during runtime.
+-     * It accesses a private copy of the system properties so
+-     * that user's locking of the system properties object will not
+-     * cause the library to deadlock.
+      *
+      * Note that the saved system properties do not include
+-     * the ones set by sun.misc.Version.init().
+-     *
++     * the ones set by java.lang.VersionProps.init().
+      */
+     public static String getSavedProperty(String key) {
+-        if (savedProps.isEmpty())
+-            throw new IllegalStateException("Should be non-empty if initialized");
++        if (savedProps == null)
++            throw new IllegalStateException("Not yet initialized");
++
++        return savedProps.get(key);
++    }
++
++    /**
++     * Gets an unmodifiable view of the system properties saved at system
++     * initialization time. This method should only be used
++     * for the system properties that are not changed during runtime.
++     *
++     * Note that the saved system properties do not include
++     * the ones set by java.lang.VersionProps.init().
++     */
++    public static Map<String, String> getSavedProperties() {
++        if (savedProps == null)
++            throw new IllegalStateException("Not yet initialized");
+ 
+-        return savedProps.getProperty(key);
++        return savedProps;
+     }
+ 
+-    // TODO: the Property Management needs to be refactored and
+-    // the appropriate prop keys need to be accessible to the
+-    // calling classes to avoid duplication of keys.
+-    private static final Properties savedProps = new Properties();
++    private static Map<String, String> savedProps;
+ 
+     // Save a private copy of the system properties and remove
+     // the system properties that are not intended for public access.
+@@ -160,7 +171,12 @@
+         if (initLevel() != 0)
+             throw new IllegalStateException("Wrong init level");
+ 
+-        savedProps.putAll(props);
++        @SuppressWarnings({"rawtypes", "unchecked"})
++        Map<String, String> sp =
++            Map.ofEntries(props.entrySet().toArray(new Map.Entry[0]));
++        // only main thread is running at this time, so savedProps and
++        // its content will be correctly published to threads started later
++        savedProps = sp;
+ 
+         // Set the maximum amount of direct memory.  This value is controlled
+         // by the vm option -XX:MaxDirectMemorySize=<size>.
+--- old/src/java.base/unix/classes/module-info.java.extra	2017-04-28 10:29:16.000000000 +0200
++++ new/src/java.base/unix/classes/module-info.java.extra	2017-04-28 10:29:15.000000000 +0200
+@@ -23,14 +23,5 @@
+  * questions.
+  */
+ 
+-// jdk.internal.vm.compiler uses Unsafe and VM classes from jdk.internal.misc
+-exports jdk.internal.misc to jdk.internal.vm.compiler;
+-opens   jdk.internal.misc to jdk.internal.vm.compiler;
+-
+-// jdk.internal.vm.compiler uses com.sun.crypto.provider to generate crypto intrinsics
+-opens com.sun.crypto.provider to jdk.internal.vm.compiler;
+-
+-exports jdk.internal.module to jdk.internal.vm.compiler;
+-
+ // AOT uses jdk.internal.misc.Unsafe
+ exports jdk.internal.misc to jdk.aot;
+--- old/test/tools/jimage/JImageCliTest.java	2017-04-28 10:29:16.000000000 +0200
++++ new/test/tools/jimage/JImageCliTest.java	2017-04-28 10:29:16.000000000 +0200
+@@ -117,4 +117,3 @@
+     }
+ 
+ }
+-
+--- old/test/tools/jimage/VerifyJimage.java	2017-04-28 10:29:17.000000000 +0200
++++ new/test/tools/jimage/VerifyJimage.java	2017-04-28 10:29:17.000000000 +0200
+@@ -195,15 +195,19 @@
+                     .replaceAll("\\.class$", "").replace('/', '.');
+     }
+ 
+-    private static Set<String> DEPLOY_MODULES =
+-        Set.of("javafx.deploy", "jdk.deploy", "jdk.plugin", "jdk.javaws");
++    private static Set<String> EXCLUDED_MODULES =
++        Set.of("javafx.deploy", "jdk.deploy", "jdk.plugin", "jdk.javaws",
++            // All JVMCI packages other than jdk.vm.ci.services are dynamically
++            // exported to jdk.internal.vm.compiler and jdk.aot
++            "jdk.internal.vm.compiler", "jdk.aot"
++        );
+ 
+     private boolean accept(String entry) {
+         int index = entry.indexOf('/', 1);
+         String mn = index > 1 ? entry.substring(1, index) : "";
+         // filter deployment modules
+ 
+-        if (mn.isEmpty() || DEPLOY_MODULES.contains(mn)) {
++        if (mn.isEmpty() || EXCLUDED_MODULES.contains(mn)) {
+             return false;
+         }
+         return entry.endsWith(".class") && !entry.endsWith(MODULE_INFO);

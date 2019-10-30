@@ -1,0 +1,749 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>Old src/share/vm/gc_interface/collectedHeap.hpp</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2001, 2013, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #ifndef SHARE_VM_GC_INTERFACE_COLLECTEDHEAP_HPP
+  26 #define SHARE_VM_GC_INTERFACE_COLLECTEDHEAP_HPP
+  27 
+  28 #include "gc_interface/gcCause.hpp"
+  29 #include "gc_implementation/shared/gcWhen.hpp"
+  30 #include "memory/allocation.hpp"
+  31 #include "memory/barrierSet.hpp"
+  32 #include "runtime/handles.hpp"
+  33 #include "runtime/perfData.hpp"
+  34 #include "runtime/safepoint.hpp"
+  35 #include "utilities/events.hpp"
+  36 
+  37 // A "CollectedHeap" is an implementation of a java heap for HotSpot.  This
+  38 // is an abstract class: there may be many different kinds of heaps.  This
+  39 // class defines the functions that a heap must implement, and contains
+  40 // infrastructure common to all heaps.
+  41 
+  42 class AdaptiveSizePolicy;
+  43 class BarrierSet;
+  44 class CollectorPolicy;
+  45 class GCHeapSummary;
+  46 class GCTimer;
+  47 class GCTracer;
+  48 class MetaspaceSummary;
+  49 class Thread;
+  50 class ThreadClosure;
+  51 class VirtualSpaceSummary;
+  52 class nmethod;
+  53 
+  54 class GCMessage : public FormatBuffer&lt;1024&gt; {
+  55  public:
+  56   bool is_before;
+  57 
+  58  public:
+  59   GCMessage() {}
+  60 };
+  61 
+  62 class GCHeapLog : public EventLogBase&lt;GCMessage&gt; {
+  63  private:
+  64   void log_heap(bool before);
+  65 
+  66  public:
+  67   GCHeapLog() : EventLogBase&lt;GCMessage&gt;("GC Heap History") {}
+  68 
+  69   void log_heap_before() {
+  70     log_heap(true);
+  71   }
+  72   void log_heap_after() {
+  73     log_heap(false);
+  74   }
+  75 };
+  76 
+  77 //
+  78 // CollectedHeap
+  79 //   SharedHeap
+  80 //     GenCollectedHeap
+  81 //     G1CollectedHeap
+  82 //   ParallelScavengeHeap
+  83 //
+  84 class CollectedHeap : public CHeapObj&lt;mtInternal&gt; {
+  85   friend class VMStructs;
+  86   friend class IsGCActiveMark; // Block structured external access to _is_gc_active
+  87 
+  88 #ifdef ASSERT
+  89   static int       _fire_out_of_memory_count;
+  90 #endif
+  91 
+  92   // Used for filler objects (static, but initialized in ctor).
+  93   static size_t _filler_array_max_size;
+  94 
+  95   GCHeapLog* _gc_heap_log;
+  96 
+  97   // Used in support of ReduceInitialCardMarks; only consulted if COMPILER2 is being used
+  98   bool _defer_initial_card_mark;
+  99 
+ 100  protected:
+ 101   MemRegion _reserved;
+ 102   BarrierSet* _barrier_set;
+ 103   bool _is_gc_active;
+ 104   uint _n_par_threads;
+ 105 
+ 106   unsigned int _total_collections;          // ... started
+ 107   unsigned int _total_full_collections;     // ... started
+ 108   NOT_PRODUCT(volatile size_t _promotion_failure_alot_count;)
+ 109   NOT_PRODUCT(volatile size_t _promotion_failure_alot_gc_number;)
+ 110 
+ 111   // Reason for current garbage collection.  Should be set to
+ 112   // a value reflecting no collection between collections.
+ 113   GCCause::Cause _gc_cause;
+ 114   GCCause::Cause _gc_lastcause;
+ 115   PerfStringVariable* _perf_gc_cause;
+ 116   PerfStringVariable* _perf_gc_lastcause;
+ 117 
+ 118   // Constructor
+ 119   CollectedHeap();
+ 120 
+ 121   // Do common initializations that must follow instance construction,
+ 122   // for example, those needing virtual calls.
+ 123   // This code could perhaps be moved into initialize() but would
+ 124   // be slightly more awkward because we want the latter to be a
+ 125   // pure virtual.
+ 126   void pre_initialize();
+ 127 
+ 128   // Create a new tlab. All TLAB allocations must go through this.
+ 129   virtual HeapWord* allocate_new_tlab(size_t size);
+ 130 
+ 131   // Accumulate statistics on all tlabs.
+ 132   virtual void accumulate_statistics_all_tlabs();
+ 133 
+ 134   // Reinitialize tlabs before resuming mutators.
+ 135   virtual void resize_all_tlabs();
+ 136 
+ 137   // Allocate from the current thread's TLAB, with broken-out slow path.
+ 138   inline static HeapWord* allocate_from_tlab(KlassHandle klass, Thread* thread, size_t size);
+ 139   static HeapWord* allocate_from_tlab_slow(KlassHandle klass, Thread* thread, size_t size);
+ 140 
+ 141   // Allocate an uninitialized block of the given size, or returns NULL if
+ 142   // this is impossible.
+ 143   inline static HeapWord* common_mem_allocate_noinit(KlassHandle klass, size_t size, TRAPS);
+ 144 
+ 145   // Like allocate_init, but the block returned by a successful allocation
+ 146   // is guaranteed initialized to zeros.
+ 147   inline static HeapWord* common_mem_allocate_init(KlassHandle klass, size_t size, TRAPS);
+ 148 
+ 149   // Helper functions for (VM) allocation.
+ 150   inline static void post_allocation_setup_common(KlassHandle klass, HeapWord* obj);
+ 151   inline static void post_allocation_setup_no_klass_install(KlassHandle klass,
+ 152                                                             HeapWord* objPtr);
+ 153 
+ 154   inline static void post_allocation_setup_obj(KlassHandle klass, HeapWord* obj);
+ 155 
+ 156   inline static void post_allocation_setup_array(KlassHandle klass,
+ 157                                                  HeapWord* obj, int length);
+ 158 
+ 159   // Clears an allocated object.
+ 160   inline static void init_obj(HeapWord* obj, size_t size);
+ 161 
+ 162   // Filler object utilities.
+ 163   static inline size_t filler_array_hdr_size();
+ 164   static inline size_t filler_array_min_size();
+ 165 
+ 166   DEBUG_ONLY(static void fill_args_check(HeapWord* start, size_t words);)
+ 167   DEBUG_ONLY(static void zap_filler_array(HeapWord* start, size_t words, bool zap = true);)
+ 168 
+ 169   // Fill with a single array; caller must ensure filler_array_min_size() &lt;=
+ 170   // words &lt;= filler_array_max_size().
+ 171   static inline void fill_with_array(HeapWord* start, size_t words, bool zap = true);
+ 172 
+ 173   // Fill with a single object (either an int array or a java.lang.Object).
+ 174   static inline void fill_with_object_impl(HeapWord* start, size_t words, bool zap = true);
+ 175 
+ 176   virtual void trace_heap(GCWhen::Type when, GCTracer* tracer);
+ 177 
+ 178   // Verification functions
+ 179   virtual void check_for_bad_heap_word_value(HeapWord* addr, size_t size)
+ 180     PRODUCT_RETURN;
+ 181   virtual void check_for_non_bad_heap_word_value(HeapWord* addr, size_t size)
+ 182     PRODUCT_RETURN;
+ 183   debug_only(static void check_for_valid_allocation_state();)
+ 184 
+ 185  public:
+ 186   enum Name {
+ 187     Abstract,
+ 188     SharedHeap,
+ 189     GenCollectedHeap,
+ 190     ParallelScavengeHeap,
+ 191     G1CollectedHeap
+ 192   };
+ 193 
+ 194   static inline size_t filler_array_max_size() {
+ 195     return _filler_array_max_size;
+ 196   }
+ 197 
+ 198   virtual CollectedHeap::Name kind() const { return CollectedHeap::Abstract; }
+ 199 
+ 200   /**
+ 201    * Returns JNI error code JNI_ENOMEM if memory could not be allocated,
+ 202    * and JNI_OK on success.
+ 203    */
+ 204   virtual jint initialize() = 0;
+ 205 
+ 206   // In many heaps, there will be a need to perform some initialization activities
+ 207   // after the Universe is fully formed, but before general heap allocation is allowed.
+ 208   // This is the correct place to place such initialization methods.
+ 209   virtual void post_initialize() = 0;
+ 210 
+ 211   MemRegion reserved_region() const { return _reserved; }
+ 212   address base() const { return (address)reserved_region().start(); }
+ 213 
+ 214   virtual size_t capacity() const = 0;
+ 215   virtual size_t used() const = 0;
+ 216 
+ 217   // Return "true" if the part of the heap that allocates Java
+ 218   // objects has reached the maximal committed limit that it can
+ 219   // reach, without a garbage collection.
+ 220   virtual bool is_maximal_no_gc() const = 0;
+ 221 
+ 222   // Support for java.lang.Runtime.maxMemory():  return the maximum amount of
+ 223   // memory that the vm could make available for storing 'normal' java objects.
+ 224   // This is based on the reserved address space, but should not include space
+ 225   // that the vm uses internally for bookkeeping or temporary storage
+ 226   // (e.g., in the case of the young gen, one of the survivor
+ 227   // spaces).
+ 228   virtual size_t max_capacity() const = 0;
+ 229 
+ 230   // Returns "TRUE" if "p" points into the reserved area of the heap.
+ 231   bool is_in_reserved(const void* p) const {
+ 232     return _reserved.contains(p);
+ 233   }
+ 234 
+ 235   bool is_in_reserved_or_null(const void* p) const {
+ 236     return p == NULL || is_in_reserved(p);
+ 237   }
+ 238 
+ 239   // Returns "TRUE" iff "p" points into the committed areas of the heap.
+ 240   // Since this method can be expensive in general, we restrict its
+ 241   // use to assertion checking only.
+ 242   virtual bool is_in(const void* p) const = 0;
+ 243 
+ 244   bool is_in_or_null(const void* p) const {
+ 245     return p == NULL || is_in(p);
+ 246   }
+ 247 
+ 248   bool is_in_place(Metadata** p) {
+ 249     return !Universe::heap()-&gt;is_in(p);
+ 250   }
+ 251   bool is_in_place(oop* p) { return Universe::heap()-&gt;is_in(p); }
+ 252   bool is_in_place(narrowOop* p) {
+ 253     oop o = oopDesc::load_decode_heap_oop_not_null(p);
+ 254     return Universe::heap()-&gt;is_in((const void*)o);
+ 255   }
+ 256 
+ 257   // Let's define some terms: a "closed" subset of a heap is one that
+ 258   //
+ 259   // 1) contains all currently-allocated objects, and
+ 260   //
+ 261   // 2) is closed under reference: no object in the closed subset
+ 262   //    references one outside the closed subset.
+ 263   //
+ 264   // Membership in a heap's closed subset is useful for assertions.
+ 265   // Clearly, the entire heap is a closed subset, so the default
+ 266   // implementation is to use "is_in_reserved".  But this may not be too
+ 267   // liberal to perform useful checking.  Also, the "is_in" predicate
+ 268   // defines a closed subset, but may be too expensive, since "is_in"
+ 269   // verifies that its argument points to an object head.  The
+ 270   // "closed_subset" method allows a heap to define an intermediate
+ 271   // predicate, allowing more precise checking than "is_in_reserved" at
+ 272   // lower cost than "is_in."
+ 273 
+ 274   // One important case is a heap composed of disjoint contiguous spaces,
+ 275   // such as the Garbage-First collector.  Such heaps have a convenient
+ 276   // closed subset consisting of the allocated portions of those
+ 277   // contiguous spaces.
+ 278 
+ 279   // Return "TRUE" iff the given pointer points into the heap's defined
+ 280   // closed subset (which defaults to the entire heap).
+ 281   virtual bool is_in_closed_subset(const void* p) const {
+ 282     return is_in_reserved(p);
+ 283   }
+ 284 
+ 285   bool is_in_closed_subset_or_null(const void* p) const {
+ 286     return p == NULL || is_in_closed_subset(p);
+ 287   }
+ 288 
+ 289 #ifdef ASSERT
+ 290   // Returns true if "p" is in the part of the
+ 291   // heap being collected.
+ 292   virtual bool is_in_partial_collection(const void *p) = 0;
+ 293 #endif
+ 294 
+ 295   // An object is scavengable if its location may move during a scavenge.
+ 296   // (A scavenge is a GC which is not a full GC.)
+ 297   virtual bool is_scavengable(const void *p) = 0;
+ 298 
+ 299   void set_gc_cause(GCCause::Cause v) {
+ 300      if (UsePerfData) {
+ 301        _gc_lastcause = _gc_cause;
+ 302        _perf_gc_lastcause-&gt;set_value(GCCause::to_string(_gc_lastcause));
+ 303        _perf_gc_cause-&gt;set_value(GCCause::to_string(v));
+ 304      }
+ 305     _gc_cause = v;
+ 306   }
+ 307   GCCause::Cause gc_cause() { return _gc_cause; }
+ 308 
+ 309   // Number of threads currently working on GC tasks.
+ 310   uint n_par_threads() { return _n_par_threads; }
+ 311 
+ 312   // May be overridden to set additional parallelism.
+ 313   virtual void set_par_threads(uint t) { _n_par_threads = t; };
+ 314 
+ 315   // Allocate and initialize instances of Class
+ 316   static oop Class_obj_allocate(KlassHandle klass, int size, KlassHandle real_klass, TRAPS);
+ 317 
+ 318   // General obj/array allocation facilities.
+ 319   inline static oop obj_allocate(KlassHandle klass, int size, TRAPS);
+ 320   inline static oop array_allocate(KlassHandle klass, int size, int length, TRAPS);
+ 321   inline static oop array_allocate_nozero(KlassHandle klass, int size, int length, TRAPS);
+ 322 
+ 323   inline static void post_allocation_install_obj_klass(KlassHandle klass,
+ 324                                                        oop obj);
+ 325 
+ 326   // Raw memory allocation facilities
+ 327   // The obj and array allocate methods are covers for these methods.
+ 328   // mem_allocate() should never be
+ 329   // called to allocate TLABs, only individual objects.
+ 330   virtual HeapWord* mem_allocate(size_t size,
+ 331                                  bool* gc_overhead_limit_was_exceeded) = 0;
+ 332 
+ 333   // Utilities for turning raw memory into filler objects.
+ 334   //
+ 335   // min_fill_size() is the smallest region that can be filled.
+ 336   // fill_with_objects() can fill arbitrary-sized regions of the heap using
+ 337   // multiple objects.  fill_with_object() is for regions known to be smaller
+ 338   // than the largest array of integers; it uses a single object to fill the
+ 339   // region and has slightly less overhead.
+ 340   static size_t min_fill_size() {
+ 341     return size_t(align_object_size(oopDesc::header_size()));
+ 342   }
+ 343 
+ 344   static void fill_with_objects(HeapWord* start, size_t words, bool zap = true);
+ 345 
+ 346   static void fill_with_object(HeapWord* start, size_t words, bool zap = true);
+ 347   static void fill_with_object(MemRegion region, bool zap = true) {
+ 348     fill_with_object(region.start(), region.word_size(), zap);
+ 349   }
+ 350   static void fill_with_object(HeapWord* start, HeapWord* end, bool zap = true) {
+ 351     fill_with_object(start, pointer_delta(end, start), zap);
+ 352   }
+ 353 
+ 354   // Some heaps may offer a contiguous region for shared non-blocking
+ 355   // allocation, via inlined code (by exporting the address of the top and
+ 356   // end fields defining the extent of the contiguous allocation region.)
+ 357 
+ 358   // This function returns "true" iff the heap supports this kind of
+ 359   // allocation.  (Default is "no".)
+ 360   virtual bool supports_inline_contig_alloc() const {
+ 361     return false;
+ 362   }
+ 363   // These functions return the addresses of the fields that define the
+ 364   // boundaries of the contiguous allocation area.  (These fields should be
+ 365   // physically near to one another.)
+ 366   virtual HeapWord** top_addr() const {
+ 367     guarantee(false, "inline contiguous allocation not supported");
+ 368     return NULL;
+ 369   }
+ 370   virtual HeapWord** end_addr() const {
+ 371     guarantee(false, "inline contiguous allocation not supported");
+ 372     return NULL;
+ 373   }
+ 374 
+ 375   // Some heaps may be in an unparseable state at certain times between
+ 376   // collections. This may be necessary for efficient implementation of
+ 377   // certain allocation-related activities. Calling this function before
+ 378   // attempting to parse a heap ensures that the heap is in a parsable
+ 379   // state (provided other concurrent activity does not introduce
+ 380   // unparsability). It is normally expected, therefore, that this
+ 381   // method is invoked with the world stopped.
+ 382   // NOTE: if you override this method, make sure you call
+ 383   // super::ensure_parsability so that the non-generational
+ 384   // part of the work gets done. See implementation of
+ 385   // CollectedHeap::ensure_parsability and, for instance,
+ 386   // that of GenCollectedHeap::ensure_parsability().
+ 387   // The argument "retire_tlabs" controls whether existing TLABs
+ 388   // are merely filled or also retired, thus preventing further
+ 389   // allocation from them and necessitating allocation of new TLABs.
+ 390   virtual void ensure_parsability(bool retire_tlabs);
+ 391 
+ 392   // Return an estimate of the maximum allocation that could be performed
+ 393   // without triggering any collection or expansion activity.  In a
+ 394   // generational collector, for example, this is probably the largest
+ 395   // allocation that could be supported (without expansion) in the youngest
+ 396   // generation.  It is "unsafe" because no locks are taken; the result
+ 397   // should be treated as an approximation, not a guarantee, for use in
+ 398   // heuristic resizing decisions.
+ 399   virtual size_t unsafe_max_alloc() = 0;
+ 400 
+ 401   // Section on thread-local allocation buffers (TLABs)
+ 402   // If the heap supports thread-local allocation buffers, it should override
+ 403   // the following methods:
+ 404   // Returns "true" iff the heap supports thread-local allocation buffers.
+ 405   // The default is "no".
+ 406   virtual bool supports_tlab_allocation() const {
+ 407     return false;
+ 408   }
+ 409   // The amount of space available for thread-local allocation buffers.
+ 410   virtual size_t tlab_capacity(Thread *thr) const {
+ 411     guarantee(false, "thread-local allocation buffers not supported");
+ 412     return 0;
+ 413   }
+ 414   // An estimate of the maximum allocation that could be performed
+ 415   // for thread-local allocation buffers without triggering any
+ 416   // collection or expansion activity.
+ 417   virtual size_t unsafe_max_tlab_alloc(Thread *thr) const {
+ 418     guarantee(false, "thread-local allocation buffers not supported");
+ 419     return 0;
+ 420   }
+ 421 
+ 422   // Can a compiler initialize a new object without store barriers?
+ 423   // This permission only extends from the creation of a new object
+ 424   // via a TLAB up to the first subsequent safepoint. If such permission
+ 425   // is granted for this heap type, the compiler promises to call
+ 426   // defer_store_barrier() below on any slow path allocation of
+ 427   // a new object for which such initializing store barriers will
+ 428   // have been elided.
+ 429   virtual bool can_elide_tlab_store_barriers() const = 0;
+ 430 
+ 431   // If a compiler is eliding store barriers for TLAB-allocated objects,
+ 432   // there is probably a corresponding slow path which can produce
+ 433   // an object allocated anywhere.  The compiler's runtime support
+ 434   // promises to call this function on such a slow-path-allocated
+ 435   // object before performing initializations that have elided
+ 436   // store barriers. Returns new_obj, or maybe a safer copy thereof.
+ 437   virtual oop new_store_pre_barrier(JavaThread* thread, oop new_obj);
+ 438 
+ 439   // Answers whether an initializing store to a new object currently
+ 440   // allocated at the given address doesn't need a store
+ 441   // barrier. Returns "true" if it doesn't need an initializing
+ 442   // store barrier; answers "false" if it does.
+ 443   virtual bool can_elide_initializing_store_barrier(oop new_obj) = 0;
+ 444 
+ 445   // If a compiler is eliding store barriers for TLAB-allocated objects,
+ 446   // we will be informed of a slow-path allocation by a call
+ 447   // to new_store_pre_barrier() above. Such a call precedes the
+ 448   // initialization of the object itself, and no post-store-barriers will
+ 449   // be issued. Some heap types require that the barrier strictly follows
+ 450   // the initializing stores. (This is currently implemented by deferring the
+ 451   // barrier until the next slow-path allocation or gc-related safepoint.)
+ 452   // This interface answers whether a particular heap type needs the card
+ 453   // mark to be thus strictly sequenced after the stores.
+ 454   virtual bool card_mark_must_follow_store() const = 0;
+ 455 
+ 456   // If the CollectedHeap was asked to defer a store barrier above,
+ 457   // this informs it to flush such a deferred store barrier to the
+ 458   // remembered set.
+ 459   virtual void flush_deferred_store_barrier(JavaThread* thread);
+ 460 
+ 461   // Does this heap support heap inspection (+PrintClassHistogram?)
+ 462   virtual bool supports_heap_inspection() const = 0;
+ 463 
+ 464   // Perform a collection of the heap; intended for use in implementing
+ 465   // "System.gc".  This probably implies as full a collection as the
+ 466   // "CollectedHeap" supports.
+ 467   virtual void collect(GCCause::Cause cause) = 0;
+ 468 
+ 469   // Perform a full collection
+ 470   virtual void do_full_collection(bool clear_all_soft_refs) = 0;
+ 471 
+ 472   // This interface assumes that it's being called by the
+ 473   // vm thread. It collects the heap assuming that the
+ 474   // heap lock is already held and that we are executing in
+ 475   // the context of the vm thread.
+ 476   virtual void collect_as_vm_thread(GCCause::Cause cause);
+ 477 
+ 478   // Returns the barrier set for this heap
+ 479   BarrierSet* barrier_set() { return _barrier_set; }
+ 480 
+ 481   // Returns "true" iff there is a stop-world GC in progress.  (I assume
+ 482   // that it should answer "false" for the concurrent part of a concurrent
+ 483   // collector -- dld).
+ 484   bool is_gc_active() const { return _is_gc_active; }
+ 485 
+ 486   // Total number of GC collections (started)
+ 487   unsigned int total_collections() const { return _total_collections; }
+ 488   unsigned int total_full_collections() const { return _total_full_collections;}
+ 489 
+ 490   // Increment total number of GC collections (started)
+ 491   // Should be protected but used by PSMarkSweep - cleanup for 1.4.2
+ 492   void increment_total_collections(bool full = false) {
+ 493     _total_collections++;
+ 494     if (full) {
+ 495       increment_total_full_collections();
+ 496     }
+ 497   }
+ 498 
+ 499   void increment_total_full_collections() { _total_full_collections++; }
+ 500 
+ 501   // Return the AdaptiveSizePolicy for the heap.
+ 502   virtual AdaptiveSizePolicy* size_policy() = 0;
+ 503 
+ 504   // Return the CollectorPolicy for the heap
+ 505   virtual CollectorPolicy* collector_policy() const = 0;
+ 506 
+ 507   void oop_iterate_no_header(OopClosure* cl);
+ 508 
+ 509   // Iterate over all the ref-containing fields of all objects, calling
+ 510   // "cl.do_oop" on each.
+ 511   virtual void oop_iterate(ExtendedOopClosure* cl) = 0;
+ 512 
+ 513   // Iterate over all objects, calling "cl.do_object" on each.
+ 514   virtual void object_iterate(ObjectClosure* cl) = 0;
+ 515 
+ 516   // Similar to object_iterate() except iterates only
+ 517   // over live objects.
+ 518   virtual void safe_object_iterate(ObjectClosure* cl) = 0;
+ 519 
+ 520   // NOTE! There is no requirement that a collector implement these
+ 521   // functions.
+ 522   //
+ 523   // A CollectedHeap is divided into a dense sequence of "blocks"; that is,
+ 524   // each address in the (reserved) heap is a member of exactly
+ 525   // one block.  The defining characteristic of a block is that it is
+ 526   // possible to find its size, and thus to progress forward to the next
+ 527   // block.  (Blocks may be of different sizes.)  Thus, blocks may
+ 528   // represent Java objects, or they might be free blocks in a
+ 529   // free-list-based heap (or subheap), as long as the two kinds are
+ 530   // distinguishable and the size of each is determinable.
+ 531 
+ 532   // Returns the address of the start of the "block" that contains the
+ 533   // address "addr".  We say "blocks" instead of "object" since some heaps
+ 534   // may not pack objects densely; a chunk may either be an object or a
+ 535   // non-object.
+ 536   virtual HeapWord* block_start(const void* addr) const = 0;
+ 537 
+ 538   // Requires "addr" to be the start of a chunk, and returns its size.
+ 539   // "addr + size" is required to be the start of a new chunk, or the end
+ 540   // of the active area of the heap.
+ 541   virtual size_t block_size(const HeapWord* addr) const = 0;
+ 542 
+ 543   // Requires "addr" to be the start of a block, and returns "TRUE" iff
+ 544   // the block is an object.
+ 545   virtual bool block_is_obj(const HeapWord* addr) const = 0;
+ 546 
+ 547   // Returns the longest time (in ms) that has elapsed since the last
+ 548   // time that any part of the heap was examined by a garbage collection.
+ 549   virtual jlong millis_since_last_gc() = 0;
+ 550 
+ 551   // Perform any cleanup actions necessary before allowing a verification.
+ 552   virtual void prepare_for_verify() = 0;
+ 553 
+ 554   // Generate any dumps preceding or following a full gc
+ 555   void pre_full_gc_dump(GCTimer* timer);
+ 556   void post_full_gc_dump(GCTimer* timer);
+ 557 
+ 558   VirtualSpaceSummary create_heap_space_summary();
+ 559   GCHeapSummary create_heap_summary();
+ 560 
+ 561   MetaspaceSummary create_metaspace_summary();
+ 562 
+ 563   // Print heap information on the given outputStream.
+ 564   virtual void print_on(outputStream* st) const = 0;
+ 565   // The default behavior is to call print_on() on tty.
+ 566   virtual void print() const {
+ 567     print_on(tty);
+ 568   }
+ 569   // Print more detailed heap information on the given
+ 570   // outputStream. The default behavior is to call print_on(). It is
+ 571   // up to each subclass to override it and add any additional output
+ 572   // it needs.
+ 573   virtual void print_extended_on(outputStream* st) const {
+ 574     print_on(st);
+ 575   }
+ 576 
+ 577   virtual void print_on_error(outputStream* st) const {
+ 578     st-&gt;print_cr("Heap:");
+ 579     print_extended_on(st);
+ 580     st-&gt;cr();
+ 581 
+ 582     _barrier_set-&gt;print_on(st);
+ 583   }
+ 584 
+ 585   // Print all GC threads (other than the VM thread)
+ 586   // used by this heap.
+ 587   virtual void print_gc_threads_on(outputStream* st) const = 0;
+ 588   // The default behavior is to call print_gc_threads_on() on tty.
+ 589   void print_gc_threads() {
+ 590     print_gc_threads_on(tty);
+ 591   }
+ 592   // Iterator for all GC threads (other than VM thread)
+ 593   virtual void gc_threads_do(ThreadClosure* tc) const = 0;
+ 594 
+ 595   // Print any relevant tracing info that flags imply.
+ 596   // Default implementation does nothing.
+ 597   virtual void print_tracing_info() const = 0;
+ 598 
+ 599   void print_heap_before_gc();
+ 600   void print_heap_after_gc();
+ 601 
+ 602   // Registering and unregistering an nmethod (compiled code) with the heap.
+ 603   // Override with specific mechanism for each specialized heap type.
+ 604   virtual void register_nmethod(nmethod* nm);
+ 605   virtual void unregister_nmethod(nmethod* nm);
+ 606 
+ 607   void trace_heap_before_gc(GCTracer* gc_tracer);
+ 608   void trace_heap_after_gc(GCTracer* gc_tracer);
+ 609 
+ 610   // Heap verification
+ 611   virtual void verify(bool silent, VerifyOption option) = 0;
+ 612 
+ 613   // Non product verification and debugging.
+ 614 #ifndef PRODUCT
+ 615   // Support for PromotionFailureALot.  Return true if it's time to cause a
+ 616   // promotion failure.  The no-argument version uses
+ 617   // this-&gt;_promotion_failure_alot_count as the counter.
+ 618   inline bool promotion_should_fail(volatile size_t* count);
+ 619   inline bool promotion_should_fail();
+ 620 
+ 621   // Reset the PromotionFailureALot counters.  Should be called at the end of a
+ 622   // GC in which promotion failure occurred.
+ 623   inline void reset_promotion_should_fail(volatile size_t* count);
+ 624   inline void reset_promotion_should_fail();
+ 625 #endif  // #ifndef PRODUCT
+ 626 
+ 627 #ifdef ASSERT
+ 628   static int fired_fake_oom() {
+ 629     return (CIFireOOMAt &gt; 1 &amp;&amp; _fire_out_of_memory_count &gt;= CIFireOOMAt);
+ 630   }
+ 631 #endif
+ 632 
+ 633  public:
+ 634   // This is a convenience method that is used in cases where
+ 635   // the actual number of GC worker threads is not pertinent but
+ 636   // only whether there more than 0.  Use of this method helps
+ 637   // reduce the occurrence of ParallelGCThreads to uses where the
+ 638   // actual number may be germane.
+ 639   static bool use_parallel_gc_threads() { return ParallelGCThreads &gt; 0; }
+ 640 
+ 641   /////////////// Unit tests ///////////////
+ 642 
+ 643   NOT_PRODUCT(static void test_is_in();)
+ 644 };
+ 645 
+ 646 // Class to set and reset the GC cause for a CollectedHeap.
+ 647 
+ 648 class GCCauseSetter : StackObj {
+ 649   CollectedHeap* _heap;
+ 650   GCCause::Cause _previous_cause;
+ 651  public:
+ 652   GCCauseSetter(CollectedHeap* heap, GCCause::Cause cause) {
+ 653     assert(SafepointSynchronize::is_at_safepoint(),
+ 654            "This method manipulates heap state without locking");
+ 655     _heap = heap;
+ 656     _previous_cause = _heap-&gt;gc_cause();
+ 657     _heap-&gt;set_gc_cause(cause);
+ 658   }
+ 659 
+ 660   ~GCCauseSetter() {
+ 661     assert(SafepointSynchronize::is_at_safepoint(),
+ 662           "This method manipulates heap state without locking");
+ 663     _heap-&gt;set_gc_cause(_previous_cause);
+ 664   }
+ 665 };
+ 666 
+ 667 #endif // SHARE_VM_GC_INTERFACE_COLLECTEDHEAP_HPP
+</pre></body></html>

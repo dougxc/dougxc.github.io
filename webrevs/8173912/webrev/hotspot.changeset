@@ -1,0 +1,1740 @@
+# HG changeset patch
+# User dnsimon
+# Date 1486374311 -3600
+#      Mon Feb 06 10:45:11 2017 +0100
+# Node ID 6d46f6116bb0b95573377a9ae5387b0790e9610e
+# Parent  70083301f853d316501b7a192dfd5a8ff8f6bec6
+8173912: [JVMCI] fix memory overhead of JVMCI
+
+diff --git a/.mx.jvmci/mx_jvmci.py b/.mx.jvmci/mx_jvmci.py
+--- a/.mx.jvmci/mx_jvmci.py
++++ b/.mx.jvmci/mx_jvmci.py
+@@ -158,8 +158,8 @@
+         # JDK9 must be bootstrapped with a JDK8
+         compliance = mx.JavaCompliance('8')
+         jdk8 = mx.get_jdk(compliance.exactMatch, versionDescription=compliance.value)
+-        cmd = ['sh', 'configure', '--with-debug-level=' + _vm.debugLevel, '--with-native-debug-symbols=external', '--disable-precompiled-headers',
+-               '--with-jvm-variants=' + _vm.jvmVariant, '--disable-warnings-as-errors', '--with-boot-jdk=' + jdk8.home]
++        cmd = ['sh', 'configure', '--with-debug-level=' + _vm.debugLevel, '--with-native-debug-symbols=external', '--disable-precompiled-headers', '--with-jvm-features=graal',
++               '--with-jvm-variants=' + _vm.jvmVariant, '--disable-warnings-as-errors', '--with-boot-jdk=' + jdk8.home, '--with-jvm-features=graal']
+         mx.run(cmd, cwd=_jdkSourceRoot)
+     cmd = [mx.gmake_cmd(), 'CONF=' + _vm.debugLevel]
+     if mx.get_opts().verbose:
+@@ -176,66 +176,6 @@
+ 
+     mx.run(cmd, cwd=_jdkSourceRoot)
+ 
+-    if 'images' in cmd:
+-        jdkImageDir = join(jdkBuildDir, 'images', 'jdk')
+-
+-        # The OpenJDK build creates an empty cacerts file so copy one from
+-        # the default JDK (which is assumed to be an OracleJDK)
+-        srcCerts = join(mx.get_jdk(tag='default').home, 'lib', 'security', 'cacerts')
+-        if not exists(srcCerts):
+-            # Might be building with JDK8 which has cacerts under jre/
+-            srcCerts = join(mx.get_jdk(tag='default').home, 'jre', 'lib', 'security', 'cacerts')
+-        dstCerts = join(jdkImageDir, 'lib', 'security', 'cacerts')
+-        if srcCerts != dstCerts:
+-            shutil.copyfile(srcCerts, dstCerts)
+-
+-        _create_jdk_bundle(jdkBuildDir, _vm.debugLevel, jdkImageDir)
+-
+-def _get_jdk_bundle_arches():
+-    """
+-    Gets a list of names that will be the part of a JDK bundle's file name denoting the architecture.
+-    The first element in the list is the canonical name. Symlinks should be created for the
+-    remaining names.
+-    """
+-    cpu = mx.get_arch()
+-    if cpu == 'amd64':
+-        return ['x64', 'x86_64', 'amd64']
+-    elif cpu == 'sparcv9':
+-        return ['sparcv9']
+-    mx.abort('Unsupported JDK bundle arch: ' + cpu)
+-
+-def _create_jdk_bundle(jdkBuildDir, debugLevel, jdkImageDir):
+-    """
+-    Creates a tar.gz JDK archive, an accompanying tar.gz.sha1 file with its
+-    SHA1 signature plus symlinks to the archive for non-canonical architecture names.
+-    """
+-
+-    arches = _get_jdk_bundle_arches()
+-    jdkTgzPath = join(_suite.get_output_root(), 'jdk-bundles', 'jdk9-{}-{}-{}.tar.gz'.format(debugLevel, _get_openjdk_os(), arches[0]))
+-    with mx.Archiver(jdkTgzPath, kind='tgz') as arc:
+-        mx.log('Creating ' + jdkTgzPath)
+-        for root, _, filenames in os.walk(jdkImageDir):
+-            for name in filenames:
+-                f = join(root, name)
+-                arcname = 'jdk1.9.0/' + os.path.relpath(f, jdkImageDir)
+-                arc.zf.add(name=f, arcname=arcname, recursive=False)
+-
+-    with open(jdkTgzPath + '.sha1', 'w') as fp:
+-        mx.log('Creating ' + jdkTgzPath + '.sha1')
+-        fp.write(mx.sha1OfFile(jdkTgzPath))
+-
+-    def _create_link(source, link_name):
+-        if exists(link_name):
+-            os.remove(link_name)
+-        mx.log('Creating ' + link_name + ' -> ' + source)
+-        os.symlink(source, link_name)
+-
+-    for arch in arches[1:]:
+-        link_name = join(_suite.get_output_root(), 'jdk-bundles', 'jdk9-{}-{}-{}.tar.gz'.format(debugLevel, _get_openjdk_os(), arch))
+-        jdkTgzName = os.path.basename(jdkTgzPath)
+-        _create_link(jdkTgzName, link_name)
+-        _create_link(jdkTgzName + '.sha1', link_name + '.sha1')
+-
+ def _runmultimake(args):
+     """run the JDK make process for one or more configurations"""
+ 
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java
+@@ -278,8 +278,10 @@
+      * {@code info} are:
+      *
+      * <pre>
+-     *     [(int) flags,   // only valid if field is resolved
+-     *      (int) offset]  // only valid if field is resolved
++     *     [ flags,  // fieldDescriptor::access_flags()
++     *       offset, // fieldDescriptor::offset()
++     *       index   // fieldDescriptor::index()
++     *     ]
+      * </pre>
+      *
+      * The behavior of this method is undefined if {@code cpi} does not denote a
+@@ -288,7 +290,7 @@
+      * @param info an array in which the details of the field are returned
+      * @return the type defining the field if resolution is successful, 0 otherwise
+      */
+-    native HotSpotResolvedObjectTypeImpl resolveFieldInPool(HotSpotConstantPool constantPool, int cpi, HotSpotResolvedJavaMethodImpl method, byte opcode, long[] info);
++    native HotSpotResolvedObjectTypeImpl resolveFieldInPool(HotSpotConstantPool constantPool, int cpi, HotSpotResolvedJavaMethodImpl method, byte opcode, int[] info);
+ 
+     /**
+      * Converts {@code cpci} from an index into the cache for {@code constantPool} to an index
+@@ -631,4 +633,15 @@
+      * {@code lambdaForm} (which must be a {@code java.lang.invoke.LambdaForm} instance).
+      */
+     native void compileToBytecode(Object lambdaForm);
++
++    /**
++     * Gets the value of the VM flag named {@code name}.
++     *
++     * @param name name of a VM option
++     * @return {@code this} if the named VM option doesn't exist, a {@link String} or {@code null}
++     *         if its type is {@code ccstr} or {@code ccstrlist}, a {@link Double} if its type is
++     *         {@code double}, a {@link Boolean} if its type is {@code bool} otherwise a
++     *         {@link Long}
++     */
++    native Object getFlagValue(String name);
+ }
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantPool.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantPool.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantPool.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantPool.java
+@@ -298,7 +298,7 @@
+      * @param index constant pool index
+      * @return constant pool entry
+      */
+-    private long getEntryAt(int index) {
++    long getEntryAt(int index) {
+         assert checkBounds(index);
+         int offset = index * runtime().getHostJVMCIBackend().getTarget().wordSize;
+         return UNSAFE.getAddress(getMetaspaceConstantPool() + config().constantPoolSize + offset);
+@@ -605,8 +605,6 @@
+     public JavaField lookupField(int cpi, ResolvedJavaMethod method, int opcode) {
+         final int index = rawIndexToConstantPoolIndex(cpi, opcode);
+         final int nameAndTypeIndex = getNameAndTypeRefIndexAt(index);
+-        final int nameIndex = getNameRefIndexAt(nameAndTypeIndex);
+-        String name = lookupUtf8(nameIndex);
+         final int typeIndex = getSignatureRefIndexAt(nameAndTypeIndex);
+         String typeName = lookupUtf8(typeIndex);
+         JavaType type = runtime().lookupType(typeName, getHolder(), false);
+@@ -615,7 +613,7 @@
+         JavaType holder = lookupType(holderIndex, opcode);
+ 
+         if (holder instanceof HotSpotResolvedObjectTypeImpl) {
+-            long[] info = new long[2];
++            int[] info = new int[3];
+             HotSpotResolvedObjectTypeImpl resolvedHolder;
+             try {
+                 resolvedHolder = compilerToVM().resolveFieldInPool(this, index, (HotSpotResolvedJavaMethodImpl) method, (byte) opcode, info);
+@@ -624,14 +622,15 @@
+                  * If there was an exception resolving the field we give up and return an unresolved
+                  * field.
+                  */
+-                return new HotSpotUnresolvedField(holder, name, type);
++                return new HotSpotUnresolvedField(holder, lookupUtf8(getNameRefIndexAt(nameAndTypeIndex)), type);
+             }
+-            final int flags = (int) info[0];
+-            final long offset = info[1];
+-            HotSpotResolvedJavaField result = resolvedHolder.createField(name, type, offset, flags);
++            final int flags = info[0];
++            final int offset = info[1];
++            final int fieldIndex = info[2];
++            HotSpotResolvedJavaField result = resolvedHolder.createField(type, offset, flags, fieldIndex);
+             return result;
+         } else {
+-            return new HotSpotUnresolvedField(holder, name, type);
++            return new HotSpotUnresolvedField(holder, lookupUtf8(getNameRefIndexAt(nameAndTypeIndex)), type);
+         }
+     }
+ 
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java
+@@ -513,10 +513,6 @@
+         for (Map.Entry<String, Long> e : constants.entrySet()) {
+             printConfigLine(vm, "[vmconfig:constant] %s = %d[0x%x]%n", e.getKey(), e.getValue(), e.getValue());
+         }
+-        TreeMap<String, Long> typeSizes = new TreeMap<>(store.getTypeSizes());
+-        for (Map.Entry<String, Long> e : typeSizes.entrySet()) {
+-            printConfigLine(vm, "[vmconfig:type size] %s = %d%n", e.getKey(), e.getValue());
+-        }
+         for (VMIntrinsicMethod e : store.getIntrinsics()) {
+             printConfigLine(vm, "[vmconfig:intrinsic] %d = %s.%s %s%n", e.id, e.declaringClass, e.name, e.descriptor);
+         }
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethod.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethod.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethod.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethod.java
+@@ -59,23 +59,12 @@
+         return res;
+     }
+ 
+-    protected String name;
+-
+     /**
+      * Controls whether {@link #toString()} includes the qualified or simple name of the class in
+      * which the method is declared.
+      */
+     public static final boolean FULLY_QUALIFIED_METHOD_NAME = false;
+ 
+-    protected HotSpotMethod(String name) {
+-        this.name = name;
+-    }
+-
+-    @Override
+-    public final String getName() {
+-        return name;
+-    }
+-
+     @Override
+     public final String toString() {
+         char h = FULLY_QUALIFIED_METHOD_NAME ? 'H' : 'h';
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethodUnresolved.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethodUnresolved.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethodUnresolved.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethodUnresolved.java
+@@ -31,16 +31,22 @@
+  */
+ final class HotSpotMethodUnresolved extends HotSpotMethod {
+ 
++    private final String name;
+     private final Signature signature;
+     protected JavaType holder;
+ 
+     HotSpotMethodUnresolved(String name, Signature signature, JavaType holder) {
+-        super(name);
++        this.name = name;
+         this.holder = holder;
+         this.signature = signature;
+     }
+ 
+     @Override
++    public String getName() {
++        return name;
++    }
++
++    @Override
+     public Signature getSignature() {
+         return signature;
+     }
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaFieldImpl.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaFieldImpl.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaFieldImpl.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaFieldImpl.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2011, 2016, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2011, 2017, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -38,19 +38,20 @@
+ class HotSpotResolvedJavaFieldImpl implements HotSpotResolvedJavaField {
+ 
+     private final HotSpotResolvedObjectTypeImpl holder;
+-    private final String name;
+     private JavaType type;
+     private final int offset;
++    private final short index;
+ 
+     /**
+      * This value contains all flags as stored in the VM including internal ones.
+      */
+     private final int modifiers;
+ 
+-    HotSpotResolvedJavaFieldImpl(HotSpotResolvedObjectTypeImpl holder, String name, JavaType type, long offset, int modifiers) {
++    HotSpotResolvedJavaFieldImpl(HotSpotResolvedObjectTypeImpl holder, JavaType type, long offset, int modifiers, int index) {
+         this.holder = holder;
+-        this.name = name;
+         this.type = type;
++        this.index = (short) index;
++        assert this.index == index;
+         assert offset != -1;
+         assert offset == (int) offset : "offset larger than int";
+         this.offset = (int) offset;
+@@ -67,7 +68,6 @@
+             if (that.offset != this.offset || that.isStatic() != this.isStatic()) {
+                 return false;
+             } else if (this.holder.equals(that.holder)) {
+-                assert this.name.equals(that.name) && this.type.equals(that.type);
+                 return true;
+             }
+         }
+@@ -76,7 +76,7 @@
+ 
+     @Override
+     public int hashCode() {
+-        return name.hashCode();
++        return offset ^ modifiers;
+     }
+ 
+     @Override
+@@ -109,7 +109,7 @@
+ 
+     @Override
+     public String getName() {
+-        return name;
++        return holder.createFieldInfo(index).getName();
+     }
+ 
+     @Override
+@@ -178,18 +178,12 @@
+         return null;
+     }
+ 
+-    private Field toJavaCache;
+-
+     private Field toJava() {
+-        if (toJavaCache != null) {
+-            return toJavaCache;
+-        }
+-
+         if (isInternal()) {
+             return null;
+         }
+         try {
+-            return toJavaCache = holder.mirror().getDeclaredField(name);
++            return holder.mirror().getDeclaredField(getName());
+         } catch (NoSuchFieldException | NoClassDefFoundError e) {
+             return null;
+         }
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2011, 2016, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2011, 2017, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -76,6 +76,12 @@
+     private Executable toJavaCache;
+ 
+     /**
++     * Only 30% of {@link HotSpotResolvedJavaMethodImpl}s have their name accessed so compute it
++     * lazily and cache it.
++     */
++    private String nameCache;
++
++    /**
+      * Gets the holder of a HotSpot metaspace method native object.
+      *
+      * @param metaspaceMethod a metaspace Method object
+@@ -106,8 +112,6 @@
+     }
+ 
+     HotSpotResolvedJavaMethodImpl(HotSpotResolvedObjectTypeImpl holder, long metaspaceMethod) {
+-        // It would be too much work to get the method name here so we fill it in later.
+-        super(null);
+         this.metaspaceMethod = metaspaceMethod;
+         this.holder = holder;
+ 
+@@ -126,9 +130,6 @@
+             this.constantPool = compilerToVM().getConstantPool(this);
+         }
+ 
+-        final int nameIndex = UNSAFE.getChar(constMethod + config.constMethodNameIndexOffset);
+-        this.name = constantPool.lookupUtf8(nameIndex);
+-
+         final int signatureIndex = UNSAFE.getChar(constMethod + config.constMethodSignatureIndexOffset);
+         this.signature = (HotSpotSignature) constantPool.lookupSignature(signatureIndex);
+     }
+@@ -147,6 +148,15 @@
+     }
+ 
+     @Override
++    public String getName() {
++        if (nameCache == null) {
++            final int nameIndex = UNSAFE.getChar(getConstMethod() + config().constMethodNameIndexOffset);
++            nameCache = constantPool.lookupUtf8(nameIndex);
++        }
++        return nameCache;
++    }
++
++    @Override
+     public boolean equals(Object obj) {
+         if (this == obj) {
+             return true;
+@@ -326,12 +336,24 @@
+ 
+     @Override
+     public boolean isClassInitializer() {
+-        return "<clinit>".equals(name) && isStatic();
++        if (isStatic()) {
++            final int nameIndex = UNSAFE.getChar(getConstMethod() + config().constMethodNameIndexOffset);
++            long nameSymbol = constantPool.getEntryAt(nameIndex);
++            long clinitSymbol = config().symbolClinit;
++            return nameSymbol == clinitSymbol;
++        }
++        return false;
+     }
+ 
+     @Override
+     public boolean isConstructor() {
+-        return "<init>".equals(name) && !isStatic();
++        if (!isStatic()) {
++            final int nameIndex = UNSAFE.getChar(getConstMethod() + config().constMethodNameIndexOffset);
++            long nameSymbol = constantPool.getEntryAt(nameIndex);
++            long initSymbol = config().symbolInit;
++            return nameSymbol == initSymbol;
++        }
++        return false;
+     }
+ 
+     @Override
+@@ -472,7 +494,7 @@
+     @Override
+     public Annotation[][] getParameterAnnotations() {
+         Executable javaMethod = toJava();
+-        return javaMethod == null ? null : javaMethod.getParameterAnnotations();
++        return javaMethod == null ? new Annotation[signature.getParameterCount(false)][0] : javaMethod.getParameterAnnotations();
+     }
+ 
+     @Override
+@@ -513,9 +535,6 @@
+     }
+ 
+     public boolean isDefault() {
+-        if (isConstructor()) {
+-            return false;
+-        }
+         // Copied from java.lang.Method.isDefault()
+         int mask = Modifier.ABSTRACT | Modifier.PUBLIC | Modifier.STATIC;
+         return ((getModifiers() & mask) == Modifier.PUBLIC) && getDeclaringClass().isInterface();
+@@ -562,7 +581,7 @@
+             } else {
+                 // Do not use Method.getDeclaredMethod() as it can return a bridge method
+                 // when this.isBridge() is false and vice versa.
+-                result = searchMethods(holder.mirror().getDeclaredMethods(), name, returnType, parameterTypes);
++                result = searchMethods(holder.mirror().getDeclaredMethods(), getName(), returnType, parameterTypes);
+             }
+             toJavaCache = result;
+             return result;
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2011, 2016, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2011, 2017, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -36,8 +36,6 @@
+ import java.lang.reflect.Method;
+ import java.lang.reflect.Modifier;
+ import java.nio.ByteOrder;
+-import java.util.ArrayList;
+-import java.util.Arrays;
+ import java.util.HashMap;
+ 
+ import jdk.vm.ci.common.JVMCIError;
+@@ -59,12 +57,15 @@
+  */
+ final class HotSpotResolvedObjectTypeImpl extends HotSpotResolvedJavaType implements HotSpotResolvedObjectType, MetaspaceWrapperObject {
+ 
++    private static final HotSpotResolvedJavaField[] NO_FIELDS = new HotSpotResolvedJavaField[0];
++    private static final int METHOD_CACHE_ARRAY_CAPACITY = 8;
++
+     /**
+      * The Java class this type represents.
+      */
+     private final Class<?> javaClass;
+-    private HashMap<Long, HotSpotResolvedJavaField> fieldCache;
+-    private HashMap<Long, HotSpotResolvedJavaMethodImpl> methodCache;
++    private HotSpotResolvedJavaMethodImpl[] methodCacheArray;
++    private HashMap<Long, HotSpotResolvedJavaMethodImpl> methodCacheHashMap;
+     private HotSpotResolvedJavaField[] instanceFields;
+     private HotSpotResolvedObjectTypeImpl[] interfaces;
+     private HotSpotConstantPool constantPool;
+@@ -255,7 +256,7 @@
+      * @return true if the type is a leaf class
+      */
+     private boolean isLeafClass() {
+-        return getSubklass() == null;
++        return UNSAFE.getLong(this.getMetaspaceKlass() + config().subklassOffset) == 0;
+     }
+ 
+     /**
+@@ -484,18 +485,38 @@
+     }
+ 
+     synchronized HotSpotResolvedJavaMethod createMethod(long metaspaceMethod) {
+-        HotSpotResolvedJavaMethodImpl method = null;
+-        if (methodCache == null) {
+-            methodCache = new HashMap<>(8);
++        // Maintain cache as array.
++        if (methodCacheArray == null) {
++            methodCacheArray = new HotSpotResolvedJavaMethodImpl[METHOD_CACHE_ARRAY_CAPACITY];
++        }
++
++        int i = 0;
++        for (; i < methodCacheArray.length; ++i) {
++            HotSpotResolvedJavaMethodImpl curMethod = methodCacheArray[i];
++            if (curMethod == null) {
++                HotSpotResolvedJavaMethodImpl newMethod = new HotSpotResolvedJavaMethodImpl(this, metaspaceMethod);
++                methodCacheArray[i] = newMethod;
++                context.add(newMethod);
++                return newMethod;
++            } else if (curMethod.getMetaspacePointer() == metaspaceMethod) {
++                return curMethod;
++            }
++        }
++
++        // Fall-back to hash table.
++        if (methodCacheHashMap == null) {
++            methodCacheHashMap = new HashMap<>();
++        }
++
++        HotSpotResolvedJavaMethodImpl lookupResult = methodCacheHashMap.get(metaspaceMethod);
++        if (lookupResult == null) {
++            HotSpotResolvedJavaMethodImpl newMethod = new HotSpotResolvedJavaMethodImpl(this, metaspaceMethod);
++            methodCacheHashMap.put(metaspaceMethod, newMethod);
++            context.add(lookupResult);
++            return newMethod;
+         } else {
+-            method = methodCache.get(metaspaceMethod);
++            return lookupResult;
+         }
+-        if (method == null) {
+-            method = new HotSpotResolvedJavaMethodImpl(this, metaspaceMethod);
+-            methodCache.put(metaspaceMethod, method);
+-            context.add(method);
+-        }
+-        return method;
+     }
+ 
+     public int getVtableLength() {
+@@ -509,37 +530,8 @@
+         return result;
+     }
+ 
+-    synchronized HotSpotResolvedJavaField createField(String fieldName, JavaType type, long offset, int rawFlags) {
+-        HotSpotResolvedJavaField result = null;
+-
+-        final int flags = rawFlags & HotSpotModifiers.jvmFieldModifiers();
+-
+-        final long id = offset + ((long) flags << 32);
+-
+-        // Must cache the fields, because the local load elimination only works if the
+-        // objects from two field lookups are identical.
+-        if (fieldCache == null) {
+-            fieldCache = new HashMap<>(8);
+-        } else {
+-            result = fieldCache.get(id);
+-        }
+-
+-        if (result == null) {
+-            result = new HotSpotResolvedJavaFieldImpl(this, fieldName, type, offset, rawFlags);
+-            fieldCache.put(id, result);
+-        } else {
+-            assert result.getName().equals(fieldName);
+-            /*
+-             * Comparing the types directly is too strict, because the type in the cache could be
+-             * resolved while the incoming type is unresolved. The name comparison is sufficient
+-             * because the type will always be resolved in the context of the holder.
+-             */
+-            assert result.getType().getName().equals(type.getName());
+-            assert result.offset() == offset;
+-            assert result.getModifiers() == flags;
+-        }
+-
+-        return result;
++    synchronized HotSpotResolvedJavaField createField(JavaType type, long offset, int rawFlags, int index) {
++        return new HotSpotResolvedJavaFieldImpl(this, type, offset, rawFlags, index);
+     }
+ 
+     @Override
+@@ -577,11 +569,15 @@
+         return null;
+     }
+ 
++    FieldInfo createFieldInfo(int index) {
++        return new FieldInfo(index);
++    }
++
+     /**
+      * This class represents the field information for one field contained in the fields array of an
+      * {@code InstanceKlass}. The implementation is similar to the native {@code FieldInfo} class.
+      */
+-    private class FieldInfo {
++    class FieldInfo {
+         /**
+          * Native pointer into the array of Java shorts.
+          */
+@@ -666,61 +662,31 @@
+         }
+     }
+ 
+-    @SuppressFBWarnings(value = "SE_COMPARATOR_SHOULD_BE_SERIALIZABLE", justification = "comparator is only used transiently")
+-    private static class OffsetComparator implements java.util.Comparator<HotSpotResolvedJavaField> {
+-        @Override
+-        public int compare(HotSpotResolvedJavaField o1, HotSpotResolvedJavaField o2) {
+-            return o1.offset() - o2.offset();
+-        }
+-    }
+-
+     @Override
+     public ResolvedJavaField[] getInstanceFields(boolean includeSuperclasses) {
+         if (instanceFields == null) {
+             if (isArray() || isInterface()) {
+-                instanceFields = new HotSpotResolvedJavaField[0];
++                instanceFields = NO_FIELDS;
+             } else {
+-                final int fieldCount = getFieldCount();
+-                ArrayList<HotSpotResolvedJavaField> fieldsArray = new ArrayList<>(fieldCount);
+-
+-                for (int i = 0; i < fieldCount; i++) {
+-                    FieldInfo field = new FieldInfo(i);
+-
+-                    // We are only interested in instance fields.
+-                    if (!field.isStatic()) {
+-                        HotSpotResolvedJavaField resolvedJavaField = createField(field.getName(), field.getType(), field.getOffset(), field.getAccessFlags());
+-                        fieldsArray.add(resolvedJavaField);
+-                    }
++                HotSpotResolvedJavaField[] prepend = NO_FIELDS;
++                if (getSuperclass() != null) {
++                    prepend = (HotSpotResolvedJavaField[]) getSuperclass().getInstanceFields(true);
+                 }
+-
+-                fieldsArray.sort(new OffsetComparator());
+-
+-                HotSpotResolvedJavaField[] myFields = fieldsArray.toArray(new HotSpotResolvedJavaField[0]);
+-
+-                if (mirror() != Object.class) {
+-                    HotSpotResolvedJavaField[] superFields = (HotSpotResolvedJavaField[]) getSuperclass().getInstanceFields(true);
+-                    HotSpotResolvedJavaField[] fields = Arrays.copyOf(superFields, superFields.length + myFields.length);
+-                    System.arraycopy(myFields, 0, fields, superFields.length, myFields.length);
+-                    instanceFields = fields;
+-                } else {
+-                    assert myFields.length == 0 : "java.lang.Object has fields!";
+-                    instanceFields = myFields;
+-                }
+-
++                instanceFields = getFields(false, prepend);
+             }
+         }
+-        if (!includeSuperclasses) {
+-            int myFieldsStart = 0;
+-            while (myFieldsStart < instanceFields.length && !instanceFields[myFieldsStart].getDeclaringClass().equals(this)) {
+-                myFieldsStart++;
++        if (!includeSuperclasses && getSuperclass() != null) {
++            int superClassFieldCount = getSuperclass().getInstanceFields(true).length;
++            if (superClassFieldCount == instanceFields.length) {
++                // This class does not have any instance fields of its own.
++                return NO_FIELDS;
++            } else if (superClassFieldCount != 0) {
++                HotSpotResolvedJavaField[] result = new HotSpotResolvedJavaField[instanceFields.length - superClassFieldCount];
++                System.arraycopy(instanceFields, superClassFieldCount, result, 0, result.length);
++                return result;
++            } else {
++                // The super classes of this class do not have any instance fields.
+             }
+-            if (myFieldsStart == 0) {
+-                return instanceFields;
+-            }
+-            if (myFieldsStart == instanceFields.length) {
+-                return new HotSpotResolvedJavaField[0];
+-            }
+-            return Arrays.copyOfRange(instanceFields, myFieldsStart, instanceFields.length);
+         }
+         return instanceFields;
+     }
+@@ -730,45 +696,63 @@
+         if (isArray()) {
+             return new HotSpotResolvedJavaField[0];
+         } else {
+-            final int fieldCount = getFieldCount();
+-            ArrayList<HotSpotResolvedJavaField> fieldsArray = new ArrayList<>(fieldCount);
+-
+-            for (int i = 0; i < fieldCount; i++) {
+-                FieldInfo field = new FieldInfo(i);
+-
+-                // We are only interested in static fields.
+-                if (field.isStatic()) {
+-                    HotSpotResolvedJavaField resolvedJavaField = createField(field.getName(), field.getType(), field.getOffset(), field.getAccessFlags());
+-                    fieldsArray.add(resolvedJavaField);
+-                }
+-            }
+-
+-            fieldsArray.sort(new OffsetComparator());
+-            return fieldsArray.toArray(new HotSpotResolvedJavaField[fieldsArray.size()]);
++            return getFields(true, NO_FIELDS);
+         }
+     }
+ 
+     /**
+-     * Returns the actual field count of this class's internal {@code InstanceKlass::_fields} array
+-     * by walking the array and discounting the generic signature slots at the end of the array.
++     * Gets the instance or static fields of this class.
+      *
+-     * <p>
+-     * See {@code FieldStreamBase::init_generic_signature_start_slot}
++     * @param retrieveStaticFields specifies whether to return instance or static fields
++     * @param prepend an array to be prepended to the returned result
+      */
+-    private int getFieldCount() {
++    private HotSpotResolvedJavaField[] getFields(boolean retrieveStaticFields, HotSpotResolvedJavaField[] prepend) {
+         HotSpotVMConfig config = config();
+         final long metaspaceFields = UNSAFE.getAddress(getMetaspaceKlass() + config.instanceKlassFieldsOffset);
+         int metaspaceFieldsLength = UNSAFE.getInt(metaspaceFields + config.arrayU1LengthOffset);
+-        int fieldCount = 0;
+-
+-        for (int i = 0, index = 0; i < metaspaceFieldsLength; i += config.fieldInfoFieldSlots, index++) {
++        int resultCount = 0;
++        int index = 0;
++        for (int i = 0; i < metaspaceFieldsLength; i += config.fieldInfoFieldSlots, index++) {
+             FieldInfo field = new FieldInfo(index);
+             if (field.hasGenericSignature()) {
+                 metaspaceFieldsLength--;
+             }
+-            fieldCount++;
++
++            if (field.isStatic() == retrieveStaticFields) {
++                resultCount++;
++            }
+         }
+-        return fieldCount;
++
++        if (resultCount == 0) {
++            return prepend;
++        }
++
++        int prependLength = prepend.length;
++        resultCount += prependLength;
++
++        HotSpotResolvedJavaField[] result = new HotSpotResolvedJavaField[resultCount];
++        if (prependLength != 0) {
++            System.arraycopy(prepend, 0, result, 0, prependLength);
++        }
++
++        int resultIndex = prependLength;
++        for (int i = 0; i < index; ++i) {
++            FieldInfo field = new FieldInfo(i);
++            if (field.isStatic() == retrieveStaticFields) {
++                int offset = field.getOffset();
++                HotSpotResolvedJavaField resolvedJavaField = createField(field.getType(), offset, field.getAccessFlags(), i);
++
++                // Make sure the result is sorted by offset.
++                int j;
++                for (j = resultIndex - 1; j >= prependLength && result[j].offset() > offset; j--) {
++                    result[j + 1] = result[j];
++                }
++                result[j + 1] = resolvedJavaField;
++                resultIndex++;
++            }
++        }
++
++        return result;
+     }
+ 
+     @Override
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java
+@@ -85,7 +85,7 @@
+     final int klassLayoutHelperNeutralValue = getConstant("Klass::_lh_neutral_value", Integer.class);
+     final int klassLayoutHelperInstanceSlowPathBit = getConstant("Klass::_lh_instance_slow_path_bit", Integer.class);
+ 
+-    final int vtableEntrySize = getTypeSize("vtableEntry");
++    final int vtableEntrySize = getFieldValue("CompilerToVM::Data::sizeof_vtableEntry", Integer.class, "int");
+     final int vtableEntryMethodOffset = getFieldOffset("vtableEntry::_method", Integer.class, "Method*");
+ 
+     final int instanceKlassSourceFileNameIndexOffset = getFieldOffset("InstanceKlass::_source_file_name_index", Integer.class, "u2");
+@@ -192,20 +192,20 @@
+     final int constMethodHasLocalVariableTable = getConstant("ConstMethod::_has_localvariable_table", Integer.class);
+     final int constMethodHasExceptionTable = getConstant("ConstMethod::_has_exception_table", Integer.class);
+ 
+-    final int exceptionTableElementSize = getTypeSize("ExceptionTableElement");
++    final int exceptionTableElementSize = getFieldValue("CompilerToVM::Data::sizeof_ExceptionTableElement", Integer.class, "int");
+     final int exceptionTableElementStartPcOffset = getFieldOffset("ExceptionTableElement::start_pc", Integer.class, "u2");
+     final int exceptionTableElementEndPcOffset = getFieldOffset("ExceptionTableElement::end_pc", Integer.class, "u2");
+     final int exceptionTableElementHandlerPcOffset = getFieldOffset("ExceptionTableElement::handler_pc", Integer.class, "u2");
+     final int exceptionTableElementCatchTypeIndexOffset = getFieldOffset("ExceptionTableElement::catch_type_index", Integer.class, "u2");
+ 
+-    final int localVariableTableElementSize = getTypeSize("LocalVariableTableElement");
++    final int localVariableTableElementSize = getFieldValue("CompilerToVM::Data::sizeof_LocalVariableTableElement", Integer.class, "int");
+     final int localVariableTableElementStartBciOffset = getFieldOffset("LocalVariableTableElement::start_bci", Integer.class, "u2");
+     final int localVariableTableElementLengthOffset = getFieldOffset("LocalVariableTableElement::length", Integer.class, "u2");
+     final int localVariableTableElementNameCpIndexOffset = getFieldOffset("LocalVariableTableElement::name_cp_index", Integer.class, "u2");
+     final int localVariableTableElementDescriptorCpIndexOffset = getFieldOffset("LocalVariableTableElement::descriptor_cp_index", Integer.class, "u2");
+     final int localVariableTableElementSlotOffset = getFieldOffset("LocalVariableTableElement::slot", Integer.class, "u2");
+ 
+-    final int constantPoolSize = getTypeSize("ConstantPool");
++    final int constantPoolSize = getFieldValue("CompilerToVM::Data::sizeof_ConstantPool", Integer.class, "int");
+     final int constantPoolTagsOffset = getFieldOffset("ConstantPool::_tags", Integer.class, "Array<u1>*");
+     final int constantPoolHolderOffset = getFieldOffset("ConstantPool::_pool_holder", Integer.class, "InstanceKlass*");
+     final int constantPoolLengthOffset = getFieldOffset("ConstantPool::_length", Integer.class, "int");
+@@ -237,12 +237,15 @@
+ 
+     final int heapWordSize = getConstant("HeapWordSize", Integer.class);
+ 
+-    final int symbolPointerSize = getTypeSize("Symbol*");
++    final int symbolPointerSize = getFieldValue("CompilerToVM::Data::sizeof_SymbolPointer", Integer.class, "int");
+ 
+     final long vmSymbolsSymbols = getFieldAddress("vmSymbols::_symbols[0]", "Symbol*");
+     final int vmSymbolsFirstSID = getConstant("vmSymbols::FIRST_SID", Integer.class);
+     final int vmSymbolsSIDLimit = getConstant("vmSymbols::SID_LIMIT", Integer.class);
+ 
++    final long symbolInit = getFieldValue("CompilerToVM::Data::symbol_init", Long.class);
++    final long symbolClinit = getFieldValue("CompilerToVM::Data::symbol_clinit", Long.class);
++
+     /**
+      * Returns the symbol in the {@code vmSymbols} table at position {@code index} as a
+      * {@link String}.
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfigAccess.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfigAccess.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfigAccess.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfigAccess.java
+@@ -67,21 +67,6 @@
+     }
+ 
+     /**
+-     * Gets the size of a C++ type.
+-     *
+-     * @param name name of the type
+-     * @return the size in bytes of the requested field
+-     * @throws JVMCIError if the field is not present and {@code notPresent} is null
+-     */
+-    public int getTypeSize(String name) {
+-        Long entry = store.vmTypeSizes.get(name);
+-        if (entry == null) {
+-            throw new JVMCIError("expected VM type not found: " + name);
+-        }
+-        return (int) (long) entry;
+-    }
+-
+-    /**
+      * Gets the value of a C++ constant.
+      *
+      * @param name name of the constant (e.g., {@code "frame::arg_reg_save_area_bytes"})
+@@ -291,13 +276,24 @@
+      */
+     public <T> T getFlag(String name, Class<T> type, T notPresent) {
+         VMFlag entry = store.vmFlags.get(name);
++        Object value;
++        String cppType;
+         if (entry == null) {
+-            if (notPresent != null) {
+-                return notPresent;
++            // Fall back to VM call
++            value = store.compilerToVm.getFlagValue(name);
++            if (value == store.compilerToVm) {
++                if (notPresent != null) {
++                    return notPresent;
++                }
++                throw new JVMCIError("expected VM flag not found: " + name);
++            } else {
++                cppType = null;
+             }
+-            throw new JVMCIError("expected VM flag not found: " + name);
++        } else {
++            value = entry.value;
++            cppType = entry.type;
+         }
+-        return type.cast(convertValue(name, type, entry.value, entry.type));
++        return type.cast(convertValue(name, type, value, cppType));
+     }
+ 
+     private static <T> Object convertValue(String name, Class<T> toType, Object value, String cppType) throws JVMCIError {
+@@ -319,6 +315,10 @@
+             } else if (value instanceof Long) {
+                 return (int) (long) value;
+             }
++        } else if (toType == String.class) {
++            if (value == null || value instanceof String) {
++                return value;
++            }
+         } else if (toType == Long.class) {
+             return value;
+         }
+diff --git a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfigStore.java b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfigStore.java
+--- a/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfigStore.java
++++ b/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfigStore.java
+@@ -47,15 +47,6 @@
+     }
+ 
+     /**
+-     * Gets the C++ type sizes exposed by this object.
+-     *
+-     * @return an unmodifiable map from C++ type names to their sizes in bytes
+-     */
+-    public Map<String, Long> getTypeSizes() {
+-        return Collections.unmodifiableMap(vmTypeSizes);
+-    }
+-
+-    /**
+      * Gets the C++ constants exposed by this object.
+      *
+      * @return an unmodifiable map from the names of C++ constants to their values
+@@ -90,11 +81,11 @@
+     }
+ 
+     final HashMap<String, VMField> vmFields;
+-    final HashMap<String, Long> vmTypeSizes;
+     final HashMap<String, Long> vmConstants;
+     final HashMap<String, Long> vmAddresses;
+     final HashMap<String, VMFlag> vmFlags;
+     final List<VMIntrinsicMethod> vmIntrinsics;
++    final CompilerToVM compilerToVm;
+ 
+     /**
+      * Reads the database of VM info. The return value encodes the info in a nested object array
+@@ -103,7 +94,6 @@
+      * <pre>
+      *     info = [
+      *         VMField[] vmFields,
+-     *         [String name, Long size, ...] vmTypeSizes,
+      *         [String name, Long value, ...] vmConstants,
+      *         [String name, Long value, ...] vmAddresses,
+      *         VMFlag[] vmFlags
+@@ -113,25 +103,24 @@
+      */
+     @SuppressWarnings("try")
+     HotSpotVMConfigStore(CompilerToVM compilerToVm) {
++        this.compilerToVm = compilerToVm;
+         Object[] data;
+         try (InitTimer t = timer("CompilerToVm readConfiguration")) {
+             data = compilerToVm.readConfiguration();
+         }
+-        assert data.length == 6 : data.length;
++        assert data.length == 5 : data.length;
+ 
+         // @formatter:off
+         VMField[] vmFieldsInfo    = (VMField[]) data[0];
+-        Object[] vmTypesSizesInfo = (Object[])  data[1];
+-        Object[] vmConstantsInfo  = (Object[])  data[2];
+-        Object[] vmAddressesInfo  = (Object[])  data[3];
+-        VMFlag[] vmFlagsInfo      = (VMFlag[])  data[4];
++        Object[] vmConstantsInfo  = (Object[])  data[1];
++        Object[] vmAddressesInfo  = (Object[])  data[2];
++        VMFlag[] vmFlagsInfo      = (VMFlag[])  data[3];
+ 
+         vmFields     = new HashMap<>(vmFieldsInfo.length);
+-        vmTypeSizes  = new HashMap<>(vmTypesSizesInfo.length);
+         vmConstants  = new HashMap<>(vmConstantsInfo.length);
+         vmAddresses  = new HashMap<>(vmAddressesInfo.length);
+         vmFlags      = new HashMap<>(vmFlagsInfo.length);
+-        vmIntrinsics = Arrays.asList((VMIntrinsicMethod[]) data[5]);
++        vmIntrinsics = Arrays.asList((VMIntrinsicMethod[]) data[4]);
+         // @formatter:on
+ 
+         try (InitTimer t = timer("HotSpotVMConfigStore<init> fill maps")) {
+@@ -139,12 +128,6 @@
+                 vmFields.put(vmField.name, vmField);
+             }
+ 
+-            for (int i = 0; i < vmTypesSizesInfo.length / 2; i++) {
+-                String name = (String) vmTypesSizesInfo[i * 2];
+-                Long size = (Long) vmTypesSizesInfo[i * 2 + 1];
+-                vmTypeSizes.put(name, size);
+-            }
+-
+             for (int i = 0; i < vmConstantsInfo.length / 2; i++) {
+                 String name = (String) vmConstantsInfo[i * 2];
+                 Long value = (Long) vmConstantsInfo[i * 2 + 1];
+diff --git a/src/jdk.vm.compiler/share/classes/org.graalvm.compiler.hotspot/src/org/graalvm/compiler/hotspot/GraalHotSpotVMConfig.java b/src/jdk.vm.compiler/share/classes/org.graalvm.compiler.hotspot/src/org/graalvm/compiler/hotspot/GraalHotSpotVMConfig.java
+--- a/src/jdk.vm.compiler/share/classes/org.graalvm.compiler.hotspot/src/org/graalvm/compiler/hotspot/GraalHotSpotVMConfig.java
++++ b/src/jdk.vm.compiler/share/classes/org.graalvm.compiler.hotspot/src/org/graalvm/compiler/hotspot/GraalHotSpotVMConfig.java
+@@ -244,7 +244,7 @@
+         return (int) (Math.log(objectAlignment) / Math.log(2));
+     }
+ 
+-    public final int narrowKlassSize = getTypeSize("narrowKlass");
++    public final int narrowKlassSize = getFieldValue("CompilerToVM::Data::sizeof_narrowKlass", Integer.class, "int");
+     public final long narrowKlassBase = getFieldValue("CompilerToVM::Data::Universe_narrow_klass_base", Long.class, "address");
+     public final int narrowKlassShift = getFieldValue("CompilerToVM::Data::Universe_narrow_klass_shift", Integer.class, "int");
+     public final int logKlassAlignment = getConstant("LogKlassAlignmentInBytes", Integer.class);
+@@ -290,7 +290,7 @@
+         return (layoutHelperArrayTagTypeValue & ~layoutHelperArrayTagObjectValue) << layoutHelperArrayTagShift;
+     }
+ 
+-    public final int vtableEntrySize = getTypeSize("vtableEntry");
++    public final int vtableEntrySize = getFieldValue("CompilerToVM::Data::sizeof_vtableEntry", Integer.class, "int");
+     public final int vtableEntryMethodOffset = getFieldOffset("vtableEntry::_method", Integer.class, "Method*");
+ 
+     public final int instanceKlassInitStateOffset = getFieldOffset("InstanceKlass::_init_state", Integer.class, "u1");
+@@ -302,7 +302,7 @@
+     public final int instanceKlassStateLinked = getConstant("InstanceKlass::linked", Integer.class);
+     public final int instanceKlassStateFullyInitialized = getConstant("InstanceKlass::fully_initialized", Integer.class);
+ 
+-    public final int arrayOopDescSize = getTypeSize("arrayOopDesc");
++    public final int arrayOopDescSize = getFieldValue("CompilerToVM::Data::sizeof_arrayOopDesc", Integer.class, "int");
+ 
+     /**
+      * The offset of the array length word in an array object's header.
+@@ -496,7 +496,7 @@
+     public final int compilationLevelFullOptimization = getConstant("CompLevel_full_optimization",
+                     Integer.class);
+ 
+-    public final int constantPoolSize = getTypeSize("ConstantPool");
++    public final int constantPoolSize = getFieldValue("CompilerToVM::Data::sizeof_ConstantPool", Integer.class, "int");
+     public final int constantPoolLengthOffset = getFieldOffset("ConstantPool::_length",
+                     Integer.class, "int");
+ 
+@@ -553,7 +553,7 @@
+     public final int klassOffset = getFieldValue("java_lang_Class::_klass_offset", Integer.class, "int");
+     public final int arrayKlassOffset = getFieldValue("java_lang_Class::_array_klass_offset", Integer.class, "int");
+ 
+-    public final int basicLockSize = getTypeSize("BasicLock");
++    public final int basicLockSize = getFieldValue("CompilerToVM::Data::sizeof_BasicLock", Integer.class, "int");
+     public final int basicLockDisplacedHeaderOffset = getFieldOffset("BasicLock::_displaced_header", Integer.class, "markOop");
+ 
+     public final int threadAllocatedBytesOffset = getFieldOffset("Thread::_allocated_bytes", Integer.class, "jlong");
+diff --git a/src/share/vm/jvmci/jvmciCompilerToVM.cpp b/src/share/vm/jvmci/jvmciCompilerToVM.cpp
+--- a/src/share/vm/jvmci/jvmciCompilerToVM.cpp
++++ b/src/share/vm/jvmci/jvmciCompilerToVM.cpp
+@@ -53,6 +53,7 @@
+ #include "runtime/vframe.hpp"
+ #include "runtime/vframe_hp.hpp"
+ #include "runtime/vmStructs.hpp"
++#include "utilities/resourceHash.hpp"
+ 
+ 
+ // Entry to native method implementation that transitions current thread to '_thread_in_vm'.
+@@ -120,6 +121,15 @@
+ 
+ int CompilerToVM::Data::vm_page_size;
+ 
++int CompilerToVM::Data::sizeof_vtableEntry = sizeof(vtableEntry);
++int CompilerToVM::Data::sizeof_ExceptionTableElement = sizeof(ExceptionTableElement);
++int CompilerToVM::Data::sizeof_LocalVariableTableElement = sizeof(LocalVariableTableElement);
++int CompilerToVM::Data::sizeof_ConstantPool = sizeof(ConstantPool);
++int CompilerToVM::Data::sizeof_SymbolPointer = sizeof(Symbol*);
++int CompilerToVM::Data::sizeof_narrowKlass = sizeof(narrowKlass);
++int CompilerToVM::Data::sizeof_arrayOopDesc = sizeof(arrayOopDesc);
++int CompilerToVM::Data::sizeof_BasicLock = sizeof(BasicLock);
++
+ address CompilerToVM::Data::dsin;
+ address CompilerToVM::Data::dcos;
+ address CompilerToVM::Data::dtan;
+@@ -128,7 +138,10 @@
+ address CompilerToVM::Data::dlog10;
+ address CompilerToVM::Data::dpow;
+ 
+-void CompilerToVM::Data::initialize() {
++address CompilerToVM::Data::symbol_init;
++address CompilerToVM::Data::symbol_clinit;
++
++void CompilerToVM::Data::initialize(TRAPS) {
+   Klass_vtable_start_offset = in_bytes(Klass::vtable_start_offset());
+   Klass_vtable_length_offset = in_bytes(Klass::vtable_length_offset());
+ 
+@@ -160,6 +173,9 @@
+   assert(OopMapValue::legal_vm_reg_name(VMRegImpl::stack2reg(max_oop_map_stack_index)), "should be valid");
+   assert(!OopMapValue::legal_vm_reg_name(VMRegImpl::stack2reg(max_oop_map_stack_index + 1)), "should be invalid");
+ 
++  symbol_init = (address) vmSymbols::object_initializer_name();
++  symbol_clinit = (address) vmSymbols::class_initializer_name();
++
+   BarrierSet* bs = Universe::heap()->barrier_set();
+   switch (bs->kind()) {
+   case BarrierSet::CardTableModRef:
+@@ -179,7 +195,7 @@
+     // No post barriers
+     break;
+   default:
+-    ShouldNotReachHere();
++    JVMCI_ERROR("Unsupported BarrierSet kind %d", bs->kind());
+     break;
+   }
+ 
+@@ -237,13 +253,114 @@
+   return vmIntrinsics;
+ }
+ 
++/**
++ * The set of VM flags known to be used.
++ */
++#define PREDEFINED_CONFIG_FLAGS(do_bool_flag, do_intx_flag, do_uintx_flag) \
++  do_intx_flag(AllocateInstancePrefetchLines)                              \
++  do_intx_flag(AllocatePrefetchDistance)                                   \
++  do_intx_flag(AllocatePrefetchInstr)                                      \
++  do_intx_flag(AllocatePrefetchLines)                                      \
++  do_intx_flag(AllocatePrefetchStepSize)                                   \
++  do_intx_flag(AllocatePrefetchStyle)                                      \
++  do_intx_flag(BciProfileWidth)                                            \
++  do_bool_flag(BootstrapJVMCI)                                             \
++  do_bool_flag(CITime)                                                     \
++  do_bool_flag(CITimeEach)                                                 \
++  do_uintx_flag(CodeCacheSegmentSize)                                      \
++  do_intx_flag(CodeEntryAlignment)                                         \
++  do_bool_flag(CompactFields)                                              \
++  NOT_PRODUCT(do_intx_flag(CompileTheWorldStartAt))                        \
++  NOT_PRODUCT(do_intx_flag(CompileTheWorldStopAt))                         \
++  do_intx_flag(ContendedPaddingWidth)                                      \
++  do_bool_flag(DontCompileHugeMethods)                                     \
++  do_bool_flag(EnableContended)                                            \
++  do_intx_flag(FieldsAllocationStyle)                                      \
++  do_bool_flag(FoldStableValues)                                           \
++  do_bool_flag(ForceUnreachable)                                           \
++  do_intx_flag(HugeMethodLimit)                                            \
++  do_bool_flag(Inline)                                                     \
++  do_intx_flag(JVMCICounterSize)                                           \
++  do_bool_flag(JVMCIPrintProperties)                                       \
++  do_bool_flag(JVMCIUseFastLocking)                                        \
++  do_intx_flag(MethodProfileWidth)                                         \
++  do_intx_flag(ObjectAlignmentInBytes)                                     \
++  do_bool_flag(PrintInlining)                                              \
++  do_bool_flag(ReduceInitialCardMarks)                                     \
++  do_bool_flag(RestrictContended)                                          \
++  do_intx_flag(StackReservedPages)                                         \
++  do_intx_flag(StackShadowPages)                                           \
++  do_bool_flag(TLABStats)                                                  \
++  do_uintx_flag(TLABWasteIncrement)                                        \
++  do_intx_flag(TypeProfileWidth)                                           \
++  do_bool_flag(UseAESIntrinsics)                                           \
++  X86_ONLY(do_intx_flag(UseAVX))                                           \
++  do_bool_flag(UseBiasedLocking)                                           \
++  do_bool_flag(UseCRC32Intrinsics)                                         \
++  do_bool_flag(UseCompressedClassPointers)                                 \
++  do_bool_flag(UseCompressedOops)                                          \
++  do_bool_flag(UseConcMarkSweepGC)                                         \
++  X86_ONLY(do_bool_flag(UseCountLeadingZerosInstruction))                  \
++  X86_ONLY(do_bool_flag(UseCountTrailingZerosInstruction))                 \
++  do_bool_flag(UseG1GC)                                                    \
++  COMPILER2_PRESENT(do_bool_flag(UseMontgomeryMultiplyIntrinsic))          \
++  COMPILER2_PRESENT(do_bool_flag(UseMontgomerySquareIntrinsic))            \
++  COMPILER2_PRESENT(do_bool_flag(UseMulAddIntrinsic))                      \
++  COMPILER2_PRESENT(do_bool_flag(UseMultiplyToLenIntrinsic))               \
++  do_bool_flag(UsePopCountInstruction)                                     \
++  do_bool_flag(UseSHA1Intrinsics)                                          \
++  do_bool_flag(UseSHA256Intrinsics)                                        \
++  do_bool_flag(UseSHA512Intrinsics)                                        \
++  do_intx_flag(UseSSE)                                                     \
++  COMPILER2_PRESENT(do_bool_flag(UseSquareToLenIntrinsic))                 \
++  do_bool_flag(UseStackBanging)                                            \
++  do_bool_flag(UseTLAB)                                                    \
++  do_bool_flag(VerifyOops)                                                 \
++
++#define BOXED_BOOLEAN(name, value) oop name = ((jboolean)(value) ? boxedTrue() : boxedFalse())
++#define BOXED_DOUBLE(name, value) oop name; do { jvalue p; p.d = (jdouble) (value); name = java_lang_boxing_object::create(T_DOUBLE, &p, CHECK_NULL);} while(0)
++#define BOXED_LONG(name, value) \
++  oop name; \
++  do { \
++    jvalue p; p.j = (jlong) (value); \
++    Handle* e = longs.get(p.j); \
++    if (e == NULL) { \
++      Handle h = java_lang_boxing_object::create(T_LONG, &p, CHECK_NULL); \
++      longs.put(p.j, h); \
++      name = h(); \
++    } else { \
++      name = (*e)(); \
++    } \
++  } while (0)
++
++#define CSTRING_TO_JSTRING(name, value) \
++  Handle name; \
++  do { \
++    if (value != NULL) { \
++      Handle* e = strings.get(value); \
++      if (e == NULL) { \
++        Handle h = java_lang_String::create_from_str(value, CHECK_NULL); \
++        strings.put(value, h); \
++        name = h(); \
++      } else { \
++        name = (*e)(); \
++      } \
++    } \
++  } while (0)
++
+ C2V_VMENTRY(jobjectArray, readConfiguration, (JNIEnv *env))
+-#define BOXED_LONG(name, value) oop name; do { jvalue p; p.j = (jlong) (value); name = java_lang_boxing_object::create(T_LONG, &p, CHECK_NULL);} while(0)
+-#define BOXED_DOUBLE(name, value) oop name; do { jvalue p; p.d = (jdouble) (value); name = java_lang_boxing_object::create(T_DOUBLE, &p, CHECK_NULL);} while(0)
+   ResourceMark rm;
+   HandleMark hm;
+ 
+-  CompilerToVM::Data::initialize();
++  // Used to canonicalize Long and String values.
++  ResourceHashtable<jlong, Handle> longs;
++  ResourceHashtable<const char*, Handle, &CompilerToVM::cstring_hash, &CompilerToVM::cstring_equals> strings;
++
++  jvalue prim;
++  prim.z = true;  Handle boxedTrue =  java_lang_boxing_object::create(T_BOOLEAN, &prim, CHECK_NULL);
++  prim.z = false; Handle boxedFalse = java_lang_boxing_object::create(T_BOOLEAN, &prim, CHECK_NULL);
++
++  CompilerToVM::Data::initialize(CHECK_NULL);
+ 
+   VMField::klass()->initialize(CHECK_NULL);
+   VMFlag::klass()->initialize(CHECK_NULL);
+@@ -257,31 +374,31 @@
+     size_t name_buf_len = strlen(vmField.typeName) + strlen(vmField.fieldName) + 2 /* "::" */;
+     char* name_buf = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, char, name_buf_len + 1);
+     sprintf(name_buf, "%s::%s", vmField.typeName, vmField.fieldName);
+-    Handle name = java_lang_String::create_from_str(name_buf, CHECK_NULL);
+-    Handle type = java_lang_String::create_from_str(vmField.typeString, CHECK_NULL);
++    CSTRING_TO_JSTRING(name, name_buf);
++    CSTRING_TO_JSTRING(type, vmField.typeString);
+     VMField::set_name(vmFieldObj, name());
+     VMField::set_type(vmFieldObj, type());
+     VMField::set_offset(vmFieldObj, vmField.offset);
+     VMField::set_address(vmFieldObj, (jlong) vmField.address);
+-    if (vmField.isStatic) {
++    if (vmField.isStatic && vmField.typeString != NULL) {
+       if (strcmp(vmField.typeString, "bool") == 0) {
+-        BOXED_LONG(value, *(jbyte*) vmField.address);
+-        VMField::set_value(vmFieldObj, value);
++        BOXED_BOOLEAN(box, *(jbyte*) vmField.address);
++        VMField::set_value(vmFieldObj, box);
+       } else if (strcmp(vmField.typeString, "int") == 0 ||
+                  strcmp(vmField.typeString, "jint") == 0) {
+-        BOXED_LONG(value, *(jint*) vmField.address);
+-        VMField::set_value(vmFieldObj, value);
++        BOXED_LONG(box, *(jint*) vmField.address);
++        VMField::set_value(vmFieldObj, box);
+       } else if (strcmp(vmField.typeString, "uint64_t") == 0) {
+-        BOXED_LONG(value, *(uint64_t*) vmField.address);
+-        VMField::set_value(vmFieldObj, value);
++        BOXED_LONG(box, *(uint64_t*) vmField.address);
++        VMField::set_value(vmFieldObj, box);
+       } else if (strcmp(vmField.typeString, "address") == 0 ||
+                  strcmp(vmField.typeString, "intptr_t") == 0 ||
+                  strcmp(vmField.typeString, "uintptr_t") == 0 ||
+                  strcmp(vmField.typeString, "size_t") == 0 ||
+                  // All foo* types are addresses.
+                  vmField.typeString[strlen(vmField.typeString) - 1] == '*') {
+-        BOXED_LONG(value, *((address*) vmField.address));
+-        VMField::set_value(vmFieldObj, value);
++        BOXED_LONG(box, *((address*) vmField.address));
++        VMField::set_value(vmFieldObj, box);
+       } else {
+         JVMCI_ERROR_NULL("VM field %s has unsupported type %s", name_buf, vmField.typeString);
+       }
+@@ -289,16 +406,6 @@
+     vmFields->obj_at_put(i, vmFieldObj());
+   }
+ 
+-  len = JVMCIVMStructs::localHotSpotVMTypes_count();
+-  objArrayHandle vmTypes = oopFactory::new_objArray(SystemDictionary::Object_klass(), len * 2, CHECK_NULL);
+-  for (int i = 0; i < len ; i++) {
+-    VMTypeEntry vmType = JVMCIVMStructs::localHotSpotVMTypes[i];
+-    Handle name = java_lang_String::create_from_str(vmType.typeName, CHECK_NULL);
+-    BOXED_LONG(size, vmType.size);
+-    vmTypes->obj_at_put(i * 2, name());
+-    vmTypes->obj_at_put(i * 2 + 1, size);
+-  }
+-
+   int ints_len = JVMCIVMStructs::localHotSpotVMIntConstants_count();
+   int longs_len = JVMCIVMStructs::localHotSpotVMLongConstants_count();
+   len = ints_len + longs_len;
+@@ -306,14 +413,14 @@
+   int insert = 0;
+   for (int i = 0; i < ints_len ; i++) {
+     VMIntConstantEntry c = JVMCIVMStructs::localHotSpotVMIntConstants[i];
+-    Handle name = java_lang_String::create_from_str(c.name, CHECK_NULL);
++    CSTRING_TO_JSTRING(name, c.name);
+     BOXED_LONG(value, c.value);
+     vmConstants->obj_at_put(insert++, name());
+     vmConstants->obj_at_put(insert++, value);
+   }
+   for (int i = 0; i < longs_len ; i++) {
+     VMLongConstantEntry c = JVMCIVMStructs::localHotSpotVMLongConstants[i];
+-    Handle name = java_lang_String::create_from_str(c.name, CHECK_NULL);
++    CSTRING_TO_JSTRING(name, c.name);
+     BOXED_LONG(value, c.value);
+     vmConstants->obj_at_put(insert++, name());
+     vmConstants->obj_at_put(insert++, value);
+@@ -324,69 +431,104 @@
+   objArrayHandle vmAddresses = oopFactory::new_objArray(SystemDictionary::Object_klass(), len * 2, CHECK_NULL);
+   for (int i = 0; i < len ; i++) {
+     VMAddressEntry a = JVMCIVMStructs::localHotSpotVMAddresses[i];
+-    Handle name = java_lang_String::create_from_str(a.name, CHECK_NULL);
++    CSTRING_TO_JSTRING(name, a.name);
+     BOXED_LONG(value, a.value);
+     vmAddresses->obj_at_put(i * 2, name());
+     vmAddresses->obj_at_put(i * 2 + 1, value);
+   }
+ 
+-  // The last entry is the null entry.
+-  len = (int) Flag::numFlags - 1;
++#define COUNT_FLAG(ignore) +1
++#ifdef ASSERT
++#define CHECK_FLAG(type, name) { \
++  Flag* flag = Flag::find_flag(#name, strlen(#name), /*allow_locked*/ true, /* return_flag */ true); \
++  assert(flag != NULL, "No such flag named " #name); \
++  assert(flag->is_##type(), "Flag " #name " is not of type " #type); \
++}
++#else
++#define CHECK_FLAG(type, name)
++#endif
++
++#define ADD_FLAG(type, name, convert) { \
++  CHECK_FLAG(type, name) \
++  instanceHandle vmFlagObj = InstanceKlass::cast(VMFlag::klass())->allocate_instance_handle(CHECK_NULL); \
++  CSTRING_TO_JSTRING(fname, #name); \
++  CSTRING_TO_JSTRING(ftype, #type); \
++  VMFlag::set_name(vmFlagObj, fname()); \
++  VMFlag::set_type(vmFlagObj, ftype()); \
++  convert(value, name); \
++  VMFlag::set_value(vmFlagObj, value); \
++  vmFlags->obj_at_put(i++, vmFlagObj()); \
++}
++#define ADD_BOOL_FLAG(name)  ADD_FLAG(bool, name, BOXED_BOOLEAN)
++#define ADD_INTX_FLAG(name)  ADD_FLAG(intx, name, BOXED_LONG)
++#define ADD_UINTX_FLAG(name) ADD_FLAG(uintx, name, BOXED_LONG)
++
++  len = 0 + PREDEFINED_CONFIG_FLAGS(COUNT_FLAG, COUNT_FLAG, COUNT_FLAG);
+   objArrayHandle vmFlags = oopFactory::new_objArray(VMFlag::klass(), len, CHECK_NULL);
+-  for (int i = 0; i < len; i++) {
+-    Flag* flag = &Flag::flags[i];
+-    instanceHandle vmFlagObj = InstanceKlass::cast(VMFlag::klass())->allocate_instance_handle(CHECK_NULL);
+-    Handle name = java_lang_String::create_from_str(flag->_name, CHECK_NULL);
+-    Handle type = java_lang_String::create_from_str(flag->_type, CHECK_NULL);
+-    VMFlag::set_name(vmFlagObj, name());
+-    VMFlag::set_type(vmFlagObj, type());
+-    if (flag->is_bool()) {
+-      BOXED_LONG(value, flag->get_bool());
+-      VMFlag::set_value(vmFlagObj, value);
+-    } else if (flag->is_ccstr()) {
+-      Handle value = java_lang_String::create_from_str(flag->get_ccstr(), CHECK_NULL);
+-      VMFlag::set_value(vmFlagObj, value());
+-    } else if (flag->is_int()) {
+-      BOXED_LONG(value, flag->get_int());
+-      VMFlag::set_value(vmFlagObj, value);
+-    } else if (flag->is_intx()) {
+-      BOXED_LONG(value, flag->get_intx());
+-      VMFlag::set_value(vmFlagObj, value);
+-    } else if (flag->is_uint()) {
+-      BOXED_LONG(value, flag->get_uint());
+-      VMFlag::set_value(vmFlagObj, value);
+-    } else if (flag->is_uint64_t()) {
+-      BOXED_LONG(value, flag->get_uint64_t());
+-      VMFlag::set_value(vmFlagObj, value);
+-    } else if (flag->is_uintx()) {
+-      BOXED_LONG(value, flag->get_uintx());
+-      VMFlag::set_value(vmFlagObj, value);
+-    } else if (flag->is_double()) {
+-      BOXED_DOUBLE(value, flag->get_double());
+-      VMFlag::set_value(vmFlagObj, value);
+-    } else if (flag->is_size_t()) {
+-      BOXED_LONG(value, flag->get_size_t());
+-      VMFlag::set_value(vmFlagObj, value);
+-    } else {
+-      JVMCI_ERROR_NULL("VM flag %s has unsupported type %s", flag->_name, flag->_type);
+-    }
+-    vmFlags->obj_at_put(i, vmFlagObj());
+-  }
++  int i = 0;
++  PREDEFINED_CONFIG_FLAGS(ADD_BOOL_FLAG, ADD_INTX_FLAG, ADD_UINTX_FLAG)
+ 
+   objArrayHandle vmIntrinsics = CompilerToVM::initialize_intrinsics(CHECK_NULL);
+ 
+-  objArrayOop data = oopFactory::new_objArray(SystemDictionary::Object_klass(), 6, CHECK_NULL);
++  objArrayOop data = oopFactory::new_objArray(SystemDictionary::Object_klass(), 5, CHECK_NULL);
+   data->obj_at_put(0, vmFields());
+-  data->obj_at_put(1, vmTypes());
+-  data->obj_at_put(2, vmConstants());
+-  data->obj_at_put(3, vmAddresses());
+-  data->obj_at_put(4, vmFlags());
+-  data->obj_at_put(5, vmIntrinsics());
++  data->obj_at_put(1, vmConstants());
++  data->obj_at_put(2, vmAddresses());
++  data->obj_at_put(3, vmFlags());
++  data->obj_at_put(4, vmIntrinsics());
+ 
+   return (jobjectArray) JNIHandles::make_local(THREAD, data);
++#undef COUNT_FLAG
++#undef ADD_FLAG
++#undef ADD_BOOL_FLAG
++#undef ADD_INTX_FLAG
++#undef ADD_UINTX_FLAG
++#undef CHECK_FLAG
++C2V_END
++
++C2V_VMENTRY(jobject, getFlagValue, (JNIEnv *, jobject c2vm, jobject name_handle))
++#define RETURN_BOXED_LONG(value) oop box; jvalue p; p.j = (jlong) (value); box = java_lang_boxing_object::create(T_LONG, &p, CHECK_NULL); return JNIHandles::make_local(THREAD, box);
++#define RETURN_BOXED_DOUBLE(value) oop box; jvalue p; p.d = (jdouble) (value); box = java_lang_boxing_object::create(T_DOUBLE, &p, CHECK_NULL); return JNIHandles::make_local(THREAD, box);
++  Handle name = JNIHandles::resolve(name_handle);
++  if (name.is_null()) {
++    THROW_0(vmSymbols::java_lang_NullPointerException());
++  }
++  ResourceMark rm;
++  const char* cstring = java_lang_String::as_utf8_string(name());
++  Flag* flag = Flag::find_flag(cstring, strlen(cstring), /* allow_locked */ true, /* return_flag */ true);
++  if (flag == NULL) {
++    return c2vm;
++  }
++  if (flag->is_bool()) {
++    jvalue prim;
++    prim.z = flag->get_bool();
++    oop box = java_lang_boxing_object::create(T_BOOLEAN, &prim, CHECK_NULL);
++    return JNIHandles::make_local(THREAD, box);
++  } else if (flag->is_ccstr()) {
++    Handle value = java_lang_String::create_from_str(flag->get_ccstr(), CHECK_NULL);
++    return JNIHandles::make_local(THREAD, value());
++  } else if (flag->is_intx()) {
++    RETURN_BOXED_LONG(flag->get_intx());
++  } else if (flag->is_int()) {
++    RETURN_BOXED_LONG(flag->get_int());
++  } else if (flag->is_uint()) {
++    RETURN_BOXED_LONG(flag->get_uint());
++  } else if (flag->is_uint64_t()) {
++    RETURN_BOXED_LONG(flag->get_uint64_t());
++  } else if (flag->is_size_t()) {
++    RETURN_BOXED_LONG(flag->get_size_t());
++  } else if (flag->is_uintx()) {
++    RETURN_BOXED_LONG(flag->get_uintx());
++  } else if (flag->is_double()) {
++    RETURN_BOXED_DOUBLE(flag->get_double());
++  } else {
++    JVMCI_ERROR_NULL("VM flag %s has unsupported type %s", flag->_name, flag->_type);
++  }
++C2V_END
++
+ #undef BOXED_LONG
+ #undef BOXED_DOUBLE
+-C2V_END
++#undef CSTRING_TO_JSTRING
+ 
+ C2V_VMENTRY(jbyteArray, getBytecode, (JNIEnv *, jobject, jobject jvmci_method))
+   methodHandle method = CompilerToVM::asMethod(jvmci_method);
+@@ -743,7 +885,7 @@
+   return cp->remap_instruction_operand_from_cache(index);
+ C2V_END
+ 
+-C2V_VMENTRY(jobject, resolveFieldInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index, jobject jvmci_method, jbyte opcode, jlongArray info_handle))
++C2V_VMENTRY(jobject, resolveFieldInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index, jobject jvmci_method, jbyte opcode, jintArray info_handle))
+   ResourceMark rm;
+   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+   Bytecodes::Code code = (Bytecodes::Code)(((int) opcode) & 0xFF);
+@@ -751,9 +893,12 @@
+   LinkInfo link_info(cp, index, (jvmci_method != NULL) ? CompilerToVM::asMethod(jvmci_method) : NULL, CHECK_0);
+   LinkResolver::resolve_field(fd, link_info, Bytecodes::java_code(code), false, CHECK_0);
+   typeArrayOop info = (typeArrayOop) JNIHandles::resolve(info_handle);
+-  assert(info != NULL && info->length() == 2, "must be");
+-  info->long_at_put(0, (jlong) fd.access_flags().as_int());
+-  info->long_at_put(1, (jlong) fd.offset());
++  if (info == NULL || info->length() != 3) {
++    JVMCI_ERROR_NULL("info must not be null and have a length of 3");
++  }
++  info->int_at_put(0, fd.access_flags().as_int());
++  info->int_at_put(1, fd.offset());
++  info->int_at_put(2, fd.index());
+   oop field_holder = CompilerToVM::get_jvmci_type(fd.field_holder(), CHECK_NULL);
+   return JNIHandles::make_local(THREAD, field_holder);
+ C2V_END
+@@ -1610,7 +1755,7 @@
+   {CC "resolveConstantInPool",                        CC "(" HS_CONSTANT_POOL "I)" OBJECT,                                                  FN_PTR(resolveConstantInPool)},
+   {CC "resolvePossiblyCachedConstantInPool",          CC "(" HS_CONSTANT_POOL "I)" OBJECT,                                                  FN_PTR(resolvePossiblyCachedConstantInPool)},
+   {CC "resolveTypeInPool",                            CC "(" HS_CONSTANT_POOL "I)" HS_RESOLVED_KLASS,                                       FN_PTR(resolveTypeInPool)},
+-  {CC "resolveFieldInPool",                           CC "(" HS_CONSTANT_POOL "I" HS_RESOLVED_METHOD "B[J)" HS_RESOLVED_KLASS,              FN_PTR(resolveFieldInPool)},
++  {CC "resolveFieldInPool",                           CC "(" HS_CONSTANT_POOL "I" HS_RESOLVED_METHOD "B[I)" HS_RESOLVED_KLASS,              FN_PTR(resolveFieldInPool)},
+   {CC "resolveInvokeDynamicInPool",                   CC "(" HS_CONSTANT_POOL "I)V",                                                        FN_PTR(resolveInvokeDynamicInPool)},
+   {CC "resolveInvokeHandleInPool",                    CC "(" HS_CONSTANT_POOL "I)V",                                                        FN_PTR(resolveInvokeHandleInPool)},
+   {CC "resolveMethod",                                CC "(" HS_RESOLVED_KLASS HS_RESOLVED_METHOD HS_RESOLVED_KLASS ")" HS_RESOLVED_METHOD, FN_PTR(resolveMethod)},
+@@ -1648,6 +1793,7 @@
+   {CC "getFingerprint",                               CC "(J)J",                                                                            FN_PTR(getFingerprint)},
+   {CC "interpreterFrameSize",                         CC "(" BYTECODE_FRAME ")I",                                                           FN_PTR(interpreterFrameSize)},
+   {CC "compileToBytecode",                            CC "(" OBJECT ")V",                                                                   FN_PTR(compileToBytecode)},
++  {CC "getFlagValue",                                 CC "(" STRING ")" OBJECT,                                                             FN_PTR(getFlagValue)},
+ };
+ 
+ int CompilerToVM::methods_count() {
+diff --git a/src/share/vm/jvmci/jvmciCompilerToVM.hpp b/src/share/vm/jvmci/jvmciCompilerToVM.hpp
+--- a/src/share/vm/jvmci/jvmciCompilerToVM.hpp
++++ b/src/share/vm/jvmci/jvmciCompilerToVM.hpp
+@@ -66,6 +66,15 @@
+ 
+     static int vm_page_size;
+ 
++    static int sizeof_vtableEntry;
++    static int sizeof_ExceptionTableElement;
++    static int sizeof_LocalVariableTableElement;
++    static int sizeof_ConstantPool;
++    static int sizeof_SymbolPointer;
++    static int sizeof_narrowKlass;
++    static int sizeof_arrayOopDesc;
++    static int sizeof_BasicLock;
++
+     static address dsin;
+     static address dcos;
+     static address dtan;
+@@ -74,8 +83,11 @@
+     static address dlog10;
+     static address dpow;
+ 
++    static address symbol_init;
++    static address symbol_clinit;
++
+    public:
+-    static void initialize();
++    static void initialize(TRAPS);
+ 
+     static int max_oop_map_stack_offset() {
+       assert(_max_oop_map_stack_offset > 0, "must be initialized");
+@@ -83,6 +95,20 @@
+     }
+   };
+ 
++  static bool cstring_equals(const char* const& s0, const char* const& s1) {
++    return strcmp(s0, s1) == 0;
++  }
++
++  static unsigned cstring_hash(const char* const& s) {
++    int h = 0;
++    const char* p = s;
++    while (*p != '\0') {
++      h = 31 * h + *p;
++      p++;
++    }
++    return h;
++  }
++
+   static JNINativeMethod methods[];
+ 
+   static objArrayHandle initialize_intrinsics(TRAPS);
+diff --git a/src/share/vm/jvmci/vmStructs_jvmci.cpp b/src/share/vm/jvmci/vmStructs_jvmci.cpp
+--- a/src/share/vm/jvmci/vmStructs_jvmci.cpp
++++ b/src/share/vm/jvmci/vmStructs_jvmci.cpp
+@@ -78,6 +78,15 @@
+                                                                                                                                      \
+   static_field(CompilerToVM::Data,             vm_page_size,                           int)                                          \
+                                                                                                                                      \
++  static_field(CompilerToVM::Data,             sizeof_vtableEntry,                     int)                                          \
++  static_field(CompilerToVM::Data,             sizeof_ExceptionTableElement,           int)                                          \
++  static_field(CompilerToVM::Data,             sizeof_LocalVariableTableElement,       int)                                          \
++  static_field(CompilerToVM::Data,             sizeof_ConstantPool,                    int)                                          \
++  static_field(CompilerToVM::Data,             sizeof_SymbolPointer,                   int)                                          \
++  static_field(CompilerToVM::Data,             sizeof_narrowKlass,                     int)                                          \
++  static_field(CompilerToVM::Data,             sizeof_arrayOopDesc,                    int)                                          \
++  static_field(CompilerToVM::Data,             sizeof_BasicLock,                       int)                                          \
++                                                                                                                                     \
+   static_field(CompilerToVM::Data,             dsin,                                   address)                                      \
+   static_field(CompilerToVM::Data,             dcos,                                   address)                                      \
+   static_field(CompilerToVM::Data,             dtan,                                   address)                                      \
+@@ -86,6 +95,9 @@
+   static_field(CompilerToVM::Data,             dlog10,                                 address)                                      \
+   static_field(CompilerToVM::Data,             dpow,                                   address)                                      \
+                                                                                                                                      \
++  static_field(CompilerToVM::Data,             symbol_init,                            address)                                      \
++  static_field(CompilerToVM::Data,             symbol_clinit,                          address)                                      \
++                                                                                                                                     \
+   static_field(Abstract_VM_Version,            _features,                              uint64_t)                                     \
+                                                                                                                                      \
+   nonstatic_field(Array<int>,                  _length,                                int)                                          \
+@@ -293,7 +305,6 @@
+   static_field(StubRoutines,                _crc32c_table_addr,                               address)                               \
+   static_field(StubRoutines,                _updateBytesCRC32C,                               address)                               \
+   static_field(StubRoutines,                _updateBytesAdler32,                              address)                               \
+-  static_field(StubRoutines,                _multiplyToLen,                                   address)                               \
+   static_field(StubRoutines,                _squareToLen,                                     address)                               \
+   static_field(StubRoutines,                _mulAdd,                                          address)                               \
+   static_field(StubRoutines,                _montgomeryMultiply,                              address)                               \
+diff --git a/test/compiler/jvmci/common/patches/jdk.vm.ci/jdk/vm/ci/hotspot/CompilerToVMHelper.java b/test/compiler/jvmci/common/patches/jdk.vm.ci/jdk/vm/ci/hotspot/CompilerToVMHelper.java
+--- a/test/compiler/jvmci/common/patches/jdk.vm.ci/jdk/vm/ci/hotspot/CompilerToVMHelper.java
++++ b/test/compiler/jvmci/common/patches/jdk.vm.ci/jdk/vm/ci/hotspot/CompilerToVMHelper.java
+@@ -48,6 +48,10 @@
+         return CTVM.getExceptionTableStart((HotSpotResolvedJavaMethodImpl)method);
+     }
+ 
++    public static Object getFlagValue(String name) {
++        return CTVM.getFlagValue(name);
++    }
++
+     public static boolean isCompilable(HotSpotResolvedJavaMethod method) {
+         return CTVM.isCompilable((HotSpotResolvedJavaMethodImpl)method);
+     }
+@@ -128,7 +132,7 @@
+     }
+ 
+     public static HotSpotResolvedObjectType resolveFieldInPool(
+-            ConstantPool constantPool, int cpi, ResolvedJavaMethod method, byte opcode, long[] info) {
++            ConstantPool constantPool, int cpi, ResolvedJavaMethod method, byte opcode, int[] info) {
+         return CTVM.resolveFieldInPool((HotSpotConstantPool) constantPool, cpi, (HotSpotResolvedJavaMethodImpl) method, opcode, info);
+     }
+ 
+diff --git a/test/compiler/jvmci/compilerToVM/ConstantPoolTestCase.java b/test/compiler/jvmci/compilerToVM/ConstantPoolTestCase.java
+--- a/test/compiler/jvmci/compilerToVM/ConstantPoolTestCase.java
++++ b/test/compiler/jvmci/compilerToVM/ConstantPoolTestCase.java
+@@ -202,13 +202,13 @@
+         public final String type;
+         public final ResolvedJavaMethod[] methods;
+         public final byte[] opcodes;
+-        public final long accFlags;
++        public final int accFlags;
+ 
+-        public TestedCPEntry(String klass, String name, String type, byte[] opcodes, long accFlags) {
++        public TestedCPEntry(String klass, String name, String type, byte[] opcodes, int accFlags) {
+                 this(klass, name, type, null, opcodes, accFlags);
+         }
+ 
+-        public TestedCPEntry(String klass, String name, String type, ResolvedJavaMethod[] methods, byte[] opcodes, long accFlags) {
++        public TestedCPEntry(String klass, String name, String type, ResolvedJavaMethod[] methods, byte[] opcodes, int accFlags) {
+             this.klass = klass;
+             this.name = name;
+             this.type = type;
+diff --git a/test/compiler/jvmci/compilerToVM/ConstantPoolTestsHelper.java b/test/compiler/jvmci/compilerToVM/ConstantPoolTestsHelper.java
+--- a/test/compiler/jvmci/compilerToVM/ConstantPoolTestsHelper.java
++++ b/test/compiler/jvmci/compilerToVM/ConstantPoolTestsHelper.java
+@@ -206,7 +206,7 @@
+                                       "stringFieldEmpty",
+                                       "Ljava/lang/String;",
+                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+-                                      0L),
++                                      0),
+                 }
+         );
+         CP_MAP_FOR_CLASS.put(CONSTANT_METHODREF,
+@@ -362,7 +362,7 @@
+                                       "stringFieldEmpty",
+                                       "Ljava/lang/String;",
+                                       new byte[] {(byte) Opcodes.PUTFIELD | (byte) Opcodes.GETFIELD},
+-                                      0L),
++                                      0),
+                 }
+         );
+         CP_MAP_FOR_ABS_CLASS.put(CONSTANT_METHODREF,
+diff --git a/test/compiler/jvmci/compilerToVM/GetFlagValueTest.java b/test/compiler/jvmci/compilerToVM/GetFlagValueTest.java
+new file mode 100644
+--- /dev/null
++++ b/test/compiler/jvmci/compilerToVM/GetFlagValueTest.java
+@@ -0,0 +1,93 @@
++/*
++ * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++/*
++ * @test
++ * @bug 8173912
++ * @requires vm.jvmci
++ * @library / /test/lib
++ * @library ../common/patches
++ * @modules jdk.vm.ci/jdk.vm.ci.hotspot:+open
++ * @build sun.hotspot.WhiteBox
++ * @run driver ClassFileInstaller sun.hotspot.WhiteBox
++ *                                sun.hotspot.WhiteBox$WhiteBoxPermission
++ * @build jdk.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper
++ * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
++ *                  -XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI -Xbootclasspath/a:.
++ *                  compiler.jvmci.compilerToVM.GetFlagValueTest
++ */
++
++package compiler.jvmci.compilerToVM;
++
++import jdk.test.lib.Asserts;
++import jdk.vm.ci.hotspot.CompilerToVMHelper;
++import jdk.test.lib.process.OutputAnalyzer;
++import jdk.test.lib.process.ProcessTools;
++import java.math.BigInteger;
++import java.util.Arrays;
++import java.util.regex.Pattern;
++import java.util.regex.Matcher;
++import sun.hotspot.WhiteBox;
++
++public class GetFlagValueTest {
++    public static void main(String[] args) throws Exception {
++        try {
++            CompilerToVMHelper.getFlagValue(null);
++            Asserts.fail("Expected NullPointerException when calling getFlagValue(null)");
++        } catch (NullPointerException e) {
++            // expected
++        }
++
++        Object missing = CompilerToVMHelper.getFlagValue("this is surely not a flag");
++        Asserts.assertEquals(CompilerToVMHelper.CTVM, missing);
++
++        ProcessBuilder pb;
++        OutputAnalyzer out;
++
++        String[] arguments = {"-XX:+UnlockExperimentalVMOptions", "-XX:+EnableJVMCI", "-XX:+PrintFlagsFinal", "-version"};
++        pb = ProcessTools.createJavaProcessBuilder(arguments);
++        out = new OutputAnalyzer(pb.start());
++
++        out.shouldHaveExitValue(0);
++        String[] lines = out.getStdout().split("\\r?\\n");
++        Asserts.assertTrue(lines.length > 1, "Expected output from -XX:+PrintFlagsFinal");
++
++        final WhiteBox wb = WhiteBox.getWhiteBox();
++
++        // Line example: ccstr PrintIdealGraphAddress = 127.0.0.1 {C2 notproduct} {default}
++        Pattern flagLine = Pattern.compile("(\\w+)\\s+(\\w+)\\s+:?= (?:(.+))\\{[^}]+\\}\\s+\\{[^}]+\\}");
++        for (String line : lines) {
++            if (line.indexOf('=') != -1) {
++                line = line.trim();
++                Matcher m = flagLine.matcher(line);
++                Asserts.assertTrue(m.matches(), "Unexpected line in -XX:+PrintFlagsFinal output: " + line);
++                String type = m.group(1);
++                String name = m.group(2);
++                String expect = m.group(3).trim();
++                Object value = CompilerToVMHelper.getFlagValue(name);
++                Object wbValue = wb.getVMFlag(name);
++                Asserts.assertEquals(value, wbValue, "Value of flag " + name);
++            }
++        }
++    }
++}
+diff --git a/test/compiler/jvmci/compilerToVM/ResolveFieldInPoolTest.java b/test/compiler/jvmci/compilerToVM/ResolveFieldInPoolTest.java
+--- a/test/compiler/jvmci/compilerToVM/ResolveFieldInPoolTest.java
++++ b/test/compiler/jvmci/compilerToVM/ResolveFieldInPoolTest.java
+@@ -103,7 +103,7 @@
+             cached = "cached ";
+         }
+         for (int j = 0; j < entry.opcodes.length; j++) {
+-            long[] info = new long[2];
++            int[] info = new int[3];
+             HotSpotResolvedObjectType fieldToVerify
+                     = CompilerToVMHelper.resolveFieldInPool(constantPoolCTVM,
+                                                            index,
+@@ -147,11 +147,11 @@
+             } catch (Exception ex) {
+                 throw new Error("Unexpected exception", ex);
+             }
+-            long offsetToRefer;
++            int offsetToRefer;
+             if ((entry.accFlags & Opcodes.ACC_STATIC) != 0) {
+-                offsetToRefer = UNSAFE.staticFieldOffset(fieldToRefer);
++                offsetToRefer = (int) UNSAFE.staticFieldOffset(fieldToRefer);
+             } else {
+-                offsetToRefer = UNSAFE.objectFieldOffset(fieldToRefer);
++                offsetToRefer = (int) UNSAFE.objectFieldOffset(fieldToRefer);
+             }
+             msg = String.format("Field offset returned by resolveFieldInPool"
+                                         + " method is wrong for the field %s.%s"

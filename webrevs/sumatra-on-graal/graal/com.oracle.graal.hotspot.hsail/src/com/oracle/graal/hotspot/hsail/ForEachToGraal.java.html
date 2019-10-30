@@ -1,0 +1,204 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>New graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/ForEachToGraal.java</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2009, 2011, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 
+  24 package com.oracle.graal.hotspot.hsail;
+  25 
+  26 import static com.oracle.graal.hotspot.HotSpotGraalRuntime.*;
+  27 
+  28 import java.lang.reflect.*;
+  29 import java.util.*;
+  30 
+  31 import com.amd.sumatra.*;
+  32 import com.oracle.graal.api.code.*;
+  33 import com.oracle.graal.api.meta.*;
+  34 import com.oracle.graal.compiler.hsail.*;
+  35 import com.oracle.graal.compiler.target.*;
+  36 import com.oracle.graal.debug.*;
+  37 import com.oracle.graal.graph.iterators.*;
+  38 import com.oracle.graal.hotspot.meta.*;
+  39 import com.oracle.graal.hsail.*;
+  40 import com.oracle.graal.java.*;
+  41 import com.oracle.graal.nodes.*;
+  42 import com.oracle.graal.nodes.java.*;
+  43 import com.oracle.graal.phases.*;
+  44 import com.oracle.graal.phases.util.*;
+  45 
+  46 /**
+  47  * Implements compile and dispatch of Java code containing lambda constructs. Currently only used by
+  48  * JDK interception code that offloads to the GPU.
+  49  */
+  50 public class ForEachToGraal implements CompileAndDispatch, Sumatra {
+  51 
+  52     private static HSAILHotSpotBackend getHSAILBackend() {
+  53         Backend backend = runtime().getBackend(HSAIL.class);
+  54         return (HSAILHotSpotBackend) backend;
+  55     }
+  56 
+  57     /**
+  58      * Gets a compiled and installed kernel for the lambda called by the {@code accept(int value)}
+  59      * method in a class implementing {@code java.util.function.IntConsumer}.
+  60      * 
+  61      * @param intConsumerClass a class implementing {@code java.util.function.IntConsumer}
+  62      * @return a {@link HotSpotNmethod} handle to the compiled and installed kernel
+  63      */
+  64     private static HotSpotNmethod getCompiledLambda(Class intConsumerClass) {
+  65         Method acceptMethod = null;
+  66         for (Method m : intConsumerClass.getMethods()) {
+  67             if (m.getName().equals("accept") &amp;&amp; Arrays.equals(new Class[]{int.class}, m.getParameterTypes())) {
+  68                 assert acceptMethod == null : "found more than one implementation of accept(int) in " + intConsumerClass;
+  69                 acceptMethod = m;
+  70             }
+  71         }
+  72 
+  73         HSAILHotSpotBackend backend = getHSAILBackend();
+  74         Providers providers = backend.getProviders();
+  75         StructuredGraph graph = new StructuredGraph(((HotSpotMetaAccessProvider) providers.getMetaAccess()).lookupJavaMethod(acceptMethod));
+  76         new GraphBuilderPhase.Instance(providers.getMetaAccess(), GraphBuilderConfiguration.getDefault(), OptimisticOptimizations.ALL).apply(graph);
+  77         NodeIterable&lt;MethodCallTargetNode&gt; calls = graph.getNodes(MethodCallTargetNode.class);
+  78         assert calls.count() == 1;
+  79         ResolvedJavaMethod lambdaMethod = calls.first().targetMethod();
+  80         assert lambdaMethod.getName().startsWith("lambda$");
+  81         Debug.log("target ... " + lambdaMethod);
+  82 
+  83         if (lambdaMethod == null) {
+  84             Debug.log("Did not find call in accept()");
+  85             return null;
+  86         }
+  87 
+  88         ExternalCompilationResult hsailCode = backend.compileKernel(lambdaMethod, true);
+  89         return backend.installKernel(lambdaMethod, hsailCode);
+  90     }
+  91 
+  92     @Override
+  93     public Object createKernel(Class&lt;?&gt; consumerClass) {
+  94         try {
+  95             return getCompiledLambda(consumerClass);
+  96         } catch (Throwable e) {
+  97             // If Graal compilation throws an exception, we want to revert to regular Java
+  98             Debug.log("WARNING: Graal compilation failed");
+  99             e.printStackTrace();
+ 100             return null;
+ 101         }
+ 102     }
+ 103 
+ 104     @Override
+ 105     public boolean dispatchKernel(Object kernel, int jobSize, Object[] args) {
+ 106         HotSpotNmethod code = (HotSpotNmethod) kernel;
+ 107         if (code != null) {
+ 108             try {
+ 109                 // No return value from HSAIL kernels
+ 110                 getHSAILBackend().executeKernel(code, jobSize, args);
+ 111                 return true;
+ 112             } catch (InvalidInstalledCodeException iice) {
+ 113                 Debug.log("WARNING: Invalid installed code at exec time." + iice);
+ 114                 iice.printStackTrace();
+ 115                 return false;
+ 116             }
+ 117         } else {
+ 118             // Should throw something sensible here
+ 119             return false;
+ 120         }
+ 121     }
+ 122 }
+</pre></body></html>

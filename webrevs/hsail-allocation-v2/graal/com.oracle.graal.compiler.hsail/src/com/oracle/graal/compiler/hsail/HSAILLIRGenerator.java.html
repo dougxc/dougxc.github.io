@@ -1,0 +1,962 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>New graal/com.oracle.graal.compiler.hsail/src/com/oracle/graal/compiler/hsail/HSAILLIRGenerator.java</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2013, 2014, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 
+  24 package com.oracle.graal.compiler.hsail;
+  25 
+  26 import static com.oracle.graal.api.code.ValueUtil.*;
+  27 import static com.oracle.graal.lir.hsail.HSAILArithmetic.*;
+  28 import static com.oracle.graal.lir.hsail.HSAILBitManipulationOp.IntrinsicOpcode.*;
+  29 import static com.oracle.graal.lir.hsail.HSAILCompare.*;
+  30 
+  31 import com.oracle.graal.api.code.*;
+  32 import com.oracle.graal.api.meta.*;
+  33 import com.oracle.graal.asm.*;
+  34 import com.oracle.graal.compiler.gen.*;
+  35 import com.oracle.graal.graph.*;
+  36 import com.oracle.graal.lir.*;
+  37 import com.oracle.graal.lir.StandardOp.JumpOp;
+  38 import com.oracle.graal.lir.hsail.*;
+  39 import com.oracle.graal.lir.hsail.HSAILArithmetic.ConvertOp;
+  40 import com.oracle.graal.lir.hsail.HSAILArithmetic.Op1Stack;
+  41 import com.oracle.graal.lir.hsail.HSAILArithmetic.Op2Reg;
+  42 import com.oracle.graal.lir.hsail.HSAILArithmetic.Op2Stack;
+  43 import com.oracle.graal.lir.hsail.HSAILArithmetic.ShiftOp;
+  44 import com.oracle.graal.lir.hsail.HSAILControlFlow.CompareBranchOp;
+  45 import com.oracle.graal.lir.hsail.HSAILControlFlow.CondMoveOp;
+  46 import com.oracle.graal.lir.hsail.HSAILControlFlow.FloatCondMoveOp;
+  47 import com.oracle.graal.lir.hsail.HSAILControlFlow.ReturnOp;
+  48 import com.oracle.graal.lir.hsail.HSAILControlFlow.StrategySwitchOp;
+  49 import com.oracle.graal.lir.hsail.HSAILMove.LeaOp;
+  50 import com.oracle.graal.lir.hsail.HSAILMove.MembarOp;
+  51 import com.oracle.graal.lir.hsail.HSAILMove.MoveFromRegOp;
+  52 import com.oracle.graal.lir.hsail.HSAILMove.MoveToRegOp;
+  53 import com.oracle.graal.nodes.*;
+  54 import com.oracle.graal.nodes.calc.*;
+  55 import com.oracle.graal.nodes.calc.FloatConvertNode.FloatConvert;
+  56 import com.oracle.graal.phases.util.*;
+  57 
+  58 /**
+  59  * This class implements the HSAIL specific portion of the LIR generator.
+  60  */
+  61 public abstract class HSAILLIRGenerator extends LIRGenerator {
+  62 
+  63     public class HSAILSpillMoveFactory implements LIR.SpillMoveFactory {
+  64 
+  65         @Override
+  66         public LIRInstruction createMove(AllocatableValue dst, Value src) {
+  67             return HSAILLIRGenerator.this.createMove(dst, src);
+  68         }
+  69     }
+  70 
+  71     public HSAILLIRGenerator(Providers providers, CallingConvention cc, LIRGenerationResult lirGenRes) {
+  72         super(providers, cc, lirGenRes);
+  73         lirGenRes.getLIR().setSpillMoveFactory(new HSAILSpillMoveFactory());
+  74     }
+  75 
+  76     @Override
+  77     public boolean canStoreConstant(Constant c, boolean isCompressed) {
+  78         // Operand b must be in the .reg state space.
+  79         return false;
+  80     }
+  81 
+  82     @Override
+  83     public boolean canInlineConstant(Constant c) {
+  84         switch (c.getKind()) {
+  85             case Long:
+  86                 return NumUtil.isInt(c.asLong()) &amp;&amp; !getCodeCache().needsDataPatch(c);
+  87             case Object:
+  88                 return c.isNull();
+  89             default:
+  90                 return true;
+  91         }
+  92     }
+  93 
+  94     @Override
+  95     public Variable emitMove(Value input) {
+  96         Variable result = newVariable(input.getPlatformKind());
+  97         emitMove(result, input);
+  98         return result;
+  99     }
+ 100 
+ 101     protected HSAILLIRInstruction createMove(AllocatableValue dst, Value src) {
+ 102         if (src instanceof HSAILAddressValue) {
+ 103             return new LeaOp(dst, (HSAILAddressValue) src);
+ 104         } else if (isRegister(src) || isStackSlot(dst)) {
+ 105             return new MoveFromRegOp(dst.getKind(), dst, src);
+ 106         } else {
+ 107             return new MoveToRegOp(dst.getKind(), dst, src);
+ 108         }
+ 109     }
+ 110 
+ 111     @Override
+ 112     public void emitMove(AllocatableValue dst, Value src) {
+ 113         append(createMove(dst, src));
+ 114     }
+ 115 
+ 116     public void emitData(AllocatableValue dst, byte[] data) {
+ 117         throw GraalInternalError.unimplemented();
+ 118     }
+ 119 
+ 120     public HSAILAddressValue asAddressValue(Value address) {
+ 121         if (address instanceof HSAILAddressValue) {
+ 122             return (HSAILAddressValue) address;
+ 123         } else {
+ 124             return emitAddress(address, 0, Value.ILLEGAL, 0);
+ 125         }
+ 126     }
+ 127 
+ 128     public HSAILAddressValue emitAddress(Value base, long displacement, Value index, int scale) {
+ 129         AllocatableValue baseRegister;
+ 130         long finalDisp = displacement;
+ 131 
+ 132         if (isConstant(base)) {
+ 133             if (asConstant(base).isNull()) {
+ 134                 baseRegister = Value.ILLEGAL;
+ 135             } else if (asConstant(base).getKind() != Kind.Object) {
+ 136                 finalDisp += asConstant(base).asLong();
+ 137                 baseRegister = Value.ILLEGAL;
+ 138             } else {
+ 139                 baseRegister = load(base);
+ 140             }
+ 141         } else if (base.equals(Value.ILLEGAL)) {
+ 142             baseRegister = Value.ILLEGAL;
+ 143         } else {
+ 144             baseRegister = asAllocatable(base);
+ 145         }
+ 146         if (!index.equals(Value.ILLEGAL)) {
+ 147             if (isConstant(index)) {
+ 148                 finalDisp += asConstant(index).asLong() * scale;
+ 149             } else {
+ 150                 Value indexRegister;
+ 151                 Value convertedIndex;
+ 152                 convertedIndex = this.emitSignExtend(index, 32, 64);
+ 153                 if (scale != 1) {
+ 154                     indexRegister = emitUMul(convertedIndex, Constant.forInt(scale));
+ 155                 } else {
+ 156                     indexRegister = convertedIndex;
+ 157                 }
+ 158                 if (baseRegister.equals(Value.ILLEGAL)) {
+ 159                     baseRegister = asAllocatable(indexRegister);
+ 160                 } else {
+ 161                     baseRegister = emitAdd(baseRegister, indexRegister);
+ 162                 }
+ 163             }
+ 164         }
+ 165         return new HSAILAddressValue(target().wordKind, baseRegister, finalDisp);
+ 166     }
+ 167 
+ 168     @Override
+ 169     public Variable emitAddress(StackSlot address) {
+ 170         throw GraalInternalError.unimplemented();
+ 171     }
+ 172 
+ 173     @Override
+ 174     public void emitJump(LabelRef label) {
+ 175         append(new JumpOp(label));
+ 176     }
+ 177 
+ 178     public static HSAILCompare mapKindToCompareOp(Kind kind) {
+ 179         switch (kind) {
+ 180             case Int:
+ 181                 return ICMP;
+ 182             case Long:
+ 183                 return LCMP;
+ 184             case Float:
+ 185                 return FCMP;
+ 186             case Double:
+ 187                 return DCMP;
+ 188             case Object:
+ 189                 return ACMP;
+ 190             default:
+ 191                 throw GraalInternalError.shouldNotReachHere("" + kind);
+ 192         }
+ 193     }
+ 194 
+ 195     @Override
+ 196     public void emitCompareBranch(PlatformKind cmpKind, Value left, Value right, Condition cond, boolean unorderedIsTrue, LabelRef trueDestination, LabelRef falseDestination,
+ 197                     double trueDestinationProbability) {
+ 198         // We don't have to worry about mirroring the condition on HSAIL.
+ 199         Condition finalCondition = cond;
+ 200         Variable result = newVariable(left.getKind());
+ 201         Kind kind = left.getKind().getStackKind();
+ 202         switch (kind) {
+ 203             case Int:
+ 204             case Long:
+ 205             case Object:
+ 206                 append(new CompareBranchOp(mapKindToCompareOp(kind), finalCondition, left, right, result, result, trueDestination, falseDestination, false));
+ 207                 break;
+ 208             case Float:
+ 209             case Double:
+ 210                 append(new CompareBranchOp(mapKindToCompareOp(kind), finalCondition, left, right, result, result, trueDestination, falseDestination, unorderedIsTrue));
+ 211                 break;
+ 212             default:
+ 213                 throw GraalInternalError.shouldNotReachHere("" + left.getKind());
+ 214         }
+ 215     }
+ 216 
+ 217     @Override
+ 218     public void emitOverflowCheckBranch(LabelRef overflow, LabelRef noOverflow, double overflowProbability) {
+ 219         throw GraalInternalError.unimplemented();
+ 220     }
+ 221 
+ 222     @Override
+ 223     public void emitIntegerTestBranch(Value left, Value right, LabelRef trueDestination, LabelRef falseDestination, double trueDestinationProbability) {
+ 224         Variable result = emitAnd(left, right);
+ 225         Variable dummyResult = newVariable(left.getKind());
+ 226         append(new CompareBranchOp(mapKindToCompareOp(left.getKind()), Condition.EQ, result, Constant.forInt(0), dummyResult, dummyResult, trueDestination, falseDestination, false));
+ 227     }
+ 228 
+ 229     @Override
+ 230     public Variable emitConditionalMove(PlatformKind cmpKind, Value left, Value right, Condition cond, boolean unorderedIsTrue, Value trueValue, Value falseValue) {
+ 231         Condition finalCondition = cond;
+ 232         Variable result = newVariable(trueValue.getKind());
+ 233         Kind kind = left.getKind().getStackKind();
+ 234         switch (kind) {
+ 235             case Int:
+ 236             case Long:
+ 237             case Object:
+ 238                 append(new CondMoveOp(mapKindToCompareOp(kind), load(left), load(right), result, finalCondition, load(trueValue), load(falseValue)));
+ 239                 break;
+ 240             case Float:
+ 241             case Double:
+ 242                 append(new FloatCondMoveOp(mapKindToCompareOp(kind), load(left), load(right), result, finalCondition, unorderedIsTrue, load(trueValue), load(falseValue)));
+ 243                 break;
+ 244             default:
+ 245                 throw GraalInternalError.shouldNotReachHere("missing: " + left.getKind());
+ 246         }
+ 247         return result;
+ 248     }
+ 249 
+ 250     @Override
+ 251     public Variable emitIntegerTestMove(Value left, Value right, Value trueValue, Value falseValue) {
+ 252         throw GraalInternalError.unimplemented();
+ 253     }
+ 254 
+ 255     /**
+ 256      * Generates the LIR instruction for a negation operation.
+ 257      *
+ 258      * @param input the value that is being negated
+ 259      * @return Variable that represents the result of the negation
+ 260      */
+ 261     @Override
+ 262     public Variable emitNegate(Value input) {
+ 263         Variable result = newVariable(input.getKind());
+ 264         switch (input.getKind()) {
+ 265             case Int:
+ 266                 // Note: The Int case also handles the negation of shorts, bytes, and chars because
+ 267                 // Java treats these types as ints at the bytecode level.
+ 268                 append(new Op1Stack(INEG, result, input));
+ 269                 break;
+ 270             case Long:
+ 271                 append(new Op1Stack(LNEG, result, input));
+ 272                 break;
+ 273             case Double:
+ 274                 append(new Op1Stack(DNEG, result, input));
+ 275                 break;
+ 276             case Float:
+ 277                 append(new Op1Stack(FNEG, result, input));
+ 278                 break;
+ 279             default:
+ 280                 throw GraalInternalError.shouldNotReachHere();
+ 281         }
+ 282         return result;
+ 283 
+ 284     }
+ 285 
+ 286     /**
+ 287      * Generates the LIR instruction for a bitwise NOT operation.
+ 288      *
+ 289      * @param input the source operand
+ 290      * @return Variable that represents the result of the operation
+ 291      */
+ 292     @Override
+ 293     public Variable emitNot(Value input) {
+ 294         Variable result = newVariable(input.getKind());
+ 295         switch (input.getKind()) {
+ 296             case Int:
+ 297                 // Note: The Int case also covers other primitive integral types smaller than an int
+ 298                 // (char, byte, short) because Java treats these types as ints.
+ 299                 append(new Op1Stack(INOT, result, input));
+ 300                 break;
+ 301             case Long:
+ 302                 append(new Op1Stack(LNOT, result, input));
+ 303                 break;
+ 304             default:
+ 305                 throw GraalInternalError.shouldNotReachHere();
+ 306         }
+ 307         return result;
+ 308 
+ 309     }
+ 310 
+ 311     public Variable emitTestAddressAdd(Value a, Value b) {
+ 312         Variable result = newVariable(a.getKind());
+ 313         switch (a.getKind()) {
+ 314             case Int:
+ 315                 append(new Op2Stack(IADD, result, a, loadNonConst(b)));
+ 316                 break;
+ 317             case Long:
+ 318                 append(new Op2Stack(LADD, result, a, loadNonConst(b)));
+ 319                 break;
+ 320             case Float:
+ 321                 append(new Op2Stack(FADD, result, a, loadNonConst(b)));
+ 322                 break;
+ 323             case Double:
+ 324                 append(new Op2Stack(DADD, result, a, loadNonConst(b)));
+ 325                 break;
+ 326             case Object:
+ 327                 throw GraalInternalError.shouldNotReachHere();
+ 328             default:
+ 329                 throw GraalInternalError.shouldNotReachHere();
+ 330         }
+ 331 
+ 332         return result;
+ 333     }
+ 334 
+ 335     @Override
+ 336     public Variable emitAdd(Value a, Value b) {
+ 337         Variable result = newVariable(a.getKind());
+ 338         switch (a.getKind()) {
+ 339             case Int:
+ 340                 append(new Op2Stack(IADD, result, a, loadNonConst(b)));
+ 341                 break;
+ 342             case Long:
+ 343                 append(new Op2Stack(LADD, result, a, loadNonConst(b)));
+ 344                 break;
+ 345             case Float:
+ 346                 append(new Op2Stack(FADD, result, a, loadNonConst(b)));
+ 347                 break;
+ 348             case Double:
+ 349                 append(new Op2Stack(DADD, result, a, loadNonConst(b)));
+ 350                 break;
+ 351             case Object:
+ 352                 append(new Op2Stack(OADD, result, a, loadNonConst(b)));
+ 353                 break;
+ 354             default:
+ 355                 throw GraalInternalError.shouldNotReachHere();
+ 356         }
+ 357         return result;
+ 358     }
+ 359 
+ 360     @Override
+ 361     public Variable emitSub(Value a, Value b) {
+ 362         Variable result = newVariable(a.getKind());
+ 363         switch (a.getKind()) {
+ 364             case Int:
+ 365                 append(new Op2Stack(ISUB, result, a, loadNonConst(b)));
+ 366                 break;
+ 367             case Float:
+ 368                 append(new Op2Stack(FSUB, result, a, loadNonConst(b)));
+ 369                 break;
+ 370             case Long:
+ 371                 append(new Op2Stack(LSUB, result, a, loadNonConst(b)));
+ 372                 break;
+ 373             case Double:
+ 374                 append(new Op2Stack(DSUB, result, a, loadNonConst(b)));
+ 375                 break;
+ 376             default:
+ 377                 throw GraalInternalError.shouldNotReachHere();
+ 378         }
+ 379         return result;
+ 380     }
+ 381 
+ 382     @Override
+ 383     public Variable emitMul(Value a, Value b) {
+ 384         Variable result = newVariable(a.getKind());
+ 385         switch (a.getKind()) {
+ 386             case Int:
+ 387                 append(new Op2Reg(IMUL, result, a, loadNonConst(b)));
+ 388                 break;
+ 389             case Long:
+ 390                 append(new Op2Reg(LMUL, result, a, loadNonConst(b)));
+ 391                 break;
+ 392             case Float:
+ 393                 append(new Op2Reg(FMUL, result, a, loadNonConst(b)));
+ 394                 break;
+ 395             case Double:
+ 396                 append(new Op2Reg(DMUL, result, a, loadNonConst(b)));
+ 397                 break;
+ 398             default:
+ 399                 throw GraalInternalError.shouldNotReachHere();
+ 400         }
+ 401         return result;
+ 402     }
+ 403 
+ 404     public Variable emitUMul(Value a, Value b) {
+ 405         Variable result = newVariable(a.getKind());
+ 406         switch (a.getKind()) {
+ 407             case Int:
+ 408                 append(new Op2Reg(LUMUL, result, a, loadNonConst(b)));
+ 409                 break;
+ 410             case Long:
+ 411                 append(new Op2Reg(LUMUL, result, a, loadNonConst(b)));
+ 412                 break;
+ 413             default:
+ 414                 throw GraalInternalError.shouldNotReachHere();
+ 415         }
+ 416         return result;
+ 417     }
+ 418 
+ 419     @Override
+ 420     public Value emitDiv(Value a, Value b, DeoptimizingNode deopting) {
+ 421         Variable result = newVariable(a.getKind());
+ 422         switch (a.getKind()) {
+ 423             case Int:
+ 424                 append(new Op2Stack(IDIV, result, a, loadNonConst(b)));
+ 425                 break;
+ 426             case Long:
+ 427                 append(new Op2Stack(LDIV, result, a, loadNonConst(b)));
+ 428                 break;
+ 429             case Float:
+ 430                 append(new Op2Stack(FDIV, result, a, loadNonConst(b)));
+ 431                 break;
+ 432             case Double:
+ 433                 append(new Op2Stack(DDIV, result, a, loadNonConst(b)));
+ 434                 break;
+ 435             default:
+ 436                 throw GraalInternalError.shouldNotReachHere();
+ 437         }
+ 438         return result;
+ 439 
+ 440     }
+ 441 
+ 442     @Override
+ 443     public Value emitRem(Value a, Value b, DeoptimizingNode deopting) {
+ 444         Variable result = newVariable(a.getKind());
+ 445         switch (a.getKind()) {
+ 446             case Int:
+ 447                 append(new Op2Stack(IREM, result, a, loadNonConst(b)));
+ 448                 break;
+ 449             case Long:
+ 450                 append(new Op2Stack(LREM, result, a, loadNonConst(b)));
+ 451                 break;
+ 452             case Float:
+ 453                 append(new Op2Stack(FREM, result, a, loadNonConst(b)));
+ 454                 break;
+ 455             case Double:
+ 456                 append(new Op2Stack(DREM, result, a, loadNonConst(b)));
+ 457                 break;
+ 458             default:
+ 459                 throw GraalInternalError.shouldNotReachHere();
+ 460         }
+ 461         return result;
+ 462     }
+ 463 
+ 464     @Override
+ 465     public Variable emitUDiv(Value a, Value b, DeoptimizingNode deopting) {
+ 466         throw GraalInternalError.unimplemented();
+ 467     }
+ 468 
+ 469     @Override
+ 470     public Variable emitURem(Value a, Value b, DeoptimizingNode deopting) {
+ 471         throw GraalInternalError.unimplemented();
+ 472     }
+ 473 
+ 474     @Override
+ 475     public Variable emitAnd(Value a, Value b) {
+ 476         Variable result = newVariable(a.getKind());
+ 477         switch (a.getKind()) {
+ 478             case Int:
+ 479                 append(new Op2Stack(IAND, result, a, loadNonConst(b)));
+ 480                 break;
+ 481             case Long:
+ 482                 append(new Op2Stack(LAND, result, a, loadNonConst(b)));
+ 483                 break;
+ 484             default:
+ 485                 throw GraalInternalError.shouldNotReachHere();
+ 486         }
+ 487         return result;
+ 488     }
+ 489 
+ 490     @Override
+ 491     public Variable emitOr(Value a, Value b) {
+ 492         Variable result = newVariable(a.getKind());
+ 493         switch (a.getKind()) {
+ 494             case Int:
+ 495                 append(new Op2Stack(IOR, result, a, loadNonConst(b)));
+ 496                 break;
+ 497             case Long:
+ 498                 append(new Op2Stack(LOR, result, a, loadNonConst(b)));
+ 499                 break;
+ 500             default:
+ 501                 throw GraalInternalError.shouldNotReachHere();
+ 502         }
+ 503         return result;
+ 504     }
+ 505 
+ 506     @Override
+ 507     public Variable emitXor(Value a, Value b) {
+ 508         Variable result = newVariable(a.getKind());
+ 509         switch (a.getKind()) {
+ 510             case Int:
+ 511                 append(new Op2Stack(IXOR, result, a, loadNonConst(b)));
+ 512                 break;
+ 513             case Long:
+ 514                 append(new Op2Stack(LXOR, result, a, loadNonConst(b)));
+ 515                 break;
+ 516             default:
+ 517                 throw GraalInternalError.shouldNotReachHere();
+ 518         }
+ 519         return result;
+ 520     }
+ 521 
+ 522     /**
+ 523      * Generates the LIR instruction for a shift left operation.
+ 524      *
+ 525      * @param a The value that is being shifted
+ 526      * @param b The shift amount
+ 527      * @return Variable that represents the result of the operation
+ 528      */
+ 529     @Override
+ 530     public Variable emitShl(Value a, Value b) {
+ 531         Variable result = newVariable(a.getKind());
+ 532         switch (a.getKind()) {
+ 533             case Int:
+ 534                 // Note: The Int case also covers the shifting of bytes, shorts and chars because
+ 535                 // Java treats these types as ints at the bytecode level.
+ 536                 append(new ShiftOp(ISHL, result, a, b));
+ 537                 break;
+ 538             case Long:
+ 539                 append(new ShiftOp(LSHL, result, a, b));
+ 540                 break;
+ 541             default:
+ 542                 GraalInternalError.shouldNotReachHere();
+ 543         }
+ 544         return result;
+ 545     }
+ 546 
+ 547     /**
+ 548      * Generates the LIR instruction for a shift right operation.
+ 549      *
+ 550      * @param a The value that is being shifted
+ 551      * @param b The shift amount
+ 552      * @return Variable that represents the result of the operation
+ 553      */
+ 554     @Override
+ 555     public Variable emitShr(Value a, Value b) {
+ 556         Variable result = newVariable(a.getKind());
+ 557         switch (a.getKind()) {
+ 558             case Int:
+ 559                 // Note: The Int case also covers the shifting of bytes, shorts and chars because
+ 560                 // Java treats these types as ints at the bytecode level.
+ 561                 append(new ShiftOp(ISHR, result, a, b));
+ 562                 break;
+ 563             case Long:
+ 564                 append(new ShiftOp(LSHR, result, a, b));
+ 565                 break;
+ 566             default:
+ 567                 GraalInternalError.shouldNotReachHere();
+ 568         }
+ 569         return result;
+ 570     }
+ 571 
+ 572     /**
+ 573      * Generates the LIR instruction for an unsigned shift right operation.
+ 574      *
+ 575      * @param a The value that is being shifted
+ 576      * @param b The shift amount
+ 577      * @return Variable that represents the result of the operation
+ 578      */
+ 579     @Override
+ 580     public Variable emitUShr(Value a, Value b) {
+ 581         Variable result = newVariable(a.getKind());
+ 582         switch (a.getKind()) {
+ 583             case Int:
+ 584                 append(new ShiftOp(IUSHR, result, a, b));
+ 585                 break;
+ 586             case Long:
+ 587                 append(new ShiftOp(LUSHR, result, a, b));
+ 588                 break;
+ 589             default:
+ 590                 GraalInternalError.shouldNotReachHere();
+ 591         }
+ 592         return result;
+ 593     }
+ 594 
+ 595     @Override
+ 596     public Value emitFloatConvert(FloatConvert op, Value inputVal) {
+ 597         Variable input = load(inputVal);
+ 598 
+ 599         String from;
+ 600         switch (op) {
+ 601             case D2F:
+ 602             case D2I:
+ 603             case D2L:
+ 604                 from = "f64";
+ 605                 break;
+ 606             case F2D:
+ 607             case F2I:
+ 608             case F2L:
+ 609                 from = "f32";
+ 610                 break;
+ 611             case I2D:
+ 612             case I2F:
+ 613                 from = "s32";
+ 614                 break;
+ 615             case L2D:
+ 616             case L2F:
+ 617                 from = "s64";
+ 618                 break;
+ 619             default:
+ 620                 throw GraalInternalError.shouldNotReachHere();
+ 621         }
+ 622 
+ 623         Variable result;
+ 624         String to;
+ 625         switch (op) {
+ 626             case D2I:
+ 627             case F2I:
+ 628                 to = "s32";
+ 629                 result = newVariable(Kind.Int);
+ 630                 break;
+ 631             case D2L:
+ 632             case F2L:
+ 633                 to = "s64";
+ 634                 result = newVariable(Kind.Long);
+ 635                 break;
+ 636             case F2D:
+ 637             case I2D:
+ 638             case L2D:
+ 639                 to = "f64";
+ 640                 result = newVariable(Kind.Double);
+ 641                 break;
+ 642             case D2F:
+ 643             case I2F:
+ 644             case L2F:
+ 645                 to = "f32";
+ 646                 result = newVariable(Kind.Float);
+ 647                 break;
+ 648             default:
+ 649                 throw GraalInternalError.shouldNotReachHere();
+ 650         }
+ 651 
+ 652         append(new ConvertOp(result, input, to, from));
+ 653         return result;
+ 654     }
+ 655 
+ 656     @Override
+ 657     public Value emitNarrow(Value inputVal, int bits) {
+ 658         Variable input = load(inputVal);
+ 659         Variable result = newVariable(bits &gt; 32 ? Kind.Long : Kind.Int);
+ 660         append(new ConvertOp(result, input, "s" + bits, input.getKind() == Kind.Long ? "s64" : "s32"));
+ 661         return result;
+ 662     }
+ 663 
+ 664     @Override
+ 665     public Value emitSignExtend(Value inputVal, int fromBits, int toBits) {
+ 666         Variable input = load(inputVal);
+ 667         Variable result = newVariable(toBits &gt; 32 ? Kind.Long : Kind.Int);
+ 668         append(new ConvertOp(result, input, "s" + toBits, "s" + fromBits));
+ 669         return result;
+ 670     }
+ 671 
+ 672     @Override
+ 673     public Value emitZeroExtend(Value inputVal, int fromBits, int toBits) {
+ 674         Variable input = load(inputVal);
+ 675         Variable result = newVariable(toBits &gt; 32 ? Kind.Long : Kind.Int);
+ 676         append(new ConvertOp(result, input, "u" + toBits, "u" + fromBits));
+ 677         return result;
+ 678     }
+ 679 
+ 680     @Override
+ 681     public Value emitReinterpret(PlatformKind to, Value inputVal) {
+ 682         Variable result = newVariable(to);
+ 683         emitMove(result, inputVal);
+ 684         return result;
+ 685     }
+ 686 
+ 687     @Override
+ 688     public void emitDeoptimize(Value actionAndReason, Value speculation, DeoptimizingNode deopting) {
+ 689         append(new ReturnOp(Value.ILLEGAL));
+ 690     }
+ 691 
+ 692     @Override
+ 693     public void emitMembar(int barriers) {
+ 694         int necessaryBarriers = target().arch.requiredBarriers(barriers);
+ 695         append(new MembarOp(necessaryBarriers));
+ 696     }
+ 697 
+ 698     @Override
+ 699     public void emitBitCount(Variable result, Value value) {
+ 700         if (value.getKind().getStackKind() == Kind.Int) {
+ 701             append(new HSAILBitManipulationOp(IPOPCNT, result, value));
+ 702         } else {
+ 703             append(new HSAILBitManipulationOp(LPOPCNT, result, value));
+ 704         }
+ 705     }
+ 706 
+ 707     @Override
+ 708     public void emitBitScanForward(Variable result, Value value) {
+ 709         throw GraalInternalError.unimplemented();
+ 710     }
+ 711 
+ 712     @Override
+ 713     public void emitBitScanReverse(Variable result, Value value) {
+ 714         throw GraalInternalError.unimplemented();
+ 715     }
+ 716 
+ 717     /**
+ 718      * Emits the LIR code for the {@link HSAILArithmetic#ABS} operation.
+ 719      *
+ 720      * @param input the source operand
+ 721      * @return Value representing the result of the operation
+ 722      */
+ 723     @Override
+ 724     public Value emitMathAbs(Value input) {
+ 725         Variable result = newVariable(input.getPlatformKind());
+ 726         append(new Op1Stack(ABS, result, input));
+ 727         return result;
+ 728     }
+ 729 
+ 730     /**
+ 731      * Emits the LIR code for the {@link HSAILArithmetic#CEIL} operation.
+ 732      *
+ 733      * @param input the source operand
+ 734      * @return Value representing the result of the operation
+ 735      */
+ 736     public Value emitMathCeil(Value input) {
+ 737         Variable result = newVariable(input.getPlatformKind());
+ 738         append(new Op1Stack(CEIL, result, input));
+ 739         return result;
+ 740     }
+ 741 
+ 742     /**
+ 743      * Emits the LIR code for the {@link HSAILArithmetic#FLOOR} operation.
+ 744      *
+ 745      * @param input the source operand
+ 746      * @return Value representing the result of the operation
+ 747      */
+ 748     public Value emitMathFloor(Value input) {
+ 749         Variable result = newVariable(input.getPlatformKind());
+ 750         append(new Op1Stack(FLOOR, result, input));
+ 751         return result;
+ 752     }
+ 753 
+ 754     /**
+ 755      * Emits the LIR code for the {@link HSAILArithmetic#RINT} operation.
+ 756      *
+ 757      * @param input the source operand
+ 758      * @return Value representing the result of the operation
+ 759      */
+ 760     public Value emitMathRint(Value input) {
+ 761         Variable result = newVariable(input.getPlatformKind());
+ 762         append(new Op1Stack(RINT, result, input));
+ 763         return result;
+ 764     }
+ 765 
+ 766     /**
+ 767      * Emits the LIR code for the {@link HSAILArithmetic#SQRT} operation.
+ 768      *
+ 769      * @param input the source operand
+ 770      * @return value representing the result of the operation
+ 771      */
+ 772     @Override
+ 773     public Value emitMathSqrt(Value input) {
+ 774         Variable result = newVariable(input.getPlatformKind());
+ 775         append(new Op1Stack(SQRT, result, input));
+ 776         return result;
+ 777     }
+ 778 
+ 779     @Override
+ 780     public Value emitMathLog(Value input, boolean base10) {
+ 781         throw GraalInternalError.unimplemented();
+ 782     }
+ 783 
+ 784     @Override
+ 785     public Value emitMathCos(Value input) {
+ 786         throw GraalInternalError.unimplemented();
+ 787     }
+ 788 
+ 789     @Override
+ 790     public Value emitMathSin(Value input) {
+ 791         throw GraalInternalError.unimplemented();
+ 792     }
+ 793 
+ 794     @Override
+ 795     public Value emitMathTan(Value input) {
+ 796         throw GraalInternalError.unimplemented();
+ 797     }
+ 798 
+ 799     @Override
+ 800     public void emitByteSwap(Variable result, Value input) {
+ 801         throw GraalInternalError.unimplemented();
+ 802     }
+ 803 
+ 804     @Override
+ 805     public void emitArrayEquals(Kind kind, Variable result, Value array1, Value array2, Value length) {
+ 806         // TODO Auto-generated method stub
+ 807         throw GraalInternalError.unimplemented();
+ 808     }
+ 809 
+ 810     @Override
+ 811     public void emitReturn(Value input) {
+ 812         AllocatableValue operand = Value.ILLEGAL;
+ 813         if (input != null) {
+ 814             operand = resultOperandFor(input.getKind());
+ 815             emitMove(operand, input);
+ 816         }
+ 817         append(new ReturnOp(operand));
+ 818     }
+ 819 
+ 820     /**
+ 821      * This routine handles the LIR code generation for switch nodes by calling
+ 822      * emitSequentialSwitch.
+ 823      *
+ 824      * This routine overrides LIRGenerator.emitSwitch( ) which calls emitSequentialSwitch or
+ 825      * emitTableSwitch based on a heuristic.
+ 826      *
+ 827      * The recommended approach in HSAIL for generating performant code for switch statements is to
+ 828      * emit a series of cascading compare and branches. Thus this routines always calls
+ 829      * emitSequentialSwitch, which implements this approach.
+ 830      *
+ 831      * Note: Only IntegerSwitchNodes are currently supported. The IntegerSwitchNode is the node that
+ 832      * Graal generates for any switch construct appearing in Java bytecode.
+ 833      */
+ 834     @Override
+ 835     protected void emitStrategySwitch(Constant[] keyConstants, double[] keyProbabilities, LabelRef[] keyTargets, LabelRef defaultTarget, Variable value) {
+ 836         emitStrategySwitch(new SwitchStrategy.SequentialStrategy(keyProbabilities, keyConstants), value, keyTargets, defaultTarget);
+ 837     }
+ 838 
+ 839     /**
+ 840      * Generates the LIR instruction for a switch construct that is meant to be assembled into a
+ 841      * series of cascading compare and branch instructions. This is currently the recommended way of
+ 842      * generating performant HSAIL code for switch constructs.
+ 843      *
+ 844      * In Java bytecode the keys for switch statements are always ints.
+ 845      *
+ 846      * The x86 backend also adds support for handling keys of type long or Object but these two
+ 847      * special cases are for handling the TypeSwitchNode, which is a node that the JVM produces for
+ 848      * handling operations related to method dispatch. We haven't yet added support for the
+ 849      * TypeSwitchNode, so for the time being we have added a check to ensure that the keys are of
+ 850      * type int. This also allows us to flag any test cases/execution paths that may trigger the
+ 851      * creation of a TypeSwitchNode which we don't support yet.
+ 852      *
+ 853      *
+ 854      * @param strategy the strategy used for this switch.
+ 855      * @param keyTargets array of branch targets for each of the cases.
+ 856      * @param defaultTarget the branch target for the default case.
+ 857      * @param key the key that is compared against the key constants in the case statements.
+ 858      */
+ 859     @Override
+ 860     protected void emitStrategySwitch(SwitchStrategy strategy, Variable key, LabelRef[] keyTargets, LabelRef defaultTarget) {
+ 861         if ((key.getKind() == Kind.Int) || (key.getKind() == Kind.Long)) {
+ 862             // Append the LIR instruction for generating compare and branch instructions.
+ 863             append(new StrategySwitchOp(strategy, keyTargets, defaultTarget, key));
+ 864         } else {
+ 865             // Throw an exception if the keys aren't ints.
+ 866             throw GraalInternalError.unimplemented("Switch statements are only supported for keys of type int or long, not " + key.getKind());
+ 867         }
+ 868     }
+ 869 
+ 870     @Override
+ 871     protected void emitTableSwitch(int lowKey, LabelRef defaultTarget, LabelRef[] targets, Value key) {
+ 872         throw GraalInternalError.unimplemented();
+ 873     }
+ 874 
+ 875     @Override
+ 876     public void emitUnwind(Value operand) {
+ 877         throw GraalInternalError.unimplemented();
+ 878     }
+ 879 
+ 880 }
+</pre></body></html>

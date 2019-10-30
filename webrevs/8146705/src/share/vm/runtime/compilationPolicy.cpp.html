@@ -1,0 +1,814 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>New src/share/vm/runtime/compilationPolicy.cpp</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2000, 2015, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #include "precompiled.hpp"
+  26 #include "code/compiledIC.hpp"
+  27 #include "code/nmethod.hpp"
+  28 #include "code/scopeDesc.hpp"
+  29 #include "interpreter/interpreter.hpp"
+  30 #include "oops/methodData.hpp"
+  31 #include "oops/method.hpp"
+  32 #include "oops/oop.inline.hpp"
+  33 #include "prims/nativeLookup.hpp"
+  34 #include "runtime/advancedThresholdPolicy.hpp"
+  35 #include "runtime/compilationPolicy.hpp"
+  36 #include "runtime/frame.hpp"
+  37 #include "runtime/handles.inline.hpp"
+  38 #include "runtime/rframe.hpp"
+  39 #include "runtime/simpleThresholdPolicy.hpp"
+  40 #include "runtime/stubRoutines.hpp"
+  41 #include "runtime/thread.hpp"
+  42 #include "runtime/timer.hpp"
+  43 #include "runtime/vframe.hpp"
+  44 #include "runtime/vm_operations.hpp"
+  45 #include "utilities/events.hpp"
+  46 #include "utilities/globalDefinitions.hpp"
+  47 
+  48 CompilationPolicy* CompilationPolicy::_policy;
+  49 elapsedTimer       CompilationPolicy::_accumulated_time;
+  50 bool               CompilationPolicy::_in_vm_startup;
+  51 
+  52 // Determine compilation policy based on command line argument
+  53 void compilationPolicy_init() {
+  54   CompilationPolicy::set_in_vm_startup(DelayCompilationDuringStartup);
+  55 
+  56   switch(CompilationPolicyChoice) {
+  57   case 0:
+  58     CompilationPolicy::set_policy(new SimpleCompPolicy());
+  59     break;
+  60 
+  61   case 1:
+  62 #ifdef COMPILER2
+  63     CompilationPolicy::set_policy(new StackWalkCompPolicy());
+  64 #else
+  65     Unimplemented();
+  66 #endif
+  67     break;
+  68   case 2:
+  69 #ifdef TIERED
+  70     CompilationPolicy::set_policy(new SimpleThresholdPolicy());
+  71 #else
+  72     Unimplemented();
+  73 #endif
+  74     break;
+  75   case 3:
+  76 #ifdef TIERED
+  77     CompilationPolicy::set_policy(new AdvancedThresholdPolicy());
+  78 #else
+  79     Unimplemented();
+  80 #endif
+  81     break;
+  82   default:
+  83     fatal("CompilationPolicyChoice must be in the range: [0-3]");
+  84   }
+  85   CompilationPolicy::policy()-&gt;initialize();
+  86 }
+  87 
+  88 void CompilationPolicy::completed_vm_startup() {
+  89   if (TraceCompilationPolicy) {
+  90     tty-&gt;print("CompilationPolicy: completed vm startup.\n");
+  91   }
+  92   _in_vm_startup = false;
+  93 }
+  94 
+  95 // Returns true if m must be compiled before executing it
+  96 // This is intended to force compiles for methods (usually for
+  97 // debugging) that would otherwise be interpreted for some reason.
+  98 bool CompilationPolicy::must_be_compiled(methodHandle m, int comp_level) {
+  99   // Don't allow Xcomp to cause compiles in replay mode
+ 100   if (ReplayCompiles) return false;
+ 101 
+ 102   if (m-&gt;has_compiled_code()) return false;       // already compiled
+ 103   if (!can_be_compiled(m, comp_level)) return false;
+ 104 
+ 105   return !UseInterpreter ||                                              // must compile all methods
+ 106          (UseCompiler &amp;&amp; AlwaysCompileLoopMethods &amp;&amp; m-&gt;has_loops() &amp;&amp; CompileBroker::should_compile_new_jobs()); // eagerly compile loop methods
+ 107 }
+ 108 
+ 109 // Returns true if m is allowed to be compiled
+ 110 bool CompilationPolicy::can_be_compiled(methodHandle m, int comp_level) {
+ 111   // allow any levels for WhiteBox
+ 112   assert(WhiteBoxAPI || comp_level == CompLevel_all || is_compile(comp_level), "illegal compilation level");
+ 113 
+ 114   if (m-&gt;is_abstract()) return false;
+ 115   if (DontCompileHugeMethods &amp;&amp; m-&gt;code_size() &gt; HugeMethodLimit) return false;
+ 116 
+ 117   // Math intrinsics should never be compiled as this can lead to
+ 118   // monotonicity problems because the interpreter will prefer the
+ 119   // compiled code to the intrinsic version.  This can't happen in
+ 120   // production because the invocation counter can't be incremented
+ 121   // but we shouldn't expose the system to this problem in testing
+ 122   // modes.
+ 123   if (!AbstractInterpreter::can_be_compiled(m)) {
+ 124     return false;
+ 125   }
+ 126   if (comp_level == CompLevel_all) {
+ 127     if (TieredCompilation) {
+ 128       // enough to be compilable at any level for tiered
+ 129       return !m-&gt;is_not_compilable(CompLevel_simple) || !m-&gt;is_not_compilable(CompLevel_full_optimization);
+ 130     } else {
+ 131       // must be compilable at available level for non-tiered
+ 132       return !m-&gt;is_not_compilable(CompLevel_highest_tier);
+ 133     }
+ 134   } else if (is_compile(comp_level)) {
+ 135     return !m-&gt;is_not_compilable(comp_level);
+ 136   }
+ 137   return false;
+ 138 }
+ 139 
+ 140 // Returns true if m is allowed to be osr compiled
+ 141 bool CompilationPolicy::can_be_osr_compiled(methodHandle m, int comp_level) {
+ 142   bool result = false;
+ 143   if (comp_level == CompLevel_all) {
+ 144     if (TieredCompilation) {
+ 145       // enough to be osr compilable at any level for tiered
+ 146       result = !m-&gt;is_not_osr_compilable(CompLevel_simple) || !m-&gt;is_not_osr_compilable(CompLevel_full_optimization);
+ 147     } else {
+ 148       // must be osr compilable at available level for non-tiered
+ 149       result = !m-&gt;is_not_osr_compilable(CompLevel_highest_tier);
+ 150     }
+ 151   } else if (is_compile(comp_level)) {
+ 152     result = !m-&gt;is_not_osr_compilable(comp_level);
+ 153   }
+ 154   return (result &amp;&amp; can_be_compiled(m, comp_level));
+ 155 }
+ 156 
+ 157 bool CompilationPolicy::is_compilation_enabled() {
+ 158   // NOTE: CompileBroker::should_compile_new_jobs() checks for UseCompiler
+ 159   return !delay_compilation_during_startup() &amp;&amp; CompileBroker::should_compile_new_jobs();
+ 160 }
+ 161 
+ 162 CompileTask* CompilationPolicy::select_task_helper(CompileQueue* compile_queue) {
+ 163 #if INCLUDE_JVMCI
+ 164   if (UseJVMCICompiler &amp;&amp; !BackgroundCompilation) {
+ 165     /*
+ 166      * In blocking compilation mode, the CompileBroker will make
+ 167      * compilations submitted by a JVMCI compiler thread non-blocking. These
+ 168      * compilations should be scheduled after all blocking compilations
+ 169      * to service non-compiler related compilations sooner and reduce the
+ 170      * chance of such compilations timing out.
+ 171      */
+ 172     for (CompileTask* task = compile_queue-&gt;first(); task != NULL; task = task-&gt;next()) {
+ 173       if (task-&gt;is_blocking()) {
+ 174         return task;
+ 175       }
+ 176     }
+ 177   }
+ 178 #endif
+ 179   return compile_queue-&gt;first();
+ 180 }
+ 181 
+ 182 #ifndef PRODUCT
+ 183 void CompilationPolicy::print_time() {
+ 184   tty-&gt;print_cr ("Accumulated compilationPolicy times:");
+ 185   tty-&gt;print_cr ("---------------------------");
+ 186   tty-&gt;print_cr ("  Total: %3.3f sec.", _accumulated_time.seconds());
+ 187 }
+ 188 
+ 189 void NonTieredCompPolicy::trace_osr_completion(nmethod* osr_nm) {
+ 190   if (TraceOnStackReplacement) {
+ 191     if (osr_nm == NULL) tty-&gt;print_cr("compilation failed");
+ 192     else tty-&gt;print_cr("nmethod " INTPTR_FORMAT, p2i(osr_nm));
+ 193   }
+ 194 }
+ 195 #endif // !PRODUCT
+ 196 
+ 197 void NonTieredCompPolicy::initialize() {
+ 198   // Setup the compiler thread numbers
+ 199   if (CICompilerCountPerCPU) {
+ 200     // Example: if CICompilerCountPerCPU is true, then we get
+ 201     // max(log2(8)-1,1) = 2 compiler threads on an 8-way machine.
+ 202     // May help big-app startup time.
+ 203     _compiler_count = MAX2(log2_intptr(os::active_processor_count())-1,1);
+ 204     FLAG_SET_ERGO(intx, CICompilerCount, _compiler_count);
+ 205   } else {
+ 206     _compiler_count = CICompilerCount;
+ 207   }
+ 208 }
+ 209 
+ 210 // Note: this policy is used ONLY if TieredCompilation is off.
+ 211 // compiler_count() behaves the following way:
+ 212 // - with TIERED build (with both COMPILER1 and COMPILER2 defined) it should return
+ 213 //   zero for the c1 compilation levels, hence the particular ordering of the
+ 214 //   statements.
+ 215 // - the same should happen when COMPILER2 is defined and COMPILER1 is not
+ 216 //   (server build without TIERED defined).
+ 217 // - if only COMPILER1 is defined (client build), zero should be returned for
+ 218 //   the c2 level.
+ 219 // - if neither is defined - always return zero.
+ 220 int NonTieredCompPolicy::compiler_count(CompLevel comp_level) {
+ 221   assert(!TieredCompilation, "This policy should not be used with TieredCompilation");
+ 222 #ifdef COMPILER2
+ 223   if (is_c2_compile(comp_level)) {
+ 224     return _compiler_count;
+ 225   } else {
+ 226     return 0;
+ 227   }
+ 228 #endif
+ 229 
+ 230 #ifdef COMPILER1
+ 231   if (is_c1_compile(comp_level)) {
+ 232     return _compiler_count;
+ 233   } else {
+ 234     return 0;
+ 235   }
+ 236 #endif
+ 237 
+ 238   return 0;
+ 239 }
+ 240 
+ 241 void NonTieredCompPolicy::reset_counter_for_invocation_event(const methodHandle&amp; m) {
+ 242   // Make sure invocation and backedge counter doesn't overflow again right away
+ 243   // as would be the case for native methods.
+ 244 
+ 245   // BUT also make sure the method doesn't look like it was never executed.
+ 246   // Set carry bit and reduce counter's value to min(count, CompileThreshold/2).
+ 247   MethodCounters* mcs = m-&gt;method_counters();
+ 248   assert(mcs != NULL, "MethodCounters cannot be NULL for profiling");
+ 249   mcs-&gt;invocation_counter()-&gt;set_carry();
+ 250   mcs-&gt;backedge_counter()-&gt;set_carry();
+ 251 
+ 252   assert(!m-&gt;was_never_executed(), "don't reset to 0 -- could be mistaken for never-executed");
+ 253 }
+ 254 
+ 255 void NonTieredCompPolicy::reset_counter_for_back_branch_event(const methodHandle&amp; m) {
+ 256   // Delay next back-branch event but pump up invocation counter to trigger
+ 257   // whole method compilation.
+ 258   MethodCounters* mcs = m-&gt;method_counters();
+ 259   assert(mcs != NULL, "MethodCounters cannot be NULL for profiling");
+ 260   InvocationCounter* i = mcs-&gt;invocation_counter();
+ 261   InvocationCounter* b = mcs-&gt;backedge_counter();
+ 262 
+ 263   // Don't set invocation_counter's value too low otherwise the method will
+ 264   // look like immature (ic &lt; ~5300) which prevents the inlining based on
+ 265   // the type profiling.
+ 266   i-&gt;set(i-&gt;state(), CompileThreshold);
+ 267   // Don't reset counter too low - it is used to check if OSR method is ready.
+ 268   b-&gt;set(b-&gt;state(), CompileThreshold / 2);
+ 269 }
+ 270 
+ 271 //
+ 272 // CounterDecay
+ 273 //
+ 274 // Iterates through invocation counters and decrements them. This
+ 275 // is done at each safepoint.
+ 276 //
+ 277 class CounterDecay : public AllStatic {
+ 278   static jlong _last_timestamp;
+ 279   static void do_method(Method* m) {
+ 280     MethodCounters* mcs = m-&gt;method_counters();
+ 281     if (mcs != NULL) {
+ 282       mcs-&gt;invocation_counter()-&gt;decay();
+ 283     }
+ 284   }
+ 285 public:
+ 286   static void decay();
+ 287   static bool is_decay_needed() {
+ 288     return (os::javaTimeMillis() - _last_timestamp) &gt; CounterDecayMinIntervalLength;
+ 289   }
+ 290 };
+ 291 
+ 292 jlong CounterDecay::_last_timestamp = 0;
+ 293 
+ 294 void CounterDecay::decay() {
+ 295   _last_timestamp = os::javaTimeMillis();
+ 296 
+ 297   // This operation is going to be performed only at the end of a safepoint
+ 298   // and hence GC's will not be going on, all Java mutators are suspended
+ 299   // at this point and hence SystemDictionary_lock is also not needed.
+ 300   assert(SafepointSynchronize::is_at_safepoint(), "can only be executed at a safepoint");
+ 301   int nclasses = SystemDictionary::number_of_classes();
+ 302   double classes_per_tick = nclasses * (CounterDecayMinIntervalLength * 1e-3 /
+ 303                                         CounterHalfLifeTime);
+ 304   for (int i = 0; i &lt; classes_per_tick; i++) {
+ 305     Klass* k = SystemDictionary::try_get_next_class();
+ 306     if (k != NULL &amp;&amp; k-&gt;is_instance_klass()) {
+ 307       InstanceKlass::cast(k)-&gt;methods_do(do_method);
+ 308     }
+ 309   }
+ 310 }
+ 311 
+ 312 // Called at the end of the safepoint
+ 313 void NonTieredCompPolicy::do_safepoint_work() {
+ 314   if(UseCounterDecay &amp;&amp; CounterDecay::is_decay_needed()) {
+ 315     CounterDecay::decay();
+ 316   }
+ 317 }
+ 318 
+ 319 void NonTieredCompPolicy::reprofile(ScopeDesc* trap_scope, bool is_osr) {
+ 320   ScopeDesc* sd = trap_scope;
+ 321   MethodCounters* mcs;
+ 322   InvocationCounter* c;
+ 323   for (; !sd-&gt;is_top(); sd = sd-&gt;sender()) {
+ 324     mcs = sd-&gt;method()-&gt;method_counters();
+ 325     if (mcs != NULL) {
+ 326       // Reset ICs of inlined methods, since they can trigger compilations also.
+ 327       mcs-&gt;invocation_counter()-&gt;reset();
+ 328     }
+ 329   }
+ 330   mcs = sd-&gt;method()-&gt;method_counters();
+ 331   if (mcs != NULL) {
+ 332     c = mcs-&gt;invocation_counter();
+ 333     if (is_osr) {
+ 334       // It was an OSR method, so bump the count higher.
+ 335       c-&gt;set(c-&gt;state(), CompileThreshold);
+ 336     } else {
+ 337       c-&gt;reset();
+ 338     }
+ 339     mcs-&gt;backedge_counter()-&gt;reset();
+ 340   }
+ 341 }
+ 342 
+ 343 // This method can be called by any component of the runtime to notify the policy
+ 344 // that it's recommended to delay the compilation of this method.
+ 345 void NonTieredCompPolicy::delay_compilation(Method* method) {
+ 346   MethodCounters* mcs = method-&gt;method_counters();
+ 347   if (mcs != NULL) {
+ 348     mcs-&gt;invocation_counter()-&gt;decay();
+ 349     mcs-&gt;backedge_counter()-&gt;decay();
+ 350   }
+ 351 }
+ 352 
+ 353 void NonTieredCompPolicy::disable_compilation(Method* method) {
+ 354   MethodCounters* mcs = method-&gt;method_counters();
+ 355   if (mcs != NULL) {
+ 356     mcs-&gt;invocation_counter()-&gt;set_state(InvocationCounter::wait_for_nothing);
+ 357     mcs-&gt;backedge_counter()-&gt;set_state(InvocationCounter::wait_for_nothing);
+ 358   }
+ 359 }
+ 360 
+ 361 CompileTask* NonTieredCompPolicy::select_task(CompileQueue* compile_queue) {
+ 362   return select_task_helper(compile_queue);
+ 363 }
+ 364 
+ 365 bool NonTieredCompPolicy::is_mature(Method* method) {
+ 366   MethodData* mdo = method-&gt;method_data();
+ 367   assert(mdo != NULL, "Should be");
+ 368   uint current = mdo-&gt;mileage_of(method);
+ 369   uint initial = mdo-&gt;creation_mileage();
+ 370   if (current &lt; initial)
+ 371     return true;  // some sort of overflow
+ 372   uint target;
+ 373   if (ProfileMaturityPercentage &lt;= 0)
+ 374     target = (uint) -ProfileMaturityPercentage;  // absolute value
+ 375   else
+ 376     target = (uint)( (ProfileMaturityPercentage * CompileThreshold) / 100 );
+ 377   return (current &gt;= initial + target);
+ 378 }
+ 379 
+ 380 nmethod* NonTieredCompPolicy::event(const methodHandle&amp; method, const methodHandle&amp; inlinee, int branch_bci,
+ 381                                     int bci, CompLevel comp_level, nmethod* nm, JavaThread* thread) {
+ 382   assert(comp_level == CompLevel_none, "This should be only called from the interpreter");
+ 383   NOT_PRODUCT(trace_frequency_counter_overflow(method, branch_bci, bci));
+ 384   if (JvmtiExport::can_post_interpreter_events() &amp;&amp; thread-&gt;is_interp_only_mode()) {
+ 385     // If certain JVMTI events (e.g. frame pop event) are requested then the
+ 386     // thread is forced to remain in interpreted code. This is
+ 387     // implemented partly by a check in the run_compiled_code
+ 388     // section of the interpreter whether we should skip running
+ 389     // compiled code, and partly by skipping OSR compiles for
+ 390     // interpreted-only threads.
+ 391     if (bci != InvocationEntryBci) {
+ 392       reset_counter_for_back_branch_event(method);
+ 393       return NULL;
+ 394     }
+ 395   }
+ 396   if (CompileTheWorld || ReplayCompiles) {
+ 397     // Don't trigger other compiles in testing mode
+ 398     if (bci == InvocationEntryBci) {
+ 399       reset_counter_for_invocation_event(method);
+ 400     } else {
+ 401       reset_counter_for_back_branch_event(method);
+ 402     }
+ 403     return NULL;
+ 404   }
+ 405 
+ 406   if (bci == InvocationEntryBci) {
+ 407     // when code cache is full, compilation gets switched off, UseCompiler
+ 408     // is set to false
+ 409     if (!method-&gt;has_compiled_code() &amp;&amp; UseCompiler) {
+ 410       method_invocation_event(method, thread);
+ 411     } else {
+ 412       // Force counter overflow on method entry, even if no compilation
+ 413       // happened.  (The method_invocation_event call does this also.)
+ 414       reset_counter_for_invocation_event(method);
+ 415     }
+ 416     // compilation at an invocation overflow no longer goes and retries test for
+ 417     // compiled method. We always run the loser of the race as interpreted.
+ 418     // so return NULL
+ 419     return NULL;
+ 420   } else {
+ 421     // counter overflow in a loop =&gt; try to do on-stack-replacement
+ 422     nmethod* osr_nm = method-&gt;lookup_osr_nmethod_for(bci, CompLevel_highest_tier, true);
+ 423     NOT_PRODUCT(trace_osr_request(method, osr_nm, bci));
+ 424     // when code cache is full, we should not compile any more...
+ 425     if (osr_nm == NULL &amp;&amp; UseCompiler) {
+ 426       method_back_branch_event(method, bci, thread);
+ 427       osr_nm = method-&gt;lookup_osr_nmethod_for(bci, CompLevel_highest_tier, true);
+ 428     }
+ 429     if (osr_nm == NULL) {
+ 430       reset_counter_for_back_branch_event(method);
+ 431       return NULL;
+ 432     }
+ 433     return osr_nm;
+ 434   }
+ 435   return NULL;
+ 436 }
+ 437 
+ 438 #ifndef PRODUCT
+ 439 void NonTieredCompPolicy::trace_frequency_counter_overflow(const methodHandle&amp; m, int branch_bci, int bci) {
+ 440   if (TraceInvocationCounterOverflow) {
+ 441     MethodCounters* mcs = m-&gt;method_counters();
+ 442     assert(mcs != NULL, "MethodCounters cannot be NULL for profiling");
+ 443     InvocationCounter* ic = mcs-&gt;invocation_counter();
+ 444     InvocationCounter* bc = mcs-&gt;backedge_counter();
+ 445     ResourceMark rm;
+ 446     if (bci == InvocationEntryBci) {
+ 447       tty-&gt;print("comp-policy cntr ovfl @ %d in entry of ", bci);
+ 448     } else {
+ 449       tty-&gt;print("comp-policy cntr ovfl @ %d in loop of ", bci);
+ 450     }
+ 451     m-&gt;print_value();
+ 452     tty-&gt;cr();
+ 453     ic-&gt;print();
+ 454     bc-&gt;print();
+ 455     if (ProfileInterpreter) {
+ 456       if (bci != InvocationEntryBci) {
+ 457         MethodData* mdo = m-&gt;method_data();
+ 458         if (mdo != NULL) {
+ 459           int count = mdo-&gt;bci_to_data(branch_bci)-&gt;as_JumpData()-&gt;taken();
+ 460           tty-&gt;print_cr("back branch count = %d", count);
+ 461         }
+ 462       }
+ 463     }
+ 464   }
+ 465 }
+ 466 
+ 467 void NonTieredCompPolicy::trace_osr_request(const methodHandle&amp; method, nmethod* osr, int bci) {
+ 468   if (TraceOnStackReplacement) {
+ 469     ResourceMark rm;
+ 470     tty-&gt;print(osr != NULL ? "Reused OSR entry for " : "Requesting OSR entry for ");
+ 471     method-&gt;print_short_name(tty);
+ 472     tty-&gt;print_cr(" at bci %d", bci);
+ 473   }
+ 474 }
+ 475 #endif // !PRODUCT
+ 476 
+ 477 // SimpleCompPolicy - compile current method
+ 478 
+ 479 void SimpleCompPolicy::method_invocation_event(const methodHandle&amp; m, JavaThread* thread) {
+ 480   const int comp_level = CompLevel_highest_tier;
+ 481   const int hot_count = m-&gt;invocation_count();
+ 482   reset_counter_for_invocation_event(m);
+ 483   const char* comment = "count";
+ 484 
+ 485   if (is_compilation_enabled() &amp;&amp; can_be_compiled(m, comp_level)) {
+ 486     nmethod* nm = m-&gt;code();
+ 487     if (nm == NULL ) {
+ 488       CompileBroker::compile_method(m, InvocationEntryBci, comp_level, m, hot_count, comment, thread);
+ 489     }
+ 490   }
+ 491 }
+ 492 
+ 493 void SimpleCompPolicy::method_back_branch_event(const methodHandle&amp; m, int bci, JavaThread* thread) {
+ 494   const int comp_level = CompLevel_highest_tier;
+ 495   const int hot_count = m-&gt;backedge_count();
+ 496   const char* comment = "backedge_count";
+ 497 
+ 498   if (is_compilation_enabled() &amp;&amp; can_be_osr_compiled(m, comp_level)) {
+ 499     CompileBroker::compile_method(m, bci, comp_level, m, hot_count, comment, thread);
+ 500     NOT_PRODUCT(trace_osr_completion(m-&gt;lookup_osr_nmethod_for(bci, comp_level, true));)
+ 501   }
+ 502 }
+ 503 // StackWalkCompPolicy - walk up stack to find a suitable method to compile
+ 504 
+ 505 #ifdef COMPILER2
+ 506 const char* StackWalkCompPolicy::_msg = NULL;
+ 507 
+ 508 
+ 509 // Consider m for compilation
+ 510 void StackWalkCompPolicy::method_invocation_event(const methodHandle&amp; m, JavaThread* thread) {
+ 511   const int comp_level = CompLevel_highest_tier;
+ 512   const int hot_count = m-&gt;invocation_count();
+ 513   reset_counter_for_invocation_event(m);
+ 514   const char* comment = "count";
+ 515 
+ 516   if (is_compilation_enabled() &amp;&amp; m-&gt;code() == NULL &amp;&amp; can_be_compiled(m, comp_level)) {
+ 517     ResourceMark rm(thread);
+ 518     frame       fr     = thread-&gt;last_frame();
+ 519     assert(fr.is_interpreted_frame(), "must be interpreted");
+ 520     assert(fr.interpreter_frame_method() == m(), "bad method");
+ 521 
+ 522     if (TraceCompilationPolicy) {
+ 523       tty-&gt;print("method invocation trigger: ");
+ 524       m-&gt;print_short_name(tty);
+ 525       tty-&gt;print(" ( interpreted " INTPTR_FORMAT ", size=%d ) ", p2i((address)m()), m-&gt;code_size());
+ 526     }
+ 527     RegisterMap reg_map(thread, false);
+ 528     javaVFrame* triggerVF = thread-&gt;last_java_vframe(&amp;reg_map);
+ 529     // triggerVF is the frame that triggered its counter
+ 530     RFrame* first = new InterpretedRFrame(triggerVF-&gt;fr(), thread, m());
+ 531 
+ 532     if (first-&gt;top_method()-&gt;code() != NULL) {
+ 533       // called obsolete method/nmethod -- no need to recompile
+ 534       if (TraceCompilationPolicy) tty-&gt;print_cr(" --&gt; " INTPTR_FORMAT, p2i(first-&gt;top_method()-&gt;code()));
+ 535     } else {
+ 536       if (TimeCompilationPolicy) accumulated_time()-&gt;start();
+ 537       GrowableArray&lt;RFrame*&gt;* stack = new GrowableArray&lt;RFrame*&gt;(50);
+ 538       stack-&gt;push(first);
+ 539       RFrame* top = findTopInlinableFrame(stack);
+ 540       if (TimeCompilationPolicy) accumulated_time()-&gt;stop();
+ 541       assert(top != NULL, "findTopInlinableFrame returned null");
+ 542       if (TraceCompilationPolicy) top-&gt;print();
+ 543       CompileBroker::compile_method(top-&gt;top_method(), InvocationEntryBci, comp_level,
+ 544                                     m, hot_count, comment, thread);
+ 545     }
+ 546   }
+ 547 }
+ 548 
+ 549 void StackWalkCompPolicy::method_back_branch_event(const methodHandle&amp; m, int bci, JavaThread* thread) {
+ 550   const int comp_level = CompLevel_highest_tier;
+ 551   const int hot_count = m-&gt;backedge_count();
+ 552   const char* comment = "backedge_count";
+ 553 
+ 554   if (is_compilation_enabled() &amp;&amp; can_be_osr_compiled(m, comp_level)) {
+ 555     CompileBroker::compile_method(m, bci, comp_level, m, hot_count, comment, thread);
+ 556     NOT_PRODUCT(trace_osr_completion(m-&gt;lookup_osr_nmethod_for(bci, comp_level, true));)
+ 557   }
+ 558 }
+ 559 
+ 560 RFrame* StackWalkCompPolicy::findTopInlinableFrame(GrowableArray&lt;RFrame*&gt;* stack) {
+ 561   // go up the stack until finding a frame that (probably) won't be inlined
+ 562   // into its caller
+ 563   RFrame* current = stack-&gt;at(0); // current choice for stopping
+ 564   assert( current &amp;&amp; !current-&gt;is_compiled(), "" );
+ 565   const char* msg = NULL;
+ 566 
+ 567   while (1) {
+ 568 
+ 569     // before going up the stack further, check if doing so would get us into
+ 570     // compiled code
+ 571     RFrame* next = senderOf(current, stack);
+ 572     if( !next )               // No next frame up the stack?
+ 573       break;                  // Then compile with current frame
+ 574 
+ 575     Method* m = current-&gt;top_method();
+ 576     Method* next_m = next-&gt;top_method();
+ 577 
+ 578     if (TraceCompilationPolicy &amp;&amp; Verbose) {
+ 579       tty-&gt;print("[caller: ");
+ 580       next_m-&gt;print_short_name(tty);
+ 581       tty-&gt;print("] ");
+ 582     }
+ 583 
+ 584     if( !Inline ) {           // Inlining turned off
+ 585       msg = "Inlining turned off";
+ 586       break;
+ 587     }
+ 588     if (next_m-&gt;is_not_compilable()) { // Did fail to compile this before/
+ 589       msg = "caller not compilable";
+ 590       break;
+ 591     }
+ 592     if (next-&gt;num() &gt; MaxRecompilationSearchLength) {
+ 593       // don't go up too high when searching for recompilees
+ 594       msg = "don't go up any further: &gt; MaxRecompilationSearchLength";
+ 595       break;
+ 596     }
+ 597     if (next-&gt;distance() &gt; MaxInterpretedSearchLength) {
+ 598       // don't go up too high when searching for recompilees
+ 599       msg = "don't go up any further: next &gt; MaxInterpretedSearchLength";
+ 600       break;
+ 601     }
+ 602     // Compiled frame above already decided not to inline;
+ 603     // do not recompile him.
+ 604     if (next-&gt;is_compiled()) {
+ 605       msg = "not going up into optimized code";
+ 606       break;
+ 607     }
+ 608 
+ 609     // Interpreted frame above us was already compiled.  Do not force
+ 610     // a recompile, although if the frame above us runs long enough an
+ 611     // OSR might still happen.
+ 612     if( current-&gt;is_interpreted() &amp;&amp; next_m-&gt;has_compiled_code() ) {
+ 613       msg = "not going up -- already compiled caller";
+ 614       break;
+ 615     }
+ 616 
+ 617     // Compute how frequent this call site is.  We have current method 'm'.
+ 618     // We know next method 'next_m' is interpreted.  Find the call site and
+ 619     // check the various invocation counts.
+ 620     int invcnt = 0;             // Caller counts
+ 621     if (ProfileInterpreter) {
+ 622       invcnt = next_m-&gt;interpreter_invocation_count();
+ 623     }
+ 624     int cnt = 0;                // Call site counts
+ 625     if (ProfileInterpreter &amp;&amp; next_m-&gt;method_data() != NULL) {
+ 626       ResourceMark rm;
+ 627       int bci = next-&gt;top_vframe()-&gt;bci();
+ 628       ProfileData* data = next_m-&gt;method_data()-&gt;bci_to_data(bci);
+ 629       if (data != NULL &amp;&amp; data-&gt;is_CounterData())
+ 630         cnt = data-&gt;as_CounterData()-&gt;count();
+ 631     }
+ 632 
+ 633     // Caller counts / call-site counts; i.e. is this call site
+ 634     // a hot call site for method next_m?
+ 635     int freq = (invcnt) ? cnt/invcnt : cnt;
+ 636 
+ 637     // Check size and frequency limits
+ 638     if ((msg = shouldInline(m, freq, cnt)) != NULL) {
+ 639       break;
+ 640     }
+ 641     // Check inlining negative tests
+ 642     if ((msg = shouldNotInline(m)) != NULL) {
+ 643       break;
+ 644     }
+ 645 
+ 646 
+ 647     // If the caller method is too big or something then we do not want to
+ 648     // compile it just to inline a method
+ 649     if (!can_be_compiled(next_m, CompLevel_any)) {
+ 650       msg = "caller cannot be compiled";
+ 651       break;
+ 652     }
+ 653 
+ 654     if( next_m-&gt;name() == vmSymbols::class_initializer_name() ) {
+ 655       msg = "do not compile class initializer (OSR ok)";
+ 656       break;
+ 657     }
+ 658 
+ 659     if (TraceCompilationPolicy &amp;&amp; Verbose) {
+ 660       tty-&gt;print("\n\t     check caller: ");
+ 661       next_m-&gt;print_short_name(tty);
+ 662       tty-&gt;print(" ( interpreted " INTPTR_FORMAT ", size=%d ) ", p2i((address)next_m), next_m-&gt;code_size());
+ 663     }
+ 664 
+ 665     current = next;
+ 666   }
+ 667 
+ 668   assert( !current || !current-&gt;is_compiled(), "" );
+ 669 
+ 670   if (TraceCompilationPolicy &amp;&amp; msg) tty-&gt;print("(%s)\n", msg);
+ 671 
+ 672   return current;
+ 673 }
+ 674 
+ 675 RFrame* StackWalkCompPolicy::senderOf(RFrame* rf, GrowableArray&lt;RFrame*&gt;* stack) {
+ 676   RFrame* sender = rf-&gt;caller();
+ 677   if (sender &amp;&amp; sender-&gt;num() == stack-&gt;length()) stack-&gt;push(sender);
+ 678   return sender;
+ 679 }
+ 680 
+ 681 
+ 682 const char* StackWalkCompPolicy::shouldInline(const methodHandle&amp; m, float freq, int cnt) {
+ 683   // Allows targeted inlining
+ 684   // positive filter: should send be inlined?  returns NULL (--&gt; yes)
+ 685   // or rejection msg
+ 686   int max_size = MaxInlineSize;
+ 687   int cost = m-&gt;code_size();
+ 688 
+ 689   // Check for too many throws (and not too huge)
+ 690   if (m-&gt;interpreter_throwout_count() &gt; InlineThrowCount &amp;&amp; cost &lt; InlineThrowMaxSize ) {
+ 691     return NULL;
+ 692   }
+ 693 
+ 694   // bump the max size if the call is frequent
+ 695   if ((freq &gt;= InlineFrequencyRatio) || (cnt &gt;= InlineFrequencyCount)) {
+ 696     if (TraceFrequencyInlining) {
+ 697       tty-&gt;print("(Inlined frequent method)\n");
+ 698       m-&gt;print();
+ 699     }
+ 700     max_size = FreqInlineSize;
+ 701   }
+ 702   if (cost &gt; max_size) {
+ 703     return (_msg = "too big");
+ 704   }
+ 705   return NULL;
+ 706 }
+ 707 
+ 708 
+ 709 const char* StackWalkCompPolicy::shouldNotInline(const methodHandle&amp; m) {
+ 710   // negative filter: should send NOT be inlined?  returns NULL (--&gt; inline) or rejection msg
+ 711   if (m-&gt;is_abstract()) return (_msg = "abstract method");
+ 712   // note: we allow ik-&gt;is_abstract()
+ 713   if (!m-&gt;method_holder()-&gt;is_initialized()) return (_msg = "method holder not initialized");
+ 714   if (m-&gt;is_native()) return (_msg = "native method");
+ 715   nmethod* m_code = m-&gt;code();
+ 716   if (m_code != NULL &amp;&amp; m_code-&gt;code_size() &gt; InlineSmallCode)
+ 717     return (_msg = "already compiled into a big method");
+ 718 
+ 719   // use frequency-based objections only for non-trivial methods
+ 720   if (m-&gt;code_size() &lt;= MaxTrivialSize) return NULL;
+ 721   if (UseInterpreter) {     // don't use counts with -Xcomp
+ 722     if ((m-&gt;code() == NULL) &amp;&amp; m-&gt;was_never_executed()) return (_msg = "never executed");
+ 723     if (!m-&gt;was_executed_more_than(MIN2(MinInliningThreshold, CompileThreshold &gt;&gt; 1))) return (_msg = "executed &lt; MinInliningThreshold times");
+ 724   }
+ 725   if (Method::has_unloaded_classes_in_signature(m, JavaThread::current())) return (_msg = "unloaded signature classes");
+ 726 
+ 727   return NULL;
+ 728 }
+ 729 
+ 730 
+ 731 
+ 732 #endif // COMPILER2
+</pre></body></html>

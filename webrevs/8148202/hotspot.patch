@@ -1,0 +1,226 @@
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantReflectionProvider.java	2016-01-26 22:21:49.000000000 +0100
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantReflectionProvider.java	2016-01-26 22:21:49.000000000 +0100
+@@ -27,6 +27,7 @@
+ 
+ import java.lang.reflect.Array;
+ 
++import jdk.vm.ci.common.JVMCIError;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.Option;
+ import jdk.vm.ci.meta.Constant;
+ import jdk.vm.ci.meta.ConstantReflectionProvider;
+@@ -355,4 +356,18 @@
+         }
+         return dimensions;
+     }
++
++    @Override
++    public JavaConstant asJavaClass(ResolvedJavaType type) {
++        return HotSpotObjectConstantImpl.forObject(((HotSpotResolvedJavaType) type).mirror());
++    }
++
++    @Override
++    public Constant asObjectHub(ResolvedJavaType type) {
++        if (type instanceof HotSpotResolvedObjectType) {
++            return ((HotSpotResolvedObjectType) type).klass();
++        } else {
++            throw JVMCIError.unimplemented();
++        }
++    }
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java	2016-01-26 22:21:49.000000000 +0100
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java	2016-01-26 22:21:49.000000000 +0100
+@@ -304,16 +304,6 @@
+     }
+ 
+     @Override
+-    public JavaConstant getJavaClass() {
+-        return HotSpotObjectConstantImpl.forObject(mirror());
+-    }
+-
+-    @Override
+-    public Constant getObjectHub() {
+-        return klass();
+-    }
+-
+-    @Override
+     public AssumptionResult<Boolean> hasFinalizableSubclass() {
+         assert !isArray();
+         if (!compilerToVM().hasFinalizableSubclass(this)) {
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedPrimitiveType.java	2016-01-26 22:21:50.000000000 +0100
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedPrimitiveType.java	2016-01-26 22:21:50.000000000 +0100
+@@ -110,16 +110,6 @@
+     }
+ 
+     @Override
+-    public JavaConstant getObjectHub() {
+-        throw JVMCIError.unimplemented();
+-    }
+-
+-    @Override
+-    public JavaConstant getJavaClass() {
+-        throw JVMCIError.unimplemented();
+-    }
+-
+-    @Override
+     public AssumptionResult<Boolean> hasFinalizableSubclass() {
+         return new AssumptionResult<>(false);
+     }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ConstantReflectionProvider.java	2016-01-26 22:21:50.000000000 +0100
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ConstantReflectionProvider.java	2016-01-26 22:21:50.000000000 +0100
+@@ -160,4 +160,15 @@
+      * Gets raw memory access.
+      */
+     MemoryAccessProvider getMemoryAccessProvider();
++
++    /**
++     * Gets the runtime representation of the {@link Class} object of this type.
++     */
++    JavaConstant asJavaClass(ResolvedJavaType type);
++
++    /**
++     * Gets the runtime representation of the "hub" of this type--that is, the closest part of the
++     * type representation which is typically stored in the object header.
++     */
++    Constant asObjectHub(ResolvedJavaType type);
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaType.java	2016-01-26 22:21:51.000000000 +0100
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaType.java	2016-01-26 22:21:51.000000000 +0100
+@@ -34,17 +34,6 @@
+  */
+ public interface ResolvedJavaType extends JavaType, ModifiersProvider {
+     /**
+-     * Gets the runtime representation of the Java class object of this type.
+-     */
+-    JavaConstant getJavaClass();
+-
+-    /**
+-     * Gets the runtime representation of the "hub" of this type--that is, the closest part of the
+-     * type representation which is typically stored in the object header.
+-     */
+-    Constant getObjectHub();
+-
+-    /**
+      * Checks whether this type has a finalizer method.
+      *
+      * @return {@code true} if this class has a finalizer
+--- old/test/compiler/jvmci/code/DataPatchTest.java	2016-01-26 22:21:51.000000000 +0100
++++ new/test/compiler/jvmci/code/DataPatchTest.java	2016-01-26 22:21:51.000000000 +0100
+@@ -56,7 +56,7 @@
+     public void testInlineObject() {
+         test(asm -> {
+             ResolvedJavaType type = metaAccess.lookupJavaType(getConstClass());
+-            HotSpotConstant c = (HotSpotConstant) type.getJavaClass();
++            HotSpotConstant c = (HotSpotConstant) constantReflection.asJavaClass(type);
+             Register ret = asm.emitLoadPointer(c);
+             asm.emitPointerRet(ret);
+         });
+@@ -67,7 +67,7 @@
+         Assume.assumeTrue(HotSpotVMConfig.config().useCompressedOops);
+         test(asm -> {
+             ResolvedJavaType type = metaAccess.lookupJavaType(getConstClass());
+-            HotSpotConstant c = (HotSpotConstant) type.getJavaClass();
++            HotSpotConstant c = (HotSpotConstant) constantReflection.asJavaClass(type);
+             Register compressed = asm.emitLoadPointer((HotSpotConstant) c.compress());
+             Register ret = asm.emitUncompressPointer(compressed, HotSpotVMConfig.config().narrowOopBase, HotSpotVMConfig.config().narrowOopShift);
+             asm.emitPointerRet(ret);
+@@ -78,7 +78,7 @@
+     public void testDataSectionReference() {
+         test(asm -> {
+             ResolvedJavaType type = metaAccess.lookupJavaType(getConstClass());
+-            HotSpotConstant c = (HotSpotConstant) type.getJavaClass();
++            HotSpotConstant c = (HotSpotConstant) constantReflection.asJavaClass(type);
+             DataSectionReference ref = asm.emitDataItem(c);
+             Register ret = asm.emitLoadPointer(ref);
+             asm.emitPointerRet(ret);
+@@ -90,7 +90,7 @@
+         Assume.assumeTrue(HotSpotVMConfig.config().useCompressedOops);
+         test(asm -> {
+             ResolvedJavaType type = metaAccess.lookupJavaType(getConstClass());
+-            HotSpotConstant c = (HotSpotConstant) type.getJavaClass();
++            HotSpotConstant c = (HotSpotConstant) constantReflection.asJavaClass(type);
+             HotSpotConstant cCompressed = (HotSpotConstant) c.compress();
+             DataSectionReference ref = asm.emitDataItem(cCompressed);
+             Register compressed = asm.emitLoadNarrowPointer(ref);
+@@ -103,7 +103,7 @@
+     public void testInlineMetadata() {
+         test(asm -> {
+             ResolvedJavaType type = metaAccess.lookupJavaType(getConstClass());
+-            Register klass = asm.emitLoadPointer((HotSpotConstant) type.getObjectHub());
++            Register klass = asm.emitLoadPointer((HotSpotConstant) constantReflection.asObjectHub(type));
+             Register ret = asm.emitLoadPointer(klass, HotSpotVMConfig.config().classMirrorOffset);
+             asm.emitPointerRet(ret);
+         });
+@@ -114,7 +114,7 @@
+         Assume.assumeTrue(HotSpotVMConfig.config().useCompressedClassPointers);
+         test(asm -> {
+             ResolvedJavaType type = metaAccess.lookupJavaType(getConstClass());
+-            HotSpotConstant hub = (HotSpotConstant) type.getObjectHub();
++            HotSpotConstant hub = (HotSpotConstant) constantReflection.asObjectHub(type);
+             Register narrowKlass = asm.emitLoadPointer((HotSpotConstant) hub.compress());
+             Register klass = asm.emitUncompressPointer(narrowKlass, HotSpotVMConfig.config().narrowKlassBase, HotSpotVMConfig.config().narrowKlassShift);
+             Register ret = asm.emitLoadPointer(klass, HotSpotVMConfig.config().classMirrorOffset);
+@@ -126,7 +126,7 @@
+     public void testMetadataInDataSection() {
+         test(asm -> {
+             ResolvedJavaType type = metaAccess.lookupJavaType(getConstClass());
+-            HotSpotConstant hub = (HotSpotConstant) type.getObjectHub();
++            HotSpotConstant hub = (HotSpotConstant) constantReflection.asObjectHub(type);
+             DataSectionReference ref = asm.emitDataItem(hub);
+             Register klass = asm.emitLoadPointer(ref);
+             Register ret = asm.emitLoadPointer(klass, HotSpotVMConfig.config().classMirrorOffset);
+@@ -139,7 +139,7 @@
+         Assume.assumeTrue(HotSpotVMConfig.config().useCompressedClassPointers);
+         test(asm -> {
+             ResolvedJavaType type = metaAccess.lookupJavaType(getConstClass());
+-            HotSpotConstant hub = (HotSpotConstant) type.getObjectHub();
++            HotSpotConstant hub = (HotSpotConstant) constantReflection.asObjectHub(type);
+             HotSpotConstant narrowHub = (HotSpotConstant) hub.compress();
+             DataSectionReference ref = asm.emitDataItem(narrowHub);
+             Register narrowKlass = asm.emitLoadNarrowPointer(ref);
+--- old/test/compiler/jvmci/code/SimpleDebugInfoTest.java	2016-01-26 22:21:52.000000000 +0100
++++ new/test/compiler/jvmci/code/SimpleDebugInfoTest.java	2016-01-26 22:21:52.000000000 +0100
+@@ -217,7 +217,7 @@
+     public void testConstObject() {
+         ResolvedJavaType type = metaAccess.lookupJavaType(objectOnStack());
+         DebugInfoCompiler compiler = (asm, values) -> {
+-            values[0] = type.getJavaClass();
++            values[0] = constantReflection.asJavaClass(type);
+             return null;
+         };
+         testObjectOnStack(compiler);
+@@ -228,7 +228,7 @@
+     public void testRegObject() {
+         ResolvedJavaType type = metaAccess.lookupJavaType(objectOnStack());
+         DebugInfoCompiler compiler = (asm, values) -> {
+-            Register reg = asm.emitLoadPointer((HotSpotConstant) type.getJavaClass());
++            Register reg = asm.emitLoadPointer((HotSpotConstant) constantReflection.asJavaClass(type));
+             values[0] = reg.asValue(target.getLIRKind(JavaKind.Object));
+             return null;
+         };
+@@ -240,7 +240,7 @@
+     public void testStackObject() {
+         ResolvedJavaType type = metaAccess.lookupJavaType(objectOnStack());
+         DebugInfoCompiler compiler = (asm, values) -> {
+-            Register reg = asm.emitLoadPointer((HotSpotConstant) type.getJavaClass());
++            Register reg = asm.emitLoadPointer((HotSpotConstant) constantReflection.asJavaClass(type));
+             values[0] = asm.emitPointerToStack(reg);
+             return null;
+         };
+@@ -253,7 +253,7 @@
+         Assume.assumeTrue(HotSpotVMConfig.config().useCompressedOops);
+         ResolvedJavaType type = metaAccess.lookupJavaType(objectOnStack());
+         DebugInfoCompiler compiler = (asm, values) -> {
+-            HotSpotConstant wide = (HotSpotConstant) type.getJavaClass();
++            HotSpotConstant wide = (HotSpotConstant) constantReflection.asJavaClass(type);
+             Register reg = asm.emitLoadPointer((HotSpotConstant) wide.compress());
+             values[0] = reg.asValue(asm.narrowOopKind);
+             return null;
+@@ -267,7 +267,7 @@
+         Assume.assumeTrue(HotSpotVMConfig.config().useCompressedOops);
+         ResolvedJavaType type = metaAccess.lookupJavaType(objectOnStack());
+         DebugInfoCompiler compiler = (asm, values) -> {
+-            HotSpotConstant wide = (HotSpotConstant) type.getJavaClass();
++            HotSpotConstant wide = (HotSpotConstant) constantReflection.asJavaClass(type);
+             Register reg = asm.emitLoadPointer((HotSpotConstant) wide.compress());
+             values[0] = asm.emitNarrowPointerToStack(reg);
+             return null;

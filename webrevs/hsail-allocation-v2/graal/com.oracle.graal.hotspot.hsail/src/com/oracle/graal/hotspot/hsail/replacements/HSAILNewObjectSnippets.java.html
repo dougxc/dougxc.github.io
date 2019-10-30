@@ -1,0 +1,337 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>New graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/replacements/HSAILNewObjectSnippets.java</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2012, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package com.oracle.graal.hotspot.hsail.replacements;
+  24 
+  25 import static com.oracle.graal.api.code.UnsignedMath.*;
+  26 import static com.oracle.graal.hotspot.hsail.replacements.HSAILHotSpotReplacementsUtil.*;
+  27 import static com.oracle.graal.hotspot.hsail.replacements.HSAILNewObjectSnippets.Options.*;
+  28 import static com.oracle.graal.nodes.PiArrayNode.*;
+  29 import static com.oracle.graal.nodes.extended.BranchProbabilityNode.*;
+  30 import static com.oracle.graal.phases.GraalOptions.*;
+  31 import static com.oracle.graal.replacements.SnippetTemplate.*;
+  32 
+  33 import com.oracle.graal.api.code.*;
+  34 import com.oracle.graal.api.meta.*;
+  35 import com.oracle.graal.debug.*;
+  36 import com.oracle.graal.hotspot.*;
+  37 import com.oracle.graal.hotspot.meta.*;
+  38 import com.oracle.graal.hotspot.replacements.*;
+  39 import com.oracle.graal.hotspot.stubs.*;
+  40 import com.oracle.graal.nodes.*;
+  41 import com.oracle.graal.nodes.java.*;
+  42 import com.oracle.graal.nodes.spi.*;
+  43 import com.oracle.graal.nodes.type.*;
+  44 import com.oracle.graal.options.*;
+  45 import com.oracle.graal.replacements.*;
+  46 import com.oracle.graal.replacements.Snippet.ConstantParameter;
+  47 import com.oracle.graal.replacements.SnippetTemplate.AbstractTemplates;
+  48 import com.oracle.graal.replacements.SnippetTemplate.Arguments;
+  49 import com.oracle.graal.replacements.SnippetTemplate.SnippetInfo;
+  50 import com.oracle.graal.word.*;
+  51 
+  52 /**
+  53  * HSAIL-specific Snippets used for implementing NEW and NEWARRAY.
+  54  */
+  55 public class HSAILNewObjectSnippets extends NewObjectSnippets {
+  56 
+  57     static public class Options {
+  58 
+  59         // @formatter:off
+  60         @Option(help = "In HSAIL allocation, allow allocation from eden as fallback if TLAB is full")
+  61         static final OptionValue&lt;Boolean&gt; HsailUseEdenAllocate = new OptionValue&lt;&gt;(false);
+  62 
+  63         @Option(help = "Estimate of number of bytes allocated by each HSAIL workitem, used to size TLABs")
+  64         static public final OptionValue&lt;Integer&gt; HsailAllocBytesPerWorkitem = new OptionValue&lt;&gt;(64);
+  65 
+  66         // @formatter:on
+  67     }
+  68 
+  69     private static final boolean hsailUseEdenAllocate = HsailUseEdenAllocate.getValue();
+  70 
+  71     @Snippet
+  72     public static Object allocateInstanceAtomic(@ConstantParameter int size, Word hub, Word prototypeMarkWord, @ConstantParameter boolean fillContents, @ConstantParameter String typeContext) {
+  73         Word thread = thread();
+  74         boolean haveResult = false;
+  75         if (useTLAB()) {
+  76             Word top = atomicGetAndAddTlabTop(thread, size);
+  77             Word end = readTlabEnd(thread);
+  78             Word newTop = top.add(size);
+  79             if (probability(FAST_PATH_PROBABILITY, newTop.belowOrEqual(end))) {
+  80                 // writeTlabTop(thread, newTop) was done by the atomicGetAndAdd
+  81                 Object result = formatObject(hub, size, top, prototypeMarkWord, fillContents, true, false, true);
+  82                 profileAllocation("instance", size, typeContext);
+  83                 return piCast(verifyOop(result), StampFactory.forNodeIntrinsic());
+  84             } else {
+  85                 // only one overflower will be the first overflower, detectable because
+  86                 // oldtop was still below end
+  87                 if (top.belowOrEqual(end)) {
+  88                     // hack alert: store the last good top before overflow into pf_top
+  89                     // we will move it back into top later when back in the VM
+  90                     writeTlabPfTop(thread, top);
+  91                 }
+  92                 // useless logic but see notes on deopt path below
+  93                 haveResult = newTop.belowOrEqual(end);
+  94             }
+  95         }
+  96         if (hsailUseEdenAllocate) {
+  97             // originally:
+  98             // result = NewInstanceStubCall.call(hub);
+  99 
+ 100             // we could not allocate from tlab, try allocating directly from eden
+ 101             // false for no logging
+ 102             Word memory = NewInstanceStub.edenAllocate(Word.unsigned(size), false);
+ 103             if (memory.notEqual(0)) {
+ 104                 new_eden.inc();
+ 105                 Object result = formatObject(hub, size, memory, prototypeMarkWord, fillContents, true, false, true);
+ 106                 profileAllocation("instance", size, typeContext);
+ 107                 return piCast(verifyOop(result), StampFactory.forNodeIntrinsic());
+ 108             }
+ 109         }
+ 110         // haveResult test here helps avoid dropping earlier stores were seen to be dropped without
+ 111         // this.
+ 112         if (!haveResult) {
+ 113             DeoptimizeNode.deopt(DeoptimizationAction.None, DeoptimizationReason.RuntimeConstraint);
+ 114         }
+ 115         // will never get here but this keeps the compiler happy
+ 116         return Word.zero().toObject();
+ 117     }
+ 118 
+ 119     @Snippet
+ 120     public static Object allocateArrayAtomic(Word hub, int length, Word prototypeMarkWord, @ConstantParameter int headerSize, @ConstantParameter int log2ElementSize,
+ 121                     @ConstantParameter boolean fillContents, @ConstantParameter boolean maybeUnroll, @ConstantParameter String typeContext) {
+ 122         if (!belowThan(length, MAX_ARRAY_FAST_PATH_ALLOCATION_LENGTH)) {
+ 123             // This handles both negative array sizes and very large array sizes
+ 124             DeoptimizeNode.deopt(DeoptimizationAction.None, DeoptimizationReason.RuntimeConstraint);
+ 125         }
+ 126         return allocateArrayAtomicImpl(hub, length, prototypeMarkWord, headerSize, log2ElementSize, fillContents, maybeUnroll, typeContext);
+ 127     }
+ 128 
+ 129     private static Object allocateArrayAtomicImpl(Word hub, int length, Word prototypeMarkWord, int headerSize, int log2ElementSize, boolean fillContents, boolean maybeUnroll, String typeContext) {
+ 130         int alignment = wordSize();
+ 131         int allocationSize = computeArrayAllocationSize(length, alignment, headerSize, log2ElementSize);
+ 132         Word thread = thread();
+ 133         boolean haveResult = false;
+ 134         if (useTLAB()) {
+ 135             Word top = atomicGetAndAddTlabTop(thread, allocationSize);
+ 136             Word end = readTlabEnd(thread);
+ 137             Word newTop = top.add(allocationSize);
+ 138             if (probability(FAST_PATH_PROBABILITY, newTop.belowOrEqual(end))) {
+ 139                 // writeTlabTop(thread, newTop) was done by the atomicGetAndAdd
+ 140                 newarray_loopInit.inc();
+ 141                 // we are not in a stub so we can set useSnippetCounters to true
+ 142                 Object result = formatArray(hub, allocationSize, length, headerSize, top, prototypeMarkWord, fillContents, maybeUnroll, true);
+ 143                 profileAllocation("array", allocationSize, typeContext);
+ 144                 return piArrayCast(verifyOop(result), length, StampFactory.forNodeIntrinsic());
+ 145             } else {
+ 146                 // only one overflower will be the first overflower, detectable because
+ 147                 // oldtop was still below end
+ 148                 if (top.belowOrEqual(end)) {
+ 149                     // hack alert: store the last good top before overflow into pf_top
+ 150                     // we will move it back into top later when back in the VM
+ 151                     writeTlabPfTop(thread, top);
+ 152                 }
+ 153                 // useless logic but see notes on deopt path below
+ 154                 haveResult = newTop.belowOrEqual(end);
+ 155             }
+ 156         }
+ 157         // we could not allocate from tlab, try allocating directly from eden
+ 158         if (hsailUseEdenAllocate) {
+ 159             // false for no logging
+ 160             Word memory = NewInstanceStub.edenAllocate(Word.unsigned(allocationSize), false);
+ 161             if (memory.notEqual(0)) {
+ 162                 newarray_eden.inc();
+ 163                 // we are not in a stub so we can set useSnippetCounters to true
+ 164                 Object result = formatArray(hub, allocationSize, length, headerSize, memory, prototypeMarkWord, fillContents, maybeUnroll, true);
+ 165                 profileAllocation("array", allocationSize, typeContext);
+ 166                 return piArrayCast(verifyOop(result), length, StampFactory.forNodeIntrinsic());
+ 167             }
+ 168         }
+ 169         if (!haveResult) {
+ 170             DeoptimizeNode.deopt(DeoptimizationAction.None, DeoptimizationReason.RuntimeConstraint);
+ 171         }
+ 172         // will never get here but this keeps the compiler happy
+ 173         return Word.zero().toObject();
+ 174     }
+ 175 
+ 176     public static class Templates extends AbstractTemplates {
+ 177 
+ 178         private final SnippetInfo allocateInstance = snippet(HSAILNewObjectSnippets.class, "allocateInstanceAtomic");
+ 179         private final SnippetInfo allocateArray = snippet(HSAILNewObjectSnippets.class, "allocateArrayAtomic");
+ 180 
+ 181         // private final SnippetInfo allocateArrayDynamic = snippet(NewObjectSnippets.class,
+ 182         // "allocateArrayDynamic");
+ 183         // private final SnippetInfo newmultiarray = snippet(NewObjectSnippets.class,
+ 184         // "newmultiarray");
+ 185 
+ 186         public Templates(HotSpotProviders providers, TargetDescription target) {
+ 187             super(providers, providers.getSnippetReflection(), target);
+ 188         }
+ 189 
+ 190         /**
+ 191          * Lowers a {@link NewInstanceNode}.
+ 192          */
+ 193         public void lower(NewInstanceNode newInstanceNode, LoweringTool tool) {
+ 194             StructuredGraph graph = newInstanceNode.graph();
+ 195             HotSpotResolvedObjectType type = (HotSpotResolvedObjectType) newInstanceNode.instanceClass();
+ 196             assert !type.isArray();
+ 197             ConstantNode hub = ConstantNode.forConstant(type.klass(), providers.getMetaAccess(), graph);
+ 198             int size = instanceSize(type);
+ 199 
+ 200             Arguments args = new Arguments(allocateInstance, graph.getGuardsStage(), tool.getLoweringStage());
+ 201             args.addConst("size", size);
+ 202             args.add("hub", hub);
+ 203             args.add("prototypeMarkWord", type.prototypeMarkWord());
+ 204             args.addConst("fillContents", newInstanceNode.fillContents());
+ 205             args.addConst("typeContext", MetaUtil.toJavaName(type, false));
+ 206 
+ 207             SnippetTemplate template = template(args);
+ 208             Debug.log("Lowering allocateInstance in %s: node=%s, template=%s, arguments=%s", graph, newInstanceNode, template, args);
+ 209             template.instantiate(providers.getMetaAccess(), newInstanceNode, DEFAULT_REPLACER, args);
+ 210         }
+ 211 
+ 212         /**
+ 213          * Lowers a {@link NewArrayNode}.
+ 214          */
+ 215         public void lower(NewArrayNode newArrayNode, LoweringTool tool) {
+ 216             StructuredGraph graph = newArrayNode.graph();
+ 217             ResolvedJavaType elementType = newArrayNode.elementType();
+ 218             HotSpotResolvedObjectType arrayType = (HotSpotResolvedObjectType) elementType.getArrayClass();
+ 219             Kind elementKind = elementType.getKind();
+ 220             ConstantNode hub = ConstantNode.forConstant(arrayType.klass(), providers.getMetaAccess(), graph);
+ 221             final int headerSize = HotSpotGraalRuntime.getArrayBaseOffset(elementKind);
+ 222             // lowerer extends HotSpotLoweringProvider so we can just use that
+ 223             HotSpotLoweringProvider lowerer = (HotSpotLoweringProvider) providers.getLowerer();
+ 224             int log2ElementSize = CodeUtil.log2(lowerer.getScalingFactor(elementKind));
+ 225 
+ 226             Arguments args = new Arguments(allocateArray, graph.getGuardsStage(), tool.getLoweringStage());
+ 227             args.add("hub", hub);
+ 228             args.add("length", newArrayNode.length());
+ 229             args.add("prototypeMarkWord", arrayType.prototypeMarkWord());
+ 230             args.addConst("headerSize", headerSize);
+ 231             args.addConst("log2ElementSize", log2ElementSize);
+ 232             args.addConst("fillContents", newArrayNode.fillContents());
+ 233             args.addConst("maybeUnroll", newArrayNode.length().isConstant());
+ 234             args.addConst("typeContext", MetaUtil.toJavaName(arrayType, false));
+ 235 
+ 236             SnippetTemplate template = template(args);
+ 237             Debug.log("Lowering allocateArray in %s: node=%s, template=%s, arguments=%s", graph, newArrayNode, template, args);
+ 238             template.instantiate(providers.getMetaAccess(), newArrayNode, DEFAULT_REPLACER, args);
+ 239         }
+ 240 
+ 241         private static int instanceSize(HotSpotResolvedObjectType type) {
+ 242             int size = type.instanceSize();
+ 243             assert (size % wordSize()) == 0;
+ 244             assert size &gt;= 0;
+ 245             return size;
+ 246         }
+ 247     }
+ 248 
+ 249     private static final SnippetCounter.Group countersNew = SnippetCounters.getValue() ? new SnippetCounter.Group("NewInstance") : null;
+ 250     private static final SnippetCounter new_eden = new SnippetCounter(countersNew, "eden", "used edenAllocate");
+ 251 
+ 252     private static final SnippetCounter.Group countersNewArray = SnippetCounters.getValue() ? new SnippetCounter.Group("NewArray") : null;
+ 253     private static final SnippetCounter newarray_loopInit = new SnippetCounter(countersNewArray, "tlabLoopInit", "TLAB alloc with zeroing in a loop");
+ 254     private static final SnippetCounter newarray_eden = new SnippetCounter(countersNewArray, "eden", "used edenAllocate");
+ 255 }
+</pre></body></html>

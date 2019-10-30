@@ -1,0 +1,430 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2012, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package com.oracle.graal.hotspot.stubs;
+  24 
+  25 import static com.oracle.graal.hotspot.HotSpotGraalRuntime.*;
+  26 import static com.oracle.graal.hotspot.nodes.DirectCompareAndSwapNode.*;
+  27 import static com.oracle.graal.hotspot.replacements.HotSpotReplacementsUtil.*;
+  28 import static com.oracle.graal.hotspot.stubs.StubUtil.*;
+  29 import static com.oracle.graal.nodes.extended.BranchProbabilityNode.*;
+  30 
+  31 import com.oracle.graal.api.code.*;
+  32 import com.oracle.graal.api.meta.*;
+  33 import com.oracle.graal.graph.Node.ConstantNodeParameter;
+  34 import com.oracle.graal.graph.Node.NodeIntrinsic;
+  35 import com.oracle.graal.hotspot.*;
+  36 import com.oracle.graal.hotspot.meta.*;
+  37 import com.oracle.graal.hotspot.nodes.*;
+  38 import com.oracle.graal.hotspot.replacements.*;
+  39 import com.oracle.graal.nodes.StructuredGraph.GuardsStage;
+  40 import com.oracle.graal.nodes.spi.*;
+  41 import com.oracle.graal.replacements.*;
+  42 import com.oracle.graal.replacements.Snippet.ConstantParameter;
+  43 import com.oracle.graal.replacements.Snippet.Fold;
+  44 import com.oracle.graal.replacements.SnippetTemplate.Arguments;
+  45 import com.oracle.graal.replacements.SnippetTemplate.SnippetInfo;
+  46 import com.oracle.graal.word.*;
+  47 
+  48 /**
+  49  * Stub implementing the fast path for TLAB refill during instance class allocation. This stub is
+  50  * called via {@link NewInstanceStubCall} from the {@linkplain NewObjectSnippets inline} allocation
+  51  * code when TLAB allocation fails. If this stub fails to refill the TLAB or allocate the object, it
+  52  * calls out to the HotSpot C++ runtime for to complete the allocation.
+  53  */
+  54 public class NewInstanceStub extends SnippetStub {
+  55 
+  56     public NewInstanceStub(HotSpotProviders providers, TargetDescription target, HotSpotForeignCallLinkage linkage) {
+  57         super(providers, target, linkage);
+  58     }
+  59 
+  60     @Override
+  61     protected Arguments makeArguments(SnippetInfo stub) {
+  62         HotSpotResolvedObjectType intArrayType = (HotSpotResolvedObjectType) providers.getMetaAccess().lookupJavaType(int[].class);
+  63 
+  64         // RuntimeStub cannot (currently) support oops or metadata embedded in the code so we
+  65         // convert the hub (i.e., Klass*) for int[] to be a naked word. This should be safe since
+  66         // the int[] class will never be unloaded.
+  67         Constant intArrayHub = intArrayType.klass();
+  68         intArrayHub = Constant.forIntegerKind(runtime().getTarget().wordKind, intArrayHub.asLong());
+  69 
+  70         Arguments args = new Arguments(stub, GuardsStage.FLOATING_GUARDS, LoweringTool.StandardLoweringStage.HIGH_TIER);
+  71         args.add("hub", null);
+  72         args.addConst("intArrayHub", intArrayHub);
+  73         args.addConst("threadRegister", providers.getRegisters().getThreadRegister());
+  74         return args;
+  75     }
+  76 
+  77     private static Word allocate(Word thread, int size) {
+  78         Word top = readTlabTop(thread);
+  79         Word end = readTlabEnd(thread);
+  80         Word newTop = top.add(size);
+  81         /*
+  82          * this check might lead to problems if the TLAB is within 16GB of the address space end
+  83          * (checked in c++ code)
+  84          */
+  85         if (probability(FAST_PATH_PROBABILITY, newTop.belowOrEqual(end))) {
+  86             writeTlabTop(thread, newTop);
+  87             return top;
+  88         }
+  89         return Word.zero();
+  90     }
+  91 
+  92     @Fold
+  93     private static boolean logging() {
+  94         return Boolean.getBoolean("graal.logNewInstanceStub");
+  95     }
+  96 
+  97     /**
+  98      * Re-attempts allocation after an initial TLAB allocation failed or was skipped (e.g., due to
+  99      * -XX:-UseTLAB).
+ 100      *
+ 101      * @param hub the hub of the object to be allocated
+ 102      * @param intArrayHub the hub for {@code int[].class}
+ 103      */
+ 104     @Snippet
+ 105     private static Object newInstance(Word hub, @ConstantParameter Word intArrayHub, @ConstantParameter Register threadRegister) {
+ 106         int sizeInBytes = hub.readInt(klassInstanceSizeOffset(), LocationIdentity.FINAL_LOCATION);
+ 107         Word thread = registerAsWord(threadRegister);
+ 108         if (!forceSlowPath() &amp;&amp; inlineContiguousAllocationSupported()) {
+ 109             if (isKlassFullyInitialized(hub)) {
+ 110                 Word memory = refillAllocate(thread, intArrayHub, sizeInBytes, logging());
+ 111                 if (memory.notEqual(0)) {
+ 112                     Word prototypeMarkWord = hub.readWord(prototypeMarkWordOffset(), PROTOTYPE_MARK_WORD_LOCATION);
+ 113                     NewObjectSnippets.formatObjectForStub(hub, sizeInBytes, memory, prototypeMarkWord);
+ 114                     return verifyObject(memory.toObject());
+ 115                 }
+ 116             }
+ 117         }
+ 118 
+ 119         if (logging()) {
+ 120             printf("newInstance: calling new_instance_c\n");
+ 121         }
+ 122 
+ 123         newInstanceC(NEW_INSTANCE_C, thread, hub);
+ 124         handlePendingException(thread, true);
+ 125         return verifyObject(getAndClearObjectResult(thread));
+ 126     }
+ 127 
+ 128     /**
+ 129      * Attempts to refill the current thread's TLAB and retries the allocation.
+ 130      *
+ 131      * @param intArrayHub the hub for {@code int[].class}
+ 132      * @param sizeInBytes the size of the allocation
+ 133      * @param log specifies if logging is enabled
+ 134      *
+ 135      * @return the newly allocated, uninitialized chunk of memory, or {@link Word#zero()} if the
+ 136      *         operation was unsuccessful
+ 137      */
+ 138     static Word refillAllocate(Word thread, Word intArrayHub, int sizeInBytes, boolean log) {
+ 139         // If G1 is enabled, the "eden" allocation space is not the same always
+ 140         // and therefore we have to go to slowpath to allocate a new TLAB.
+ 141         if (useG1GC()) {
+ 142             return Word.zero();
+ 143         }
+ 144         if (!useTLAB()) {
+ 145             return edenAllocate(Word.unsigned(sizeInBytes), log);
+ 146         }
+ 147         Word intArrayMarkWord = Word.unsigned(tlabIntArrayMarkWord());
+ 148         int alignmentReserveInBytes = tlabAlignmentReserveInHeapWords() * wordSize();
+ 149 
+ 150         Word top = readTlabTop(thread);
+ 151         Word end = readTlabEnd(thread);
+ 152 
+ 153         // calculate amount of free space
+ 154         long tlabFreeSpaceInBytes = end.subtract(top).rawValue();
+ 155 
+ 156         if (log) {
+ 157             printf("refillTLAB: thread=%p\n", thread.rawValue());
+ 158             printf("refillTLAB: top=%p\n", top.rawValue());
+ 159             printf("refillTLAB: end=%p\n", end.rawValue());
+ 160             printf("refillTLAB: tlabFreeSpaceInBytes=%ld\n", tlabFreeSpaceInBytes);
+ 161         }
+ 162 
+ 163         long tlabFreeSpaceInWords = tlabFreeSpaceInBytes &gt;&gt;&gt; log2WordSize();
+ 164 
+ 165         // Retain TLAB and allocate object in shared space if
+ 166         // the amount free in the TLAB is too large to discard.
+ 167         Word refillWasteLimit = thread.readWord(tlabRefillWasteLimitOffset(), TLAB_REFILL_WASTE_LIMIT_LOCATION);
+ 168         if (tlabFreeSpaceInWords &lt;= refillWasteLimit.rawValue()) {
+ 169             if (tlabStats()) {
+ 170                 // increment number of refills
+ 171                 thread.writeInt(tlabNumberOfRefillsOffset(), thread.readInt(tlabNumberOfRefillsOffset(), TLAB_NOF_REFILLS_LOCATION) + 1, TLAB_NOF_REFILLS_LOCATION);
+ 172                 if (log) {
+ 173                     printf("thread: %p -- number_of_refills %d\n", thread.rawValue(), thread.readInt(tlabNumberOfRefillsOffset(), TLAB_NOF_REFILLS_LOCATION));
+ 174                 }
+ 175                 // accumulate wastage
+ 176                 int wastage = thread.readInt(tlabFastRefillWasteOffset(), TLAB_FAST_REFILL_WASTE_LOCATION) + (int) tlabFreeSpaceInWords;
+ 177                 if (log) {
+ 178                     printf("thread: %p -- accumulated wastage %d\n", thread.rawValue(), wastage);
+ 179                 }
+ 180                 thread.writeInt(tlabFastRefillWasteOffset(), wastage, TLAB_FAST_REFILL_WASTE_LOCATION);
+ 181             }
+ 182 
+ 183             // if TLAB is currently allocated (top or end != null) then
+ 184             // fill [top, end + alignment_reserve) with array object
+ 185             if (top.notEqual(0)) {
+ 186                 int headerSize = arrayBaseOffset(Kind.Int);
+ 187                 // just like the HotSpot assembler stubs, assumes that tlabFreeSpaceInInts fits in
+ 188                 // an int
+ 189                 int tlabFreeSpaceInInts = (int) tlabFreeSpaceInBytes &gt;&gt;&gt; 2;
+ 190                 int length = ((alignmentReserveInBytes - headerSize) &gt;&gt;&gt; 2) + tlabFreeSpaceInInts;
+ 191                 NewObjectSnippets.formatArray(intArrayHub, -1, length, headerSize, top, intArrayMarkWord, false, false, false);
+ 192 
+ 193                 long allocated = thread.readLong(threadAllocatedBytesOffset(), TLAB_THREAD_ALLOCATED_BYTES_LOCATION);
+ 194                 allocated = allocated + top.subtract(readTlabStart(thread)).rawValue();
+ 195                 thread.writeLong(threadAllocatedBytesOffset(), allocated, TLAB_THREAD_ALLOCATED_BYTES_LOCATION);
+ 196             }
+ 197 
+ 198             // refill the TLAB with an eden allocation
+ 199             Word tlabRefillSizeInWords = thread.readWord(threadTlabSizeOffset(), TLAB_SIZE_LOCATION);
+ 200             Word tlabRefillSizeInBytes = tlabRefillSizeInWords.multiply(wordSize());
+ 201             // allocate new TLAB, address returned in top
+ 202             top = edenAllocate(tlabRefillSizeInBytes, log);
+ 203             if (top.notEqual(0)) {
+ 204                 end = top.add(tlabRefillSizeInBytes.subtract(alignmentReserveInBytes));
+ 205                 initializeTlab(thread, top, end);
+ 206 
+ 207                 return NewInstanceStub.allocate(thread, sizeInBytes);
+ 208             } else {
+ 209                 return Word.zero();
+ 210             }
+ 211         } else {
+ 212             // Retain TLAB
+ 213             Word newRefillWasteLimit = refillWasteLimit.add(tlabRefillWasteIncrement());
+ 214             thread.writeWord(tlabRefillWasteLimitOffset(), newRefillWasteLimit, TLAB_REFILL_WASTE_LIMIT_LOCATION);
+ 215             if (log) {
+ 216                 printf("refillTLAB: retaining TLAB - newRefillWasteLimit=%p\n", newRefillWasteLimit.rawValue());
+ 217             }
+ 218 
+ 219             if (tlabStats()) {
+ 220                 thread.writeInt(tlabSlowAllocationsOffset(), thread.readInt(tlabSlowAllocationsOffset(), TLAB_SLOW_ALLOCATIONS_LOCATION) + 1, TLAB_SLOW_ALLOCATIONS_LOCATION);
+ 221             }
+ 222 
+ 223             return edenAllocate(Word.unsigned(sizeInBytes), log);
+ 224         }
+ 225     }
+ 226 
+ 227     /**
+ 228      * Attempts to allocate a chunk of memory from Eden space.
+ 229      *
+ 230      * @param sizeInBytes the size of the chunk to allocate
+ 231      * @param log specifies if logging is enabled
+ 232      * @return the allocated chunk or {@link Word#zero()} if allocation fails
+ 233      */
+<a name="1" id="anc1"></a><span class="changed"> 234     static Word edenAllocate(Word sizeInBytes, boolean log) {</span>
+ 235         Word heapTopAddress = Word.unsigned(heapTopAddress());
+ 236         Word heapEndAddress = Word.unsigned(heapEndAddress());
+ 237 
+ 238         while (true) {
+ 239             Word heapTop = heapTopAddress.readWord(0, HEAP_TOP_LOCATION);
+ 240             Word newHeapTop = heapTop.add(sizeInBytes);
+ 241             if (newHeapTop.belowOrEqual(heapTop)) {
+ 242                 return Word.zero();
+ 243             }
+ 244 
+ 245             Word heapEnd = heapEndAddress.readWord(0, HEAP_END_LOCATION);
+ 246             if (newHeapTop.aboveThan(heapEnd)) {
+ 247                 return Word.zero();
+ 248             }
+ 249 
+ 250             if (compareAndSwap(heapTopAddress, 0, heapTop, newHeapTop, HEAP_TOP_LOCATION).equal(heapTop)) {
+ 251                 return heapTop;
+ 252             }
+ 253         }
+ 254     }
+ 255 
+ 256     @Fold
+ 257     private static boolean forceSlowPath() {
+ 258         return Boolean.getBoolean("graal.newInstanceStub.forceSlowPath");
+ 259     }
+ 260 
+ 261     public static final ForeignCallDescriptor NEW_INSTANCE_C = descriptorFor(NewInstanceStub.class, "newInstanceC");
+ 262 
+ 263     @NodeIntrinsic(StubForeignCallNode.class)
+ 264     public static native void newInstanceC(@ConstantNodeParameter ForeignCallDescriptor newInstanceC, Word thread, Word hub);
+ 265 }
+<a name="2" id="anc2"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="2" type="hidden" /></form></body></html>

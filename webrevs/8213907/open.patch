@@ -1,0 +1,614 @@
+--- old/src/hotspot/share/jvmci/jvmciCompilerToVM.cpp	2018-11-20 10:04:03.000000000 +0100
++++ new/src/hotspot/share/jvmci/jvmciCompilerToVM.cpp	2018-11-20 10:04:03.000000000 +0100
+@@ -1498,6 +1498,38 @@
+   }
+ C2V_END
+ 
++C2V_VMENTRY(jobject, asReflectionExecutable, (JNIEnv* env, jobject, jobject jvmci_method))
++  methodHandle m = CompilerToVM::asMethod(jvmci_method);
++  oop executable;
++  if (m->is_initializer()) {
++    if (m->is_static_initializer()) {
++      THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(),
++        "Cannot create java.lang.reflect.Method for class initializer");
++    }
++    executable = Reflection::new_constructor(m, CHECK_NULL);
++  } else {
++    executable = Reflection::new_method(m, false, CHECK_NULL);
++  }
++  return JNIHandles::make_local(thread, executable);
++}
++
++C2V_VMENTRY(jobject, asReflectionField, (JNIEnv* env, jobject, jobject jvmci_type, jint index))
++  Klass* klass = CompilerToVM::asKlass(jvmci_type);
++  if (!klass->is_instance_klass()) {
++    THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(),
++        err_msg("Expected non-primitive type, got %s", klass->external_name()));
++  }
++  InstanceKlass* iklass = InstanceKlass::cast(klass);
++  Array<u2>* fields = iklass->fields();
++  if (index < 0 || index > fields->length()) {
++    THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(),
++        err_msg("Field index %d out of bounds for %s", index, klass->external_name()));
++  }
++  fieldDescriptor fd(iklass, index);
++  oop reflected = Reflection::new_field(&fd, CHECK_NULL);
++  return JNIHandles::make_local(env, reflected);
++}
++
+ #define CC (char*)  /*cast a literal from (const char*)*/
+ #define FN_PTR(f) CAST_FROM_FN_PTR(void*, &(c2v_ ## f))
+ 
+@@ -1519,6 +1551,8 @@
+ #define HS_METADATA             "Ljdk/vm/ci/hotspot/HotSpotMetaData;"
+ #define HS_STACK_FRAME_REF      "Ljdk/vm/ci/hotspot/HotSpotStackFrameReference;"
+ #define HS_SPECULATION_LOG      "Ljdk/vm/ci/hotspot/HotSpotSpeculationLog;"
++#define REFLECTION_EXECUTABLE   "Ljava/lang/reflect/Executable;"
++#define REFLECTION_FIELD        "Ljava/lang/reflect/Field;"
+ #define METASPACE_METHOD_DATA   "J"
+ 
+ JNINativeMethod CompilerToVM::methods[] = {
+@@ -1586,6 +1620,8 @@
+   {CC "interpreterFrameSize",                         CC "(" BYTECODE_FRAME ")I",                                                           FN_PTR(interpreterFrameSize)},
+   {CC "compileToBytecode",                            CC "(" OBJECT ")V",                                                                   FN_PTR(compileToBytecode)},
+   {CC "getFlagValue",                                 CC "(" STRING ")" OBJECT,                                                             FN_PTR(getFlagValue)},
++  {CC "asReflectionExecutable",                       CC "(" HS_RESOLVED_METHOD ")" REFLECTION_EXECUTABLE,                                  FN_PTR(asReflectionExecutable)},
++  {CC "asReflectionField",                            CC "(" HS_RESOLVED_KLASS "I)" REFLECTION_FIELD,                                       FN_PTR(asReflectionField)},
+ };
+ 
+ int CompilerToVM::methods_count() {
+--- old/src/hotspot/share/jvmci/jvmciCompilerToVM.hpp	2018-11-20 10:04:05.000000000 +0100
++++ new/src/hotspot/share/jvmci/jvmciCompilerToVM.hpp	2018-11-20 10:04:04.000000000 +0100
+@@ -91,6 +91,7 @@
+     static HeapWord** _heap_end_addr;
+     static HeapWord* volatile* _heap_top_addr;
+     static int _max_oop_map_stack_offset;
++    static int _fields_annotations_base_offset;
+ 
+     static jbyte* cardtable_start_address;
+     static int cardtable_shift;
+@@ -101,7 +102,6 @@
+     static int sizeof_ExceptionTableElement;
+     static int sizeof_LocalVariableTableElement;
+     static int sizeof_ConstantPool;
+-    static int sizeof_SymbolPointer;
+     static int sizeof_narrowKlass;
+     static int sizeof_arrayOopDesc;
+     static int sizeof_BasicLock;
+--- old/src/hotspot/share/jvmci/jvmciCompilerToVMInit.cpp	2018-11-20 10:04:07.000000000 +0100
++++ new/src/hotspot/share/jvmci/jvmciCompilerToVMInit.cpp	2018-11-20 10:04:06.000000000 +0100
+@@ -61,6 +61,7 @@
+ HeapWord** CompilerToVM::Data::_heap_end_addr;
+ HeapWord* volatile* CompilerToVM::Data::_heap_top_addr;
+ int CompilerToVM::Data::_max_oop_map_stack_offset;
++int CompilerToVM::Data::_fields_annotations_base_offset;
+ 
+ jbyte* CompilerToVM::Data::cardtable_start_address;
+ int CompilerToVM::Data::cardtable_shift;
+@@ -71,7 +72,6 @@
+ int CompilerToVM::Data::sizeof_ExceptionTableElement = sizeof(ExceptionTableElement);
+ int CompilerToVM::Data::sizeof_LocalVariableTableElement = sizeof(LocalVariableTableElement);
+ int CompilerToVM::Data::sizeof_ConstantPool = sizeof(ConstantPool);
+-int CompilerToVM::Data::sizeof_SymbolPointer = sizeof(Symbol*);
+ int CompilerToVM::Data::sizeof_narrowKlass = sizeof(narrowKlass);
+ int CompilerToVM::Data::sizeof_arrayOopDesc = sizeof(arrayOopDesc);
+ int CompilerToVM::Data::sizeof_BasicLock = sizeof(BasicLock);
+@@ -122,6 +122,8 @@
+   symbol_init = (address) vmSymbols::object_initializer_name();
+   symbol_clinit = (address) vmSymbols::class_initializer_name();
+ 
++  _fields_annotations_base_offset = Array<AnnotationArray*>::base_offset_in_bytes();
++
+   BarrierSet* bs = BarrierSet::barrier_set();
+   if (bs->is_a(BarrierSet::CardTableBarrierSet)) {
+     jbyte* base = ci_card_table_address();
+--- old/src/hotspot/share/jvmci/vmStructs_jvmci.cpp	2018-11-20 10:04:08.000000000 +0100
++++ new/src/hotspot/share/jvmci/vmStructs_jvmci.cpp	2018-11-20 10:04:08.000000000 +0100
+@@ -76,6 +76,7 @@
+   static_field(CompilerToVM::Data,             _heap_top_addr,                         HeapWord* volatile*)                          \
+                                                                                                                                      \
+   static_field(CompilerToVM::Data,             _max_oop_map_stack_offset,              int)                                          \
++  static_field(CompilerToVM::Data,             _fields_annotations_base_offset,        int)                                          \
+                                                                                                                                      \
+   static_field(CompilerToVM::Data,             cardtable_start_address,                jbyte*)                                       \
+   static_field(CompilerToVM::Data,             cardtable_shift,                        int)                                          \
+@@ -86,7 +87,6 @@
+   static_field(CompilerToVM::Data,             sizeof_ExceptionTableElement,           int)                                          \
+   static_field(CompilerToVM::Data,             sizeof_LocalVariableTableElement,       int)                                          \
+   static_field(CompilerToVM::Data,             sizeof_ConstantPool,                    int)                                          \
+-  static_field(CompilerToVM::Data,             sizeof_SymbolPointer,                   int)                                          \
+   static_field(CompilerToVM::Data,             sizeof_narrowKlass,                     int)                                          \
+   static_field(CompilerToVM::Data,             sizeof_arrayOopDesc,                    int)                                          \
+   static_field(CompilerToVM::Data,             sizeof_BasicLock,                       int)                                          \
+@@ -104,6 +104,8 @@
+                                                                                                                                      \
+   static_field(Abstract_VM_Version,            _features,                              uint64_t)                                     \
+                                                                                                                                      \
++  nonstatic_field(Annotations,                 _fields_annotations,                    Array<AnnotationArray*>*)                     \
++                                                                                                                                     \
+   nonstatic_field(Array<int>,                  _length,                                int)                                          \
+   unchecked_nonstatic_field(Array<u1>,         _data,                                  sizeof(u1))                                   \
+   unchecked_nonstatic_field(Array<u2>,         _data,                                  sizeof(u2))                                   \
+@@ -164,6 +166,7 @@
+   nonstatic_field(InstanceKlass,               _source_file_name_index,                       u2)                                    \
+   nonstatic_field(InstanceKlass,               _init_state,                                   u1)                                    \
+   nonstatic_field(InstanceKlass,               _misc_flags,                                   u2)                                    \
++  nonstatic_field(InstanceKlass,               _annotations,                                  Annotations*)                          \
+                                                                                                                                      \
+   volatile_nonstatic_field(JavaFrameAnchor,    _last_Java_sp,                                 intptr_t*)                             \
+   volatile_nonstatic_field(JavaFrameAnchor,    _last_Java_pc,                                 address)                               \
+@@ -462,6 +465,8 @@
+   declare_constant(ConstMethod::_has_linenumber_table)                    \
+   declare_constant(ConstMethod::_has_localvariable_table)                 \
+   declare_constant(ConstMethod::_has_exception_table)                     \
++  declare_constant(ConstMethod::_has_method_annotations)                  \
++  declare_constant(ConstMethod::_has_parameter_annotations)               \
+                                                                           \
+   declare_constant(CounterData::count_off)                                \
+                                                                           \
+--- old/src/hotspot/share/oops/annotations.hpp	2018-11-20 10:04:09.000000000 +0100
++++ new/src/hotspot/share/oops/annotations.hpp	2018-11-20 10:04:09.000000000 +0100
+@@ -42,6 +42,8 @@
+ // a type_annotation instance.
+ 
+ class Annotations: public MetaspaceObj {
++ friend class JVMCIVMStructs;
++
+   // If you add a new field that points to any metaspace object, you
+   // must add this field to Annotations::metaspace_pointers_do().
+ 
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2018-11-20 10:04:11.000000000 +0100
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2018-11-20 10:04:11.000000000 +0100
+@@ -27,6 +27,7 @@
+ import static jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.runtime;
+ 
+ import java.lang.reflect.Executable;
++import java.lang.reflect.Field;
+ 
+ import jdk.vm.ci.code.BytecodeFrame;
+ import jdk.vm.ci.code.InstalledCode;
+@@ -657,4 +658,17 @@
+      * Gets the host class for {@code type}.
+      */
+     native HotSpotResolvedObjectTypeImpl getHostClass(HotSpotResolvedObjectTypeImpl type);
++
++    /**
++     * Gets a {@link Executable} corresponding to {@code method}.
++     */
++    native Executable asReflectionExecutable(HotSpotResolvedJavaMethodImpl method);
++
++    /**
++     * Gets a {@link Field} denoted by {@code holder} and {@code index}.
++     *
++     * @param holder the class in which the requested field is declared
++     * @param fieldIndex the {@code fieldDescriptor::index()} denoting the field
++     */
++    native Field asReflectionField(HotSpotResolvedObjectTypeImpl holder, int fieldIndex);
+ }
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaFieldImpl.java	2018-11-20 10:04:13.000000000 +0100
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaFieldImpl.java	2018-11-20 10:04:12.000000000 +0100
+@@ -22,11 +22,15 @@
+  */
+ package jdk.vm.ci.hotspot;
+ 
++import static jdk.internal.misc.Unsafe.ADDRESS_SIZE;
++import static jdk.vm.ci.hotspot.CompilerToVM.compilerToVM;
+ import static jdk.vm.ci.hotspot.HotSpotModifiers.jvmFieldModifiers;
+ import static jdk.vm.ci.hotspot.HotSpotVMConfig.config;
++import static jdk.vm.ci.hotspot.UnsafeAccess.UNSAFE;
+ 
+ import java.lang.annotation.Annotation;
+ import java.lang.reflect.Field;
++import java.util.HashMap;
+ 
+ import jdk.vm.ci.meta.JavaConstant;
+ import jdk.vm.ci.meta.JavaType;
+@@ -156,41 +160,65 @@
+         return (config().jvmAccFieldStable & modifiers) != 0;
+     }
+ 
++    private boolean hasAnnotations() {
++        if (!isInternal()) {
++            HotSpotVMConfig config = config();
++            final long metaspaceAnnotations = UNSAFE.getAddress(holder.getMetaspaceKlass() + config.instanceKlassAnnotationsOffset);
++            if (metaspaceAnnotations != 0) {
++                long fieldsAnnotations = UNSAFE.getAddress(metaspaceAnnotations + config.annotationsFieldAnnotationsOffset);
++                if (fieldsAnnotations != 0) {
++                    long fieldAnnotations = UNSAFE.getAddress(fieldsAnnotations + config.fieldsAnnotationsBaseOffset + (ADDRESS_SIZE * index));
++                    return fieldAnnotations != 0;
++                }
++            }
++        }
++        return false;
++    }
++
+     @Override
+     public Annotation[] getAnnotations() {
+-        Field javaField = toJava();
+-        if (javaField != null) {
+-            return javaField.getAnnotations();
++        if (!hasAnnotations()) {
++            return new Annotation[0];
+         }
+-        return new Annotation[0];
++        return toJava().getAnnotations();
+     }
+ 
+     @Override
+     public Annotation[] getDeclaredAnnotations() {
+-        Field javaField = toJava();
+-        if (javaField != null) {
+-            return javaField.getDeclaredAnnotations();
++        if (!hasAnnotations()) {
++            return new Annotation[0];
+         }
+-        return new Annotation[0];
++        return toJava().getDeclaredAnnotations();
+     }
+ 
+     @Override
+     public <T extends Annotation> T getAnnotation(Class<T> annotationClass) {
+-        Field javaField = toJava();
+-        if (javaField != null) {
+-            return javaField.getAnnotation(annotationClass);
++        if (!hasAnnotations()) {
++            return null;
+         }
+-        return null;
++        return toJava().getAnnotation(annotationClass);
+     }
+ 
++    /**
++     * Gets a {@link Field} object corresponding to this object. This method always returns the same
++     * {@link Field} object for a given {@link HotSpotResolvedJavaFieldImpl}. This ensures
++     * {@link #getDeclaredAnnotations()}, {@link #getAnnotations()} and
++     * {@link #getAnnotation(Class)} are stable with respect to the identity of the
++     * {@link Annotation} objects they return.
++     */
+     private Field toJava() {
+-        if (isInternal()) {
+-            return null;
+-        }
+-        try {
+-            return holder.mirror().getDeclaredField(getName());
+-        } catch (NoSuchFieldException e) {
+-            return null;
++        synchronized (holder) {
++            HashMap<HotSpotResolvedJavaFieldImpl, Field> cache = holder.reflectionFieldCache;
++            if (cache == null) {
++                cache = new HashMap<>();
++                holder.reflectionFieldCache = cache;
++            }
++            Field reflect = cache.get(this);
++            if (reflect == null) {
++                reflect = compilerToVM().asReflectionField(holder, index);
++                cache.put(this, reflect);
++            }
++            return reflect;
+         }
+     }
+ }
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java	2018-11-20 10:04:14.000000000 +0100
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java	2018-11-20 10:04:14.000000000 +0100
+@@ -33,10 +33,8 @@
+ 
+ import java.lang.annotation.Annotation;
+ import java.lang.reflect.Executable;
+-import java.lang.reflect.Method;
+ import java.lang.reflect.Modifier;
+ import java.lang.reflect.Type;
+-import java.util.Arrays;
+ import java.util.HashMap;
+ import java.util.Map;
+ 
+@@ -54,7 +52,6 @@
+ import jdk.vm.ci.meta.ProfilingInfo;
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+ import jdk.vm.ci.meta.ResolvedJavaType;
+-import jdk.vm.ci.meta.Signature;
+ import jdk.vm.ci.meta.SpeculationLog;
+ import jdk.vm.ci.meta.TriState;
+ 
+@@ -75,11 +72,9 @@
+     private byte[] code;
+ 
+     /**
+-     * Cache for {@link #toJava()}. Set to {@link #signature} when resolving reflection object fails
+-     * due to reflection filtering (see {@code Reflection.fieldFilterMap} and
+-     * {@code Reflection.methodFilterMap}).
++     * Cache for {@link #toJava()}.
+      */
+-    private Object toJavaCache;
++    private volatile Executable toJavaCache;
+ 
+     /**
+      * Only 30% of {@link HotSpotResolvedJavaMethodImpl}s have their name accessed so compute it
+@@ -492,12 +487,10 @@
+ 
+     @Override
+     public Parameter[] getParameters() {
+-        Executable javaMethod = toJava();
+-        if (javaMethod == null) {
+-            return null;
++        if (signature.getParameterCount(false) == 0) {
++            return new ResolvedJavaMethod.Parameter[0];
+         }
+-
+-        java.lang.reflect.Parameter[] javaParameters = javaMethod.getParameters();
++        java.lang.reflect.Parameter[] javaParameters = toJava().getParameters();
+         Parameter[] res = new Parameter[javaParameters.length];
+         for (int i = 0; i < res.length; i++) {
+             java.lang.reflect.Parameter src = javaParameters[i];
+@@ -509,32 +502,34 @@
+ 
+     @Override
+     public Annotation[][] getParameterAnnotations() {
+-        Executable javaMethod = toJava();
+-        return javaMethod == null ? new Annotation[signature.getParameterCount(false)][0] : javaMethod.getParameterAnnotations();
++        if ((getConstMethodFlags() & config().constMethodHasParameterAnnotations) == 0) {
++            return new Annotation[signature.getParameterCount(false)][0];
++        }
++        return toJava().getParameterAnnotations();
+     }
+ 
+     @Override
+     public Annotation[] getAnnotations() {
+-        Executable javaMethod = toJava();
+-        if (javaMethod != null) {
+-            return javaMethod.getAnnotations();
++        if ((getConstMethodFlags() & config().constMethodHasMethodAnnotations) == 0) {
++            return new Annotation[0];
+         }
+-        return new Annotation[0];
++        return toJava().getAnnotations();
+     }
+ 
+     @Override
+     public Annotation[] getDeclaredAnnotations() {
+-        Executable javaMethod = toJava();
+-        if (javaMethod != null) {
+-            return javaMethod.getDeclaredAnnotations();
++        if ((getConstMethodFlags() & config().constMethodHasMethodAnnotations) == 0) {
++            return new Annotation[0];
+         }
+-        return new Annotation[0];
++        return toJava().getDeclaredAnnotations();
+     }
+ 
+     @Override
+     public <T extends Annotation> T getAnnotation(Class<T> annotationClass) {
+-        Executable javaMethod = toJava();
+-        return javaMethod == null ? null : javaMethod.getAnnotation(annotationClass);
++        if ((getConstMethodFlags() & config().constMethodHasMethodAnnotations) == 0) {
++            return null;
++        }
++        return toJava().getAnnotation(annotationClass);
+     }
+ 
+     @Override
+@@ -561,60 +556,22 @@
+ 
+     @Override
+     public Type[] getGenericParameterTypes() {
+-        Executable javaMethod = toJava();
+-        return javaMethod == null ? null : javaMethod.getGenericParameterTypes();
+-    }
+-
+-    public Class<?>[] signatureToTypes() {
+-        Signature sig = getSignature();
+-        int count = sig.getParameterCount(false);
+-        Class<?>[] result = new Class<?>[count];
+-        for (int i = 0; i < result.length; ++i) {
+-            JavaType parameterType = sig.getParameterType(i, holder);
+-            HotSpotResolvedJavaType resolvedParameterType = (HotSpotResolvedJavaType) parameterType.resolve(holder);
+-            result[i] = resolvedParameterType.mirror();
++        if (isClassInitializer()) {
++            return new Type[0];
+         }
+-        return result;
+-    }
+-
+-    private static Method searchMethods(Method[] methods, String name, Class<?> returnType, Class<?>[] parameterTypes) {
+-        for (Method m : methods) {
+-            if (m.getName().equals(name) && returnType.equals(m.getReturnType()) && Arrays.equals(m.getParameterTypes(), parameterTypes)) {
+-                return m;
+-            }
+-        }
+-        return null;
++        return toJava().getGenericParameterTypes();
+     }
+ 
+     private Executable toJava() {
+-        if (toJavaCache != null) {
+-            if (toJavaCache == signature) {
+-                return null;
+-            }
+-            return (Executable) toJavaCache;
+-        }
+-        Class<?>[] parameterTypes = signatureToTypes();
+-        Class<?> returnType = ((HotSpotResolvedJavaType) getSignature().getReturnType(holder).resolve(holder)).mirror();
+-
+-        Executable result;
+-        if (isConstructor()) {
+-            try {
+-                result = holder.mirror().getDeclaredConstructor(parameterTypes);
+-            } catch (NoSuchMethodException e) {
+-                toJavaCache = signature;
+-                return null;
+-            }
+-        } else {
+-            // Do not use Method.getDeclaredMethod() as it can return a bridge method
+-            // when this.isBridge() is false and vice versa.
+-            result = searchMethods(holder.mirror().getDeclaredMethods(), getName(), returnType, parameterTypes);
+-            if (result == null) {
+-                toJavaCache = signature;
+-                return null;
++        if (toJavaCache == null) {
++            assert !isClassInitializer() : this;
++            synchronized (this) {
++                if (toJavaCache == null) {
++                    toJavaCache = compilerToVM().asReflectionExecutable(this);
++                }
+             }
+         }
+-        toJavaCache = result;
+-        return result;
++        return toJavaCache;
+     }
+ 
+     @Override
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java	2018-11-20 10:04:16.000000000 +0100
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java	2018-11-20 10:04:15.000000000 +0100
+@@ -33,6 +33,7 @@
+ import java.lang.annotation.Annotation;
+ import java.lang.reflect.Array;
+ import java.lang.reflect.Constructor;
++import java.lang.reflect.Field;
+ import java.lang.reflect.Method;
+ import java.lang.reflect.Modifier;
+ import java.nio.ByteOrder;
+@@ -75,6 +76,11 @@
+     private HotSpotResolvedObjectType arrayOfType;
+ 
+     /**
++     * Managed exclusively by {@link HotSpotResolvedJavaFieldImpl#toJava}.
++     */
++    HashMap<HotSpotResolvedJavaFieldImpl, Field> reflectionFieldCache;
++
++    /**
+      * Gets the JVMCI mirror for a {@link Class} object.
+      *
+      * @return the {@link HotSpotResolvedJavaType} corresponding to {@code javaClass}
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java	2018-11-20 10:04:17.000000000 +0100
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java	2018-11-20 10:04:17.000000000 +0100
+@@ -94,6 +94,7 @@
+     final int instanceKlassInitStateOffset = getFieldOffset("InstanceKlass::_init_state", Integer.class, "u1");
+     final int instanceKlassConstantsOffset = getFieldOffset("InstanceKlass::_constants", Integer.class, "ConstantPool*");
+     final int instanceKlassFieldsOffset = getFieldOffset("InstanceKlass::_fields", Integer.class, "Array<u2>*");
++    final int instanceKlassAnnotationsOffset = getFieldOffset("InstanceKlass::_annotations", Integer.class, "Annotations*");
+     final int instanceKlassMiscFlagsOffset = getFieldOffset("InstanceKlass::_misc_flags", Integer.class, "u2");
+     final int klassVtableStartOffset = getFieldValue("CompilerToVM::Data::Klass_vtable_start_offset", Integer.class, "int");
+     final int klassVtableLengthOffset = getFieldValue("CompilerToVM::Data::Klass_vtable_length_offset", Integer.class, "int");
+@@ -102,6 +103,9 @@
+     final int instanceKlassStateFullyInitialized = getConstant("InstanceKlass::fully_initialized", Integer.class);
+     final int instanceKlassMiscIsUnsafeAnonymous = getConstant("InstanceKlass::_misc_is_unsafe_anonymous", Integer.class);
+ 
++    final int annotationsFieldAnnotationsOffset = getFieldOffset("Annotations::_fields_annotations", Integer.class, "Array<AnnotationArray*>*");
++    final int fieldsAnnotationsBaseOffset = getFieldValue("CompilerToVM::Data::_fields_annotations_base_offset", Integer.class, "int");
++
+     final int arrayU1LengthOffset = getFieldOffset("Array<int>::_length", Integer.class, "int");
+     final int arrayU1DataOffset = getFieldOffset("Array<u1>::_data", Integer.class);
+     final int arrayU2DataOffset = getFieldOffset("Array<u2>::_data", Integer.class);
+@@ -195,6 +199,8 @@
+ 
+     final int constMethodHasLineNumberTable = getConstant("ConstMethod::_has_linenumber_table", Integer.class);
+     final int constMethodHasLocalVariableTable = getConstant("ConstMethod::_has_localvariable_table", Integer.class);
++    final int constMethodHasMethodAnnotations = getConstant("ConstMethod::_has_method_annotations", Integer.class);
++    final int constMethodHasParameterAnnotations = getConstant("ConstMethod::_has_parameter_annotations", Integer.class);
+     final int constMethodHasExceptionTable = getConstant("ConstMethod::_has_exception_table", Integer.class);
+ 
+     final int exceptionTableElementSize = getFieldValue("CompilerToVM::Data::sizeof_ExceptionTableElement", Integer.class, "int");
+@@ -244,8 +250,6 @@
+ 
+     final int heapWordSize = getConstant("HeapWordSize", Integer.class);
+ 
+-    final int symbolPointerSize = getFieldValue("CompilerToVM::Data::sizeof_SymbolPointer", Integer.class, "int");
+-
+     final long vmSymbolsSymbols = getFieldAddress("vmSymbols::_symbols[0]", "Symbol*");
+     final int vmSymbolsFirstSID = getConstant("vmSymbols::FIRST_SID", Integer.class);
+     final int vmSymbolsSIDLimit = getConstant("vmSymbols::SID_LIMIT", Integer.class);
+@@ -263,8 +267,7 @@
+     String symbolAt(int index) {
+         HotSpotJVMCIRuntime runtime = runtime();
+         assert vmSymbolsFirstSID <= index && index < vmSymbolsSIDLimit : "index " + index + " is out of bounds";
+-        assert symbolPointerSize == Unsafe.ADDRESS_SIZE : "the following address read is broken";
+-        int offset = index * symbolPointerSize;
++        int offset = index * Unsafe.ADDRESS_SIZE;
+         return runtime.getCompilerToVM().getSymbol(UNSAFE.getAddress(vmSymbolsSymbols + offset));
+     }
+ 
+--- old/test/hotspot/jtreg/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaField.java	2018-11-20 10:04:19.000000000 +0100
++++ new/test/hotspot/jtreg/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaField.java	2018-11-20 10:04:18.000000000 +0100
+@@ -142,16 +142,15 @@
+             }
+         }
+     }
++
++    private static final String NON_EXISTENT_CLASS_NAME = "XXXXXXXXXXX";
++
+     static class TestClassLoader extends ClassLoader {
+ 
+         @Override
+-        protected Class<?> findClass(final String name) {
++        protected Class<?> findClass(final String name) throws ClassNotFoundException {
+             if (!name.equals(TypeWithUnresolvedFieldType.class.getName())) {
+-                try {
+-                    return super.findClass(name);
+-                } catch (ClassNotFoundException e) {
+-                    throw new AssertionError("unexpected: " + e);
+-                }
++                return super.findClass(name);
+             }
+             // copy classfile to byte array
+             byte[] classData = null;
+@@ -176,7 +175,7 @@
+             int index = -1;
+ 
+             while ((index = indexOf(classData, index + 1, "PrintStream")) != -1) {
+-                replace(classData, index, "XXXXXXXXXXX");
++                replace(classData, index, NON_EXISTENT_CLASS_NAME);
+             }
+ 
+             Class<?> c = defineClass(null, classData, 0, classData.length);
+@@ -211,13 +210,14 @@
+      * type of the field is not resolvable.
+      */
+     @Test
+-    public void testGetType() {
++    public void testGetType() throws ClassNotFoundException {
+         Class<?> c = new TestClassLoader().findClass(TypeWithUnresolvedFieldType.class.getName());
+         ResolvedJavaType type = metaAccess.lookupJavaType(c);
+         for (ResolvedJavaField field : type.getInstanceFields(false)) {
+             assertTrue(field.getName().equals("fieldWithUnresolvableType"));
+             field.getType();
+             field.toString();
++            field.getAnnotations();
+         }
+     }
+ }
+--- old/test/hotspot/jtreg/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaType.java	2018-11-20 10:04:20.000000000 +0100
++++ new/test/hotspot/jtreg/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaType.java	2018-11-20 10:04:20.000000000 +0100
+@@ -855,17 +855,25 @@
+ 
+     }
+ 
++    private static ResolvedJavaMethod getClassInitializer(Class<?> c) {
++        ResolvedJavaMethod clinit = metaAccess.lookupJavaType(c).getClassInitializer();
++        if (clinit != null) {
++            assertEquals(0, clinit.getAnnotations().length);
++            assertEquals(0, clinit.getDeclaredAnnotations().length);
++        }
++        return clinit;
++    }
++
+     @Test
+     public void getClassInitializerTest() {
+-        assertNotNull(metaAccess.lookupJavaType(A.class).getClassInitializer());
+-        assertNotNull(metaAccess.lookupJavaType(D.class).getClassInitializer());
+-        assertNull(metaAccess.lookupJavaType(B.class).getClassInitializer());
+-        assertNull(metaAccess.lookupJavaType(C.class).getClassInitializer());
+-        assertNull(metaAccess.lookupJavaType(int.class).getClassInitializer());
+-        assertNull(metaAccess.lookupJavaType(void.class).getClassInitializer());
++        assertNotNull(getClassInitializer(A.class));
++        assertNotNull(getClassInitializer(D.class));
++        assertNull(getClassInitializer(B.class));
++        assertNull(getClassInitializer(C.class));
++        assertNull(getClassInitializer(int.class));
++        assertNull(getClassInitializer(void.class));
+         for (Class<?> c : classes) {
+-            ResolvedJavaType type = metaAccess.lookupJavaType(c);
+-            type.getClassInitializer();
++            getClassInitializer(c);
+         }
+     }
+ 

@@ -1,0 +1,251 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>open Udiff src/hotspot/share/jvmci/jvmciRuntime.cpp</title>
+
+<style type="text/css" media="screen">
+span.new {
+    color: blue;
+    font-weight: normal;
+}
+</style>
+
+</head>
+<body id="SUNWwebrev">
+<center><a href='../../../../src/hotspot/share/gc/shared/memAllocator.cpp.udiff.html' target='_top'>&lt prev</a> <a href='../../../../index.html' target='_top'>index</a> <a href='../../../../src/hotspot/share/jvmci/jvmciRuntime.hpp.udiff.html' target='_top'>next &gt</a></center>
+<h2>src/hotspot/share/jvmci/jvmciRuntime.cpp</h2>
+        <a class="print" href="javascript:print()">Print this page</a>
+<pre></pre>
+        <pre>
+</pre><hr /><pre>
+<span class="newmarker">@@ -107,83 +107,144 @@</span>
+     Deoptimization::deoptimize_frame(thread, caller_frame.id(), Deoptimization::Reason_constraint);
+     assert(caller_is_deopted(), "Must be deoptimized");
+   }
+ }
+ 
+<span class="removed">-JRT_BLOCK_ENTRY(void, JVMCIRuntime::new_instance(JavaThread* thread, Klass* klass))</span>
+<span class="new">+// Manages a scope in which a failed heap allocation will throw an exception.</span>
+<span class="new">+// The pending exception is cleared when leaving the scope.</span>
+<span class="new">+class RetryableAllocationMark: public StackObj {</span>
+<span class="new">+ private:</span>
+<span class="new">+  JavaThread* _thread;</span>
+<span class="new">+ public:</span>
+<span class="new">+  RetryableAllocationMark(JavaThread* thread, bool activate) {</span>
+<span class="new">+    if (activate) {</span>
+<span class="new">+      assert(thread-&gt;in_retryable_allocation(), "retryable allocation scope is non-reentrant");</span>
+<span class="new">+      _thread = thread;</span>
+<span class="new">+      _thread-&gt;set_in_retryable_allocation(true);</span>
+<span class="new">+    } else {</span>
+<span class="new">+      _thread = NULL;</span>
+<span class="new">+    }</span>
+<span class="new">+  }</span>
+<span class="new">+  ~RetryableAllocationMark() {</span>
+<span class="new">+    if (_thread != NULL) {</span>
+<span class="new">+      _thread-&gt;set_in_retryable_allocation(false);</span>
+<span class="new">+      JavaThread* THREAD = _thread;</span>
+<span class="new">+      if (HAS_PENDING_EXCEPTION) {</span>
+<span class="new">+        oop ex = PENDING_EXCEPTION;</span>
+<span class="new">+        CLEAR_PENDING_EXCEPTION;</span>
+<span class="new">+        oop retry_oome = Universe::out_of_memory_error_retry();</span>
+<span class="new">+        if (ex-&gt;is_a(retry_oome-&gt;klass()) &amp;&amp; retry_oome != ex) {</span>
+<span class="new">+          ResourceMark rm;</span>
+<span class="new">+          fatal("Unexpected exception in scope of retryable allocation: " INTPTR_FORMAT " of type %s", p2i(ex), ex-&gt;klass()-&gt;external_name());</span>
+<span class="new">+        }</span>
+<span class="new">+      }</span>
+<span class="new">+    }</span>
+<span class="new">+  }</span>
+<span class="new">+};</span>
+<span class="new">+</span>
+<span class="new">+JRT_BLOCK_ENTRY(void, JVMCIRuntime::new_instance_common(JavaThread* thread, Klass* klass, bool null_on_fail))</span>
+   JRT_BLOCK;
+   assert(klass-&gt;is_klass(), "not a class");
+   Handle holder(THREAD, klass-&gt;klass_holder()); // keep the klass alive
+   InstanceKlass* ik = InstanceKlass::cast(klass);
+<span class="new">+  {</span>
+<span class="new">+    RetryableAllocationMark ram(thread, null_on_fail);</span>
+   ik-&gt;check_valid_for_instantiation(true, CHECK);
+<span class="new">+    oop obj;</span>
+<span class="new">+    if (null_on_fail) {</span>
+<span class="new">+      if (!ik-&gt;is_initialized()) {</span>
+<span class="new">+        // Cannot re-execute class initialization without side effects</span>
+<span class="new">+        // so return without attempting the initialization</span>
+<span class="new">+        return;</span>
+<span class="new">+      }</span>
+<span class="new">+    } else {</span>
+   // make sure klass is initialized
+   ik-&gt;initialize(CHECK);
+<span class="new">+    }</span>
+   // allocate instance and return via TLS
+<span class="removed">-  oop obj = ik-&gt;allocate_instance(CHECK);</span>
+<span class="new">+    obj = ik-&gt;allocate_instance(CHECK);</span>
+   thread-&gt;set_vm_result(obj);
+<span class="new">+  }</span>
+   JRT_BLOCK_END;
+   SharedRuntime::on_slowpath_allocation_exit(thread);
+ JRT_END
+ 
+<span class="removed">-JRT_BLOCK_ENTRY(void, JVMCIRuntime::new_array(JavaThread* thread, Klass* array_klass, jint length))</span>
+<span class="new">+JRT_BLOCK_ENTRY(void, JVMCIRuntime::new_array_common(JavaThread* thread, Klass* array_klass, jint length, bool null_on_fail))</span>
+   JRT_BLOCK;
+   // Note: no handle for klass needed since they are not used
+   //       anymore after new_objArray() and no GC can happen before.
+   //       (This may have to change if this code changes!)
+   assert(array_klass-&gt;is_klass(), "not a class");
+   oop obj;
+   if (array_klass-&gt;is_typeArray_klass()) {
+     BasicType elt_type = TypeArrayKlass::cast(array_klass)-&gt;element_type();
+<span class="new">+    RetryableAllocationMark ram(thread, null_on_fail);</span>
+     obj = oopFactory::new_typeArray(elt_type, length, CHECK);
+   } else {
+     Handle holder(THREAD, array_klass-&gt;klass_holder()); // keep the klass alive
+     Klass* elem_klass = ObjArrayKlass::cast(array_klass)-&gt;element_klass();
+<span class="new">+    RetryableAllocationMark ram(thread, null_on_fail);</span>
+     obj = oopFactory::new_objArray(elem_klass, length, CHECK);
+   }
+   thread-&gt;set_vm_result(obj);
+   // This is pretty rare but this runtime patch is stressful to deoptimization
+   // if we deoptimize here so force a deopt to stress the path.
+   if (DeoptimizeALot) {
+     static int deopts = 0;
+     // Alternate between deoptimizing and raising an error (which will also cause a deopt)
+     if (deopts++ % 2 == 0) {
+<span class="new">+      if (null_on_fail) {</span>
+<span class="new">+        return;</span>
+<span class="new">+      } else {</span>
+       ResourceMark rm(THREAD);
+       THROW(vmSymbols::java_lang_OutOfMemoryError());
+<span class="new">+      }</span>
+     } else {
+       deopt_caller();
+     }
+   }
+   JRT_BLOCK_END;
+   SharedRuntime::on_slowpath_allocation_exit(thread);
+ JRT_END
+ 
+<span class="removed">-JRT_ENTRY(void, JVMCIRuntime::new_multi_array(JavaThread* thread, Klass* klass, int rank, jint* dims))</span>
+<span class="new">+JRT_ENTRY(void, JVMCIRuntime::new_multi_array_common(JavaThread* thread, Klass* klass, int rank, jint* dims, bool null_on_fail))</span>
+   assert(klass-&gt;is_klass(), "not a class");
+   assert(rank &gt;= 1, "rank must be nonzero");
+   Handle holder(THREAD, klass-&gt;klass_holder()); // keep the klass alive
+<span class="new">+  RetryableAllocationMark ram(thread, null_on_fail);</span>
+   oop obj = ArrayKlass::cast(klass)-&gt;multi_allocate(rank, dims, CHECK);
+   thread-&gt;set_vm_result(obj);
+ JRT_END
+ 
+<span class="removed">-JRT_ENTRY(void, JVMCIRuntime::dynamic_new_array(JavaThread* thread, oopDesc* element_mirror, jint length))</span>
+<span class="new">+JRT_ENTRY(void, JVMCIRuntime::dynamic_new_array_common(JavaThread* thread, oopDesc* element_mirror, jint length, bool null_on_fail))</span>
+<span class="new">+  RetryableAllocationMark ram(thread, null_on_fail);</span>
+   oop obj = Reflection::reflect_new_array(element_mirror, length, CHECK);
+   thread-&gt;set_vm_result(obj);
+ JRT_END
+ 
+<span class="removed">-JRT_ENTRY(void, JVMCIRuntime::dynamic_new_instance(JavaThread* thread, oopDesc* type_mirror))</span>
+<span class="new">+JRT_ENTRY(void, JVMCIRuntime::dynamic_new_instance_common(JavaThread* thread, oopDesc* type_mirror, bool null_on_fail))</span>
+   InstanceKlass* klass = InstanceKlass::cast(java_lang_Class::as_Klass(type_mirror));
+ 
+   if (klass == NULL) {
+     ResourceMark rm(THREAD);
+     THROW(vmSymbols::java_lang_InstantiationException());
+   }
+<span class="new">+  RetryableAllocationMark ram(thread, null_on_fail);</span>
+ 
+   // Create new instance (the receiver)
+   klass-&gt;check_valid_for_instantiation(false, CHECK);
+ 
+<span class="new">+  if (null_on_fail) {</span>
+<span class="new">+    if (!klass-&gt;is_initialized()) {</span>
+<span class="new">+      // Cannot re-execute class initialization without side effects</span>
+<span class="new">+      // so return without attempting the initialization</span>
+<span class="new">+      return;</span>
+<span class="new">+    }</span>
+<span class="new">+  } else {</span>
+   // Make sure klass gets initialized
+   klass-&gt;initialize(CHECK);
+<span class="new">+  }</span>
+ 
+   oop obj = klass-&gt;allocate_instance(CHECK);
+   thread-&gt;set_vm_result(obj);
+ JRT_END
+ 
+</pre>
+<center><a href='../../../../src/hotspot/share/gc/shared/memAllocator.cpp.udiff.html' target='_top'>&lt prev</a> <a href='../../../../index.html' target='_top'>index</a> <a href='../../../../src/hotspot/share/jvmci/jvmciRuntime.hpp.udiff.html' target='_top'>next &gt</a></center>
+</body></html>
+

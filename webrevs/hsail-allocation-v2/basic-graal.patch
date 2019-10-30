@@ -1,0 +1,2703 @@
+--- old/graal/com.oracle.graal.asm.hsail/src/com/oracle/graal/asm/hsail/HSAILAssembler.java	2014-04-11 16:41:46.352234573 +0200
++++ new/graal/com.oracle.graal.asm.hsail/src/com/oracle/graal/asm/hsail/HSAILAssembler.java	2014-04-11 16:41:46.252234576 +0200
+@@ -534,10 +534,17 @@
+      *
+      * @param result result operand that gets the original contents of the memory location
+      * @param address the memory location
+-     * @param deltaValue the amount to add
++     * @param delta the amount to add
+      */
+-    public void emitAtomicAdd(AllocatableValue result, HSAILAddress address, Value deltaValue) {
+-        emitString(String.format("atomic_add_global_u%d   %s, %s, %s;", getArgSize(result), HSAIL.mapRegister(result), mapAddress(address), mapRegOrConstToString(deltaValue)));
++    public void emitAtomicAdd(AllocatableValue result, HSAILAddress address, Value delta) {
++        // ensure result and delta agree (this should probably be at some higher level)
++        Value mydelta = delta;
++        if (!isConstant(delta) && (getArgSize(result) != getArgSize(delta))) {
++            emitConvert(result, delta, result.getKind(), delta.getKind());
++            mydelta = result;
++        }
++        String prefix = getArgTypeForceUnsigned(result);
++        emitString(String.format("atomic_add_global_%s   %s, %s, %s;", prefix, HSAIL.mapRegister(result), mapAddress(address), mapRegOrConstToString(mydelta)));
+     }
+ 
+     /**
+--- old/graal/com.oracle.graal.compiler.hsail.test.infra/src/com/oracle/graal/compiler/hsail/test/infra/GraalKernelTester.java	2014-04-11 16:41:46.712234564 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test.infra/src/com/oracle/graal/compiler/hsail/test/infra/GraalKernelTester.java	2014-04-11 16:41:46.644234565 +0200
+@@ -103,6 +103,10 @@
+         return (canGenerateCalls && canExecuteCalls);
+     }
+ 
++    public boolean canHandleObjectAllocation() {
++        return true;
++    }
++
+     /**
+      * Determines if the runtime has the capabilities required by this test.
+      */
+@@ -156,6 +160,7 @@
+     @Override
+     public void testGeneratedHsailUsingLambdaMethod() {
+         try (OverrideScope s = getOverrideScope()) {
++            assumeTrue(supportsRequiredCapabilities());
+             super.testGeneratedHsailUsingLambdaMethod();
+         }
+     }
+--- old/graal/com.oracle.graal.compiler.hsail/src/com/oracle/graal/compiler/hsail/HSAILLIRGenerator.java	2014-04-11 16:41:47.192234551 +0200
++++ new/graal/com.oracle.graal.compiler.hsail/src/com/oracle/graal/compiler/hsail/HSAILLIRGenerator.java	2014-04-11 16:41:47.100234553 +0200
+@@ -221,7 +221,9 @@
+ 
+     @Override
+     public void emitIntegerTestBranch(Value left, Value right, LabelRef trueDestination, LabelRef falseDestination, double trueDestinationProbability) {
+-        throw GraalInternalError.unimplemented();
++        Variable result = emitAnd(left, right);
++        Variable dummyResult = newVariable(left.getKind());
++        append(new CompareBranchOp(mapKindToCompareOp(left.getKind()), Condition.EQ, result, Constant.forInt(0), dummyResult, dummyResult, trueDestination, falseDestination, false));
+     }
+ 
+     @Override
+--- old/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotBackend.java	2014-04-11 16:41:47.568234541 +0200
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotBackend.java	2014-04-11 16:41:47.484234543 +0200
+@@ -58,21 +58,35 @@
+ import com.oracle.graal.lir.*;
+ import com.oracle.graal.lir.asm.*;
+ import com.oracle.graal.lir.hsail.*;
++import com.oracle.graal.lir.hsail.HSAILMove.AtomicGetAndAddOp;
+ import com.oracle.graal.lir.hsail.HSAILControlFlow.DeoptimizeOp;
+ import com.oracle.graal.nodes.*;
++import com.oracle.graal.nodes.cfg.*;
+ import com.oracle.graal.nodes.StructuredGraph.GuardsStage;
+ import com.oracle.graal.nodes.calc.*;
+ import com.oracle.graal.nodes.extended.*;
+ import com.oracle.graal.nodes.java.*;
+ import com.oracle.graal.nodes.type.*;
++import com.oracle.graal.options.*;
+ import com.oracle.graal.phases.*;
+ import com.oracle.graal.phases.tiers.*;
+ 
++import static com.oracle.graal.hotspot.hsail.HSAILHotSpotBackend.Options.*;
++import static com.oracle.graal.hotspot.hsail.replacements.HSAILNewObjectSnippets.Options.*;
++
+ /**
+  * HSAIL specific backend.
+  */
+ public class HSAILHotSpotBackend extends HotSpotBackend {
+ 
++    public static class Options {
++
++        // @formatter:off
++        @Option(help = "Number of donor threads for HSAIL kernel dispatch")
++        static public final OptionValue<Integer> HsailDonorThreads = new OptionValue<>(4);
++        // @formatter:on
++    }
++
+     private Map<String, String> paramTypeMap = new HashMap<>();
+     private final boolean deviceInitialized;
+     // TODO: get maximum Concurrency from okra
+@@ -103,18 +117,6 @@
+     private static native boolean initialize();
+ 
+     /**
+-     * Control how many threads run on simulator (used only from junit tests).
+-     */
+-    public void setSimulatorSingleThreaded() {
+-        String simThrEnv = System.getenv("SIMTHREADS");
+-        if (simThrEnv == null || !simThrEnv.equals("1")) {
+-            setSimulatorSingleThreaded0();
+-        }
+-    }
+-
+-    private static native void setSimulatorSingleThreaded0();
+-
+-    /**
+      * Determines if the GPU device (or simulator) is available and initialized.
+      */
+     public boolean isDeviceInitialized() {
+@@ -257,7 +259,7 @@
+                 Debug.log("Param count: %d", parameterTypes.length);
+                 for (int i = 0; i < parameterTypes.length; i++) {
+                     ParameterNode parameter = hostGraph.getParameter(i);
+-                    Debug.log("Param [%d]=%d", i, parameter);
++                    Debug.log("Param [%d]=%s", i, parameter);
+                     parameterTypes[i] = parameter.stamp().javaType(hostBackend.getProviders().getMetaAccess());
+                     Debug.log(" %s", parameterTypes[i]);
+                 }
+@@ -347,15 +349,23 @@
+         return result;
+     }
+ 
++    private static final ThreadLocal<DonorThreadPool> donorThreadPool = new ThreadLocal<DonorThreadPool>() {
++        @Override
++        protected DonorThreadPool initialValue() {
++            return new DonorThreadPool();
++        }
++    };
++
+     public boolean executeKernel(HotSpotInstalledCode kernel, int jobSize, Object[] args) throws InvalidInstalledCodeException {
+         if (!deviceInitialized) {
+             throw new GraalInternalError("Cannot execute GPU kernel if device is not initialized");
+         }
+         Object[] oopsSaveArea = new Object[maxDeoptIndex * 16];
+-        return executeKernel0(kernel, jobSize, args, oopsSaveArea);
++        return executeKernel0(kernel, jobSize, args, oopsSaveArea, donorThreadPool.get().getThreads(), HsailAllocBytesPerWorkitem.getValue());
+     }
+ 
+-    private static native boolean executeKernel0(HotSpotInstalledCode kernel, int jobSize, Object[] args, Object[] oopsSave) throws InvalidInstalledCodeException;
++    private static native boolean executeKernel0(HotSpotInstalledCode kernel, int jobSize, Object[] args, Object[] oopsSave, Thread[] donorThreads, int allocBytesPerWorkitem)
++                    throws InvalidInstalledCodeException;
+ 
+     /**
+      * Use the HSAIL register set when the compilation target is HSAIL.
+@@ -430,8 +440,24 @@
+     @Override
+     public void emitCode(CompilationResultBuilder crb, LIR lir, ResolvedJavaMethod method) {
+         assert method != null : lir + " is not associated with a method";
++        Kind wordKind = getProviders().getCodeCache().getTarget().wordKind;
++
++        HotSpotVMConfig config = getRuntime().getConfig();
++        boolean useHSAILDeoptimization = config.useHSAILDeoptimization;
+ 
+-        boolean useHSAILDeoptimization = getRuntime().getConfig().useHSAILDeoptimization;
++        // see what graph nodes we have to see if we are using the thread register
++        // if not, we don't have to emit the code that sets that up
++        // maybe there is a better way to do this?
++        boolean usesThreadRegister = false;
++        search: for (AbstractBlock<?> b : lir.linearScanOrder()) {
++            for (LIRInstruction op : lir.getLIRforBlock(b)) {
++                if (op instanceof AtomicGetAndAddOp && ((AtomicGetAndAddOp) op).getAddress().toAddress().getBase() == HSAIL.threadRegister) {
++                    usesThreadRegister = true;
++                    assert useHSAILDeoptimization : "cannot use thread register if HSAIL deopt support is disabled";
++                    break search;
++                }
++            }
++        }
+ 
+         // Emit the prologue.
+         HSAILAssembler asm = (HSAILAssembler) crb.asm;
+@@ -542,18 +568,41 @@
+         String workItemReg = "$s" + Integer.toString(asRegister(cc.getArgument(nonConstantParamCount)).encoding());
+         asm.emitString("workitemabsid_u32 " + workItemReg + ", 0;");
+ 
+-        final int offsetToDeopt = getRuntime().getConfig().hsailDeoptOffset;
+         final String deoptInProgressLabel = "@LHandleDeoptInProgress";
+ 
+         if (useHSAILDeoptimization) {
+-            AllocatableValue scratch64 = HSAIL.d16.asValue(Kind.Object);
+-            AllocatableValue scratch32 = HSAIL.s34.asValue(Kind.Int);
+-            HSAILAddress deoptInfoAddr = new HSAILAddressValue(Kind.Int, scratch64, offsetToDeopt).toAddress();
+-            asm.emitLoadKernelArg(scratch64, asm.getDeoptInfoName(), "u64");
++            // Aliases for d16
++            RegisterValue d16_deoptInfo = HSAIL.d16.asValue(wordKind);
++            RegisterValue d16_donorThreads = d16_deoptInfo;
++
++            // Aliases for d17
++            RegisterValue d17_donorThreadIndex = HSAIL.d17.asValue(wordKind);
++
++            // Aliases for s34
++            RegisterValue s34_deoptOccurred = HSAIL.s34.asValue(Kind.Int);
++            RegisterValue s34_donorThreadIndex = s34_deoptOccurred;
++
++            asm.emitLoadKernelArg(d16_deoptInfo, asm.getDeoptInfoName(), "u64");
+             asm.emitComment("// Check if a deopt has occurred and abort if true before doing any work");
+-            asm.emitLoadAcquire(scratch32, deoptInfoAddr);
+-            asm.emitCompare(Kind.Int, scratch32, Constant.forInt(0), "ne", false, false);
++            asm.emitLoadAcquire(s34_deoptOccurred, new HSAILAddressValue(Kind.Int, d16_deoptInfo, config.hsailDeoptOccurredOffset).toAddress());
++            asm.emitCompare(Kind.Int, s34_deoptOccurred, Constant.forInt(0), "ne", false, false);
+             asm.cbr(deoptInProgressLabel);
++            // load thread register if needed
++            if (usesThreadRegister) {
++                assert HsailDonorThreads.getValue() > 0;
++                asm.emitLoad(wordKind, d16_donorThreads, new HSAILAddressValue(wordKind, d16_deoptInfo, config.hsailDonorThreadsOffset).toAddress());
++                if (HsailDonorThreads.getValue() != 1) {
++                    asm.emitComment("// map workitem to a donor thread");
++                    asm.emitString(String.format("rem_u32  $%s, %s, %d;", s34_donorThreadIndex.getRegister(), workItemReg, HsailDonorThreads.getValue()));
++                    asm.emitConvert(d17_donorThreadIndex, s34_donorThreadIndex, wordKind, Kind.Int);
++                    asm.emit("mad", d16_donorThreads, d17_donorThreadIndex, Constant.forInt(8), d16_donorThreads);
++                } else {
++                    // workitem is already mapped to solitary donor thread
++                }
++                AllocatableValue threadRegValue = getProviders().getRegisters().getThreadRegister().asValue(wordKind);
++                asm.emitComment("// $" + getProviders().getRegisters().getThreadRegister() + " will point to a donor thread for this workitem");
++                asm.emitLoad(wordKind, threadRegValue, new HSAILAddressValue(wordKind, d16_donorThreads).toAddress());
++            }
+         }
+ 
+         /*
+@@ -566,8 +615,8 @@
+         asm.emitString(spillsegTemplate);
+         // Emit object array load prologue here.
+         if (isObjectLambda) {
+-            boolean useCompressedOops = getRuntime().getConfig().useCompressedOops;
+-            final int arrayElementsOffset = HotSpotGraalRuntime.getArrayBaseOffset(Kind.Object);
++            boolean useCompressedOops = config.useCompressedOops;
++            final int arrayElementsOffset = HotSpotGraalRuntime.getArrayBaseOffset(wordKind);
+             String iterationObjArgReg = HSAIL.mapRegister(cc.getArgument(nonConstantParamCount - 1));
+             // iterationObjArgReg will be the highest $d register in use (it is the last parameter)
+             // so tempReg can be the next higher $d register
+@@ -586,8 +635,8 @@
+                 // Load u32 into the d 64 reg since it will become an object address
+                 asm.emitString("ld_global_u32 " + tmpReg + ", " + "[" + tmpReg + "]" + "; // Load compressed ptr from array");
+ 
+-                long narrowOopBase = getRuntime().getConfig().narrowOopBase;
+-                long narrowOopShift = getRuntime().getConfig().narrowOopShift;
++                long narrowOopBase = config.narrowOopBase;
++                long narrowOopShift = config.narrowOopShift;
+ 
+                 if (narrowOopBase == 0 && narrowOopShift == 0) {
+                     // No more calculation to do, mov to target register
+@@ -629,21 +678,21 @@
+ 
+         // TODO: keep track of whether we need it
+         if (useHSAILDeoptimization) {
+-            final int offsetToDeoptSaveStates = getRuntime().getConfig().hsailSaveStatesOffset0;
+-            final int sizeofKernelDeopt = getRuntime().getConfig().hsailSaveStatesOffset1 - getRuntime().getConfig().hsailSaveStatesOffset0;
+-            final int offsetToNeverRanArray = getRuntime().getConfig().hsailNeverRanArrayOffset;
+-            final int offsetToDeoptNextIndex = getRuntime().getConfig().hsailDeoptNextIndexOffset;
+-            final int offsetToDeoptimizationWorkItem = getRuntime().getConfig().hsailDeoptimizationWorkItem;
+-            final int offsetToDeoptimizationReason = getRuntime().getConfig().hsailDeoptimizationReason;
+-            final int offsetToDeoptimizationFrame = getRuntime().getConfig().hsailDeoptimizationFrame;
+-            final int offsetToFramePc = getRuntime().getConfig().hsailFramePcOffset;
+-            final int offsetToNumSaves = getRuntime().getConfig().hsailFrameNumSRegOffset;
+-            final int offsetToSaveArea = getRuntime().getConfig().hsailFrameSaveAreaOffset;
+-
+-            AllocatableValue scratch64 = HSAIL.d16.asValue(Kind.Object);
+-            AllocatableValue cuSaveAreaPtr = HSAIL.d17.asValue(Kind.Object);
+-            AllocatableValue waveMathScratch1 = HSAIL.d18.asValue(Kind.Object);
+-            AllocatableValue waveMathScratch2 = HSAIL.d19.asValue(Kind.Object);
++            final int offsetToDeoptSaveStates = config.hsailSaveStatesOffset0;
++            final int sizeofKernelDeopt = config.hsailSaveStatesOffset1 - config.hsailSaveStatesOffset0;
++            final int offsetToNeverRanArray = config.hsailNeverRanArrayOffset;
++            final int offsetToDeoptNextIndex = config.hsailDeoptNextIndexOffset;
++            final int offsetToDeoptimizationWorkItem = config.hsailDeoptimizationWorkItem;
++            final int offsetToDeoptimizationReason = config.hsailDeoptimizationReason;
++            final int offsetToDeoptimizationFrame = config.hsailDeoptimizationFrame;
++            final int offsetToFramePc = config.hsailFramePcOffset;
++            final int offsetToNumSaves = config.hsailFrameNumSRegOffset;
++            final int offsetToSaveArea = config.hsailFrameSaveAreaOffset;
++
++            AllocatableValue scratch64 = HSAIL.d16.asValue(wordKind);
++            AllocatableValue cuSaveAreaPtr = HSAIL.d17.asValue(wordKind);
++            AllocatableValue waveMathScratch1 = HSAIL.d18.asValue(wordKind);
++            AllocatableValue waveMathScratch2 = HSAIL.d19.asValue(wordKind);
+ 
+             AllocatableValue actionAndReasonReg = HSAIL.s32.asValue(Kind.Int);
+             AllocatableValue codeBufferOffsetReg = HSAIL.s33.asValue(Kind.Int);
+@@ -656,9 +705,9 @@
+ 
+             // The just-started lanes that see the deopt flag will jump here
+             asm.emitString0(deoptInProgressLabel + ":\n");
+-            asm.emitLoad(Kind.Object, waveMathScratch1, neverRanArrayAddr);
++            asm.emitLoad(wordKind, waveMathScratch1, neverRanArrayAddr);
+             asm.emitWorkItemAbsId(workidreg);
+-            asm.emitConvert(waveMathScratch2, workidreg, Kind.Object, Kind.Int);
++            asm.emitConvert(waveMathScratch2, workidreg, wordKind, Kind.Int);
+             asm.emit("add", waveMathScratch1, waveMathScratch1, waveMathScratch2);
+             HSAILAddress neverRanStoreAddr = new HSAILAddressValue(Kind.Byte, waveMathScratch1, 0).toAddress();
+             asm.emitStore(Kind.Byte, Constant.forInt(1), neverRanStoreAddr);
+@@ -668,7 +717,7 @@
+             asm.emitString0(asm.getDeoptLabelName() + ":\n");
+             String labelExit = asm.getDeoptLabelName() + "_Exit";
+ 
+-            HSAILAddress deoptInfoAddr = new HSAILAddressValue(Kind.Int, scratch64, offsetToDeopt).toAddress();
++            HSAILAddress deoptInfoAddr = new HSAILAddressValue(Kind.Int, scratch64, config.hsailDeoptOccurredOffset).toAddress();
+             asm.emitLoadKernelArg(scratch64, asm.getDeoptInfoName(), "u64");
+ 
+             // Set deopt occurred flag
+@@ -694,7 +743,7 @@
+             // Store deopt for this workitem into its slot in the HSAILComputeUnitSaveStates array
+ 
+             asm.emitComment("// Convert id's for ptr math");
+-            asm.emitConvert(cuSaveAreaPtr, scratch32, Kind.Object, Kind.Int);
++            asm.emitConvert(cuSaveAreaPtr, scratch32, wordKind, Kind.Int);
+             asm.emitComment("// multiply by sizeof KernelDeoptArea");
+             asm.emit("mul", cuSaveAreaPtr, cuSaveAreaPtr, Constant.forInt(sizeofKernelDeopt));
+             asm.emitComment("// Add computed offset to deoptInfoPtr base");
+@@ -725,9 +774,7 @@
+             asm.emitStore(Kind.Short, dregOopMapReg, dregOopMapAddr);
+ 
+             // get the union of registers needed to be saved at the infopoints
+-            // usedRegs array assumes d15 has the highest register number we wish to save
+-            // and initially has all registers as false
+-            boolean[] infoUsedRegs = new boolean[HSAIL.d15.number + 1];
++            boolean[] infoUsedRegs = new boolean[HSAIL.threadRegister.number + 1];
+             List<Infopoint> infoList = crb.compilationResult.getInfopoints();
+             for (Infopoint info : infoList) {
+                 BytecodeFrame frame = info.debugInfo.frame();
+@@ -784,7 +831,7 @@
+ 
+         ExternalCompilationResult compilationResult = (ExternalCompilationResult) crb.compilationResult;
+         HSAILHotSpotLIRGenerationResult lirGenRes = ((HSAILCompilationResultBuilder) crb).lirGenRes;
+-        compilationResult.setHostGraph(prepareHostGraph(method, lirGenRes.getDeopts(), getProviders(), getRuntime().getConfig()));
++        compilationResult.setHostGraph(prepareHostGraph(method, lirGenRes.getDeopts(), getProviders(), config));
+     }
+ 
+     private static StructuredGraph prepareHostGraph(ResolvedJavaMethod method, List<DeoptimizeOp> deopts, HotSpotProviders providers, HotSpotVMConfig config) {
+@@ -868,7 +915,7 @@
+         return frameState;
+     }
+ 
+-    @SuppressWarnings({"unused"})
++    @SuppressWarnings("unused")
+     private static MonitorIdNode getMonitorIdForHotSpotMonitorValueFromFrame(HotSpotMonitorValue lockValue, ParameterNode hsailFrame, StructuredGraph hsailGraph) {
+         if (lockValue.isEliminated()) {
+             return null;
+--- old/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotBackendFactory.java	2014-04-11 16:41:47.876234533 +0200
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotBackendFactory.java	2014-04-11 16:41:47.816234534 +0200
+@@ -28,10 +28,10 @@
+ import com.oracle.graal.hotspot.*;
+ import com.oracle.graal.hotspot.meta.*;
+ import com.oracle.graal.hsail.*;
+-import com.oracle.graal.java.*;
+ import com.oracle.graal.nodes.spi.*;
+ import com.oracle.graal.phases.tiers.*;
+ import com.oracle.graal.phases.util.*;
++import com.oracle.graal.hotspot.hsail.replacements.*;
+ 
+ @ServiceProvider(HotSpotBackendFactory.class)
+ public class HSAILHotSpotBackendFactory implements HotSpotBackendFactory {
+@@ -40,7 +40,7 @@
+     public HSAILHotSpotBackend createBackend(HotSpotGraalRuntime runtime, HotSpotBackend hostBackend) {
+         HotSpotProviders host = hostBackend.getProviders();
+ 
+-        HotSpotRegisters registers = new HotSpotRegisters(Register.None, Register.None, Register.None);
++        HotSpotRegisters registers = new HotSpotRegisters(HSAIL.threadRegister, Register.None, Register.None);
+         HotSpotMetaAccessProvider metaAccess = host.getMetaAccess();
+         HSAILHotSpotCodeCacheProvider codeCache = new HSAILHotSpotCodeCacheProvider(runtime, createTarget());
+         ConstantReflectionProvider constantReflection = host.getConstantReflection();
+@@ -52,9 +52,12 @@
+         Providers p = new Providers(metaAccess, codeCache, constantReflection, foreignCalls, lowerer, null);
+         Replacements replacements = new HSAILHotSpotReplacementsImpl(p, host.getSnippetReflection(), assumptions, codeCache.getTarget(), host.getReplacements());
+         HotSpotDisassemblerProvider disassembler = host.getDisassembler();
+-        SuitesProvider suites = new DefaultSuitesProvider();
++        SuitesProvider suites = new HotSpotSuitesProvider(runtime);
+         HotSpotProviders providers = new HotSpotProviders(metaAccess, codeCache, constantReflection, foreignCalls, lowerer, replacements, disassembler, suites, registers, host.getSnippetReflection());
+ 
++        // pass registers info down to ReplacementsUtil (maybe a better way to do this?)
++        HSAILHotSpotReplacementsUtil.initialize(providers.getRegisters());
++
+         return new HSAILHotSpotBackend(runtime, providers);
+     }
+ 
+--- old/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotLIRGenerator.java	2014-04-11 16:41:48.172234525 +0200
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotLIRGenerator.java	2014-04-11 16:41:48.080234527 +0200
+@@ -154,8 +154,11 @@
+             if (canStoreConstant(c, isCompressed)) {
+                 if (isCompressed) {
+                     if ((c.getKind() == Kind.Object) && c.isNull()) {
++                        // Constant value = c.isNull() ? c : compress(c, config.getOopEncoding());
+                         append(new StoreConstantOp(Kind.Int, storeAddress, Constant.forInt(0), state));
+                     } else if (c.getKind() == Kind.Long) {
++                        // It's always a good idea to directly store compressed constants since they
++                        // have to be materialized as 64 bits encoded otherwise.
+                         Constant value = compress(c, config.getKlassEncoding());
+                         append(new StoreConstantOp(Kind.Int, storeAddress, value, state));
+                     } else {
+--- old/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotLoweringProvider.java	2014-04-11 16:41:48.440234518 +0200
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotLoweringProvider.java	2014-04-11 16:41:48.384234519 +0200
+@@ -22,8 +22,6 @@
+  */
+ package com.oracle.graal.hotspot.hsail;
+ 
+-import java.util.*;
+-
+ import com.oracle.graal.api.code.*;
+ import com.oracle.graal.api.meta.*;
+ import com.oracle.graal.graph.*;
+@@ -31,32 +29,51 @@
+ import com.oracle.graal.hotspot.meta.*;
+ import com.oracle.graal.nodes.*;
+ import com.oracle.graal.nodes.calc.*;
++import com.oracle.graal.nodes.spi.*;
+ import com.oracle.graal.nodes.extended.*;
+ import com.oracle.graal.nodes.java.*;
+-import com.oracle.graal.nodes.spi.*;
++import com.oracle.graal.hotspot.hsail.nodes.*;
++import com.oracle.graal.hotspot.hsail.replacements.*;
++import java.util.HashMap;
+ 
+ public class HSAILHotSpotLoweringProvider extends HotSpotLoweringProvider {
+ 
+-    abstract static class LoweringStrategy {
++    private HSAILNewObjectSnippets.Templates hsailNewObjectSnippets;
++
++    abstract class LoweringStrategy {
+         abstract void lower(Node n, LoweringTool tool);
+     }
+ 
+-    static LoweringStrategy PassThruStrategy = new LoweringStrategy() {
++    LoweringStrategy PassThruStrategy = new LoweringStrategy() {
+         @Override
+         void lower(Node n, LoweringTool tool) {
+             return;
+         }
+     };
+ 
+-    static LoweringStrategy RejectStrategy = new LoweringStrategy() {
++    LoweringStrategy RejectStrategy = new LoweringStrategy() {
+         @Override
+         void lower(Node n, LoweringTool tool) {
+             throw new GraalInternalError("Node implementing Lowerable not handled in HSAIL Backend: " + n);
+         }
+     };
+ 
++    LoweringStrategy NewObjectStrategy = new LoweringStrategy() {
++        @Override
++        void lower(Node n, LoweringTool tool) {
++            StructuredGraph graph = (StructuredGraph) n.graph();
++            if (graph.getGuardsStage() == StructuredGraph.GuardsStage.AFTER_FSA) {
++                if (n instanceof NewInstanceNode) {
++                    hsailNewObjectSnippets.lower((NewInstanceNode) n, tool);
++                } else if (n instanceof NewArrayNode) {
++                    hsailNewObjectSnippets.lower((NewArrayNode) n, tool);
++                }
++            }
++        }
++    };
++
+     // strategy to replace an UnwindNode with a DeoptNode
+-    static LoweringStrategy UnwindNodeStrategy = new LoweringStrategy() {
++    LoweringStrategy UnwindNodeStrategy = new LoweringStrategy() {
+         @Override
+         void lower(Node n, LoweringTool tool) {
+             StructuredGraph graph = (StructuredGraph) n.graph();
+@@ -85,25 +102,58 @@
+         }
+     };
+ 
+-    private static HashMap<Class<?>, LoweringStrategy> strategyMap = new HashMap<>();
+-    static {
++    LoweringStrategy AtomicGetAndAddStrategy = new LoweringStrategy() {
++        @Override
++        void lower(Node n, LoweringTool tool) {
++            StructuredGraph graph = (StructuredGraph) n.graph();
++
++            // Note: this code adapted from CompareAndSwapNode
++            // lowering but since we are not dealing with an object
++            // but a word (thread passed in), I wasn't sure what
++            // should be done with the Location stuff so leaving it
++            // out for now
++
++            AtomicGetAndAddNode getAdd = (AtomicGetAndAddNode) n;
++            // LocationNode location = IndexedLocationNode.create(ANY_LOCATION, Kind.Long, 0,
++            // getAdd.offset(), graph, 1);
++            LocationNode location = IndexedLocationNode.create(getAdd.getLocationIdentity(), Kind.Long, 0, getAdd.offset(), graph, 1);
++            // note: getAdd.base() used to be getAdd.object()
++            LoweredAtomicGetAndAddNode loweredAtomicGetAdd = graph.add(new LoweredAtomicGetAndAddNode(getAdd.base(), location, getAdd.delta(), HeapAccess.BarrierType.NONE,
++                            getAdd.getKind() == Kind.Object));
++            loweredAtomicGetAdd.setStateAfter(getAdd.stateAfter());
++            graph.replaceFixedWithFixed(getAdd, loweredAtomicGetAdd);
++        }
++    };
++
++    private HashMap<Class<?>, LoweringStrategy> strategyMap = new HashMap<>();
++
++    void initStrategyMap() {
+         strategyMap.put(ConvertNode.class, PassThruStrategy);
+         strategyMap.put(FloatConvertNode.class, PassThruStrategy);
+-        strategyMap.put(NewInstanceNode.class, RejectStrategy);
+-        strategyMap.put(NewArrayNode.class, RejectStrategy);
++        strategyMap.put(NewInstanceNode.class, NewObjectStrategy);
++        strategyMap.put(NewArrayNode.class, NewObjectStrategy);
+         strategyMap.put(NewMultiArrayNode.class, RejectStrategy);
+         strategyMap.put(DynamicNewArrayNode.class, RejectStrategy);
+         strategyMap.put(MonitorEnterNode.class, RejectStrategy);
+         strategyMap.put(MonitorExitNode.class, RejectStrategy);
+         strategyMap.put(UnwindNode.class, UnwindNodeStrategy);
++        strategyMap.put(AtomicGetAndAddNode.class, AtomicGetAndAddStrategy);
+     }
+ 
+-    private static LoweringStrategy getStrategy(Node n) {
++    private LoweringStrategy getStrategy(Node n) {
+         return strategyMap.get(n.getClass());
+     }
+ 
+     public HSAILHotSpotLoweringProvider(HotSpotGraalRuntime runtime, MetaAccessProvider metaAccess, ForeignCallsProvider foreignCalls, HotSpotRegistersProvider registers) {
+         super(runtime, metaAccess, foreignCalls, registers);
++        initStrategyMap();
++    }
++
++    @Override
++    public void initialize(HotSpotProviders providers, HotSpotVMConfig config) {
++        super.initialize(providers, config);
++        TargetDescription target = providers.getCodeCache().getTarget();
++        hsailNewObjectSnippets = new HSAILNewObjectSnippets.Templates(providers, target);
+     }
+ 
+     @Override
+--- old/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotNodeLIRBuilder.java	2014-04-11 16:41:48.648234512 +0200
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/HSAILHotSpotNodeLIRBuilder.java	2014-04-11 16:41:48.588234514 +0200
+@@ -23,19 +23,27 @@
+ 
+ package com.oracle.graal.hotspot.hsail;
+ 
++import com.oracle.graal.api.code.*;
+ import com.oracle.graal.api.meta.*;
++import com.oracle.graal.asm.*;
+ import com.oracle.graal.compiler.gen.*;
+ import com.oracle.graal.compiler.hsail.*;
+ import com.oracle.graal.graph.*;
++import com.oracle.graal.hotspot.*;
+ import com.oracle.graal.hotspot.HotSpotVMConfig.CompressEncoding;
++import com.oracle.graal.hotspot.hsail.nodes.*;
+ import com.oracle.graal.hotspot.meta.*;
+ import com.oracle.graal.hotspot.nodes.*;
++import com.oracle.graal.lir.*;
++import com.oracle.graal.lir.hsail.*;
++import com.oracle.graal.lir.hsail.HSAILMove.AtomicGetAndAddOp;
++import com.oracle.graal.lir.hsail.HSAILMove.CompareAndSwapOp;
+ import com.oracle.graal.nodes.*;
+ 
+ /**
+  * The HotSpot specific portion of the HSAIL LIR generator.
+  */
+-public class HSAILHotSpotNodeLIRBuilder extends HSAILNodeLIRBuilder {
++public class HSAILHotSpotNodeLIRBuilder extends HSAILNodeLIRBuilder implements HotSpotNodeLIRBuilder {
+ 
+     public HSAILHotSpotNodeLIRBuilder(StructuredGraph graph, LIRGenerator lirGen) {
+         super(graph, lirGen);
+@@ -50,6 +58,10 @@
+         }
+     }
+ 
++    private HSAILHotSpotLIRGenerator getGen() {
++        return (HSAILHotSpotLIRGenerator) gen;
++    }
++
+     /**
+      * @return a compressed version of the incoming constant lifted from AMD64HotSpotLIRGenerator
+      */
+@@ -65,4 +77,51 @@
+             throw GraalInternalError.shouldNotReachHere();
+         }
+     }
++
++    public void visitAtomicGetAndAdd(LoweredAtomicGetAndAddNode node, Value address) {
++        Variable nodeResult = newVariable(node.getKind());
++        Value delta = getGen().loadNonConst(operand(node.getDelta()));
++        HSAILAddressValue addressValue = getGen().asAddressValue(address);
++        append(new AtomicGetAndAddOp(nodeResult, addressValue, delta));
++        setResult(node, nodeResult);
++    }
++
++    public void visitDirectCompareAndSwap(DirectCompareAndSwapNode x) {
++        Kind kind = x.newValue().getKind();
++        assert kind == x.expectedValue().getKind();
++
++        Variable expected = getGen().load(operand(x.expectedValue()));
++        Variable newVal = getGen().load(operand(x.newValue()));
++
++        int disp = 0;
++        HSAILAddressValue address;
++        Value index = operand(x.offset());
++        if (ValueUtil.isConstant(index) && NumUtil.isInt(ValueUtil.asConstant(index).asLong() + disp)) {
++            assert !getGen().getCodeCache().needsDataPatch(ValueUtil.asConstant(index));
++            disp += (int) ValueUtil.asConstant(index).asLong();
++            address = new HSAILAddressValue(kind, getGen().load(operand(x.object())), disp);
++        } else {
++            throw GraalInternalError.shouldNotReachHere("NYI");
++        }
++
++        Variable casResult = newVariable(kind);
++        append(new CompareAndSwapOp(kind, casResult, address, expected, newVal));
++
++        setResult(x, casResult);
++    }
++
++    @Override
++    public void emitPrefetchAllocate(ValueNode address, ValueNode distance) {
++        // nop
++    }
++
++    @Override
++    public void emitPatchReturnAddress(ValueNode address) {
++        throw GraalInternalError.unimplemented();
++    }
++
++    @Override
++    public void emitJumpToExceptionHandlerInCaller(ValueNode handlerInCallerPc, ValueNode exception, ValueNode exceptionPc) {
++        throw GraalInternalError.unimplemented();
++    }
+ }
+--- old/graal/com.oracle.graal.hotspot/src/com/oracle/graal/hotspot/HotSpotVMConfig.java	2014-04-11 16:41:48.860234507 +0200
++++ new/graal/com.oracle.graal.hotspot/src/com/oracle/graal/hotspot/HotSpotVMConfig.java	2014-04-11 16:41:48.804234508 +0200
+@@ -1017,9 +1017,10 @@
+      */
+     @HotSpotVMField(name = "Hsail::HSAILDeoptimizationInfo::_deopt_save_states[0]", type = "Hsail::HSAILKernelDeoptimization", get = HotSpotVMField.Type.OFFSET) @Stable public int hsailSaveStatesOffset0;
+     @HotSpotVMField(name = "Hsail::HSAILDeoptimizationInfo::_deopt_save_states[1]", type = "Hsail::HSAILKernelDeoptimization", get = HotSpotVMField.Type.OFFSET) @Stable public int hsailSaveStatesOffset1;
+-    @HotSpotVMField(name = "Hsail::HSAILDeoptimizationInfo::_deopt_occurred", type = "jint", get = HotSpotVMField.Type.OFFSET) @Stable public int hsailDeoptOffset;
++    @HotSpotVMField(name = "Hsail::HSAILDeoptimizationInfo::_deopt_occurred", type = "jint", get = HotSpotVMField.Type.OFFSET) @Stable public int hsailDeoptOccurredOffset;
+     @HotSpotVMField(name = "Hsail::HSAILDeoptimizationInfo::_never_ran_array", type = "jboolean *", get = HotSpotVMField.Type.OFFSET) @Stable public int hsailNeverRanArrayOffset;
+     @HotSpotVMField(name = "Hsail::HSAILDeoptimizationInfo::_deopt_next_index", type = "jint", get = HotSpotVMField.Type.OFFSET) @Stable public int hsailDeoptNextIndexOffset;
++    @HotSpotVMField(name = "Hsail::HSAILDeoptimizationInfo::_donor_threads", type = "JavaThread**", get = HotSpotVMField.Type.OFFSET) @Stable public int hsailDonorThreadsOffset;
+ 
+     @HotSpotVMField(name = "Hsail::HSAILKernelDeoptimization::_workitemid", type = "jint", get = HotSpotVMField.Type.OFFSET) @Stable public int hsailDeoptimizationWorkItem;
+     @HotSpotVMField(name = "Hsail::HSAILKernelDeoptimization::_actionAndReason", type = "jint", get = HotSpotVMField.Type.OFFSET) @Stable public int hsailDeoptimizationReason;
+@@ -1245,6 +1246,7 @@
+     @HotSpotVMField(name = "ThreadLocalAllocBuffer::_start", type = "HeapWord*", get = HotSpotVMField.Type.OFFSET) @Stable private int threadLocalAllocBufferStartOffset;
+     @HotSpotVMField(name = "ThreadLocalAllocBuffer::_end", type = "HeapWord*", get = HotSpotVMField.Type.OFFSET) @Stable private int threadLocalAllocBufferEndOffset;
+     @HotSpotVMField(name = "ThreadLocalAllocBuffer::_top", type = "HeapWord*", get = HotSpotVMField.Type.OFFSET) @Stable private int threadLocalAllocBufferTopOffset;
++    @HotSpotVMField(name = "ThreadLocalAllocBuffer::_pf_top", type = "HeapWord*", get = HotSpotVMField.Type.OFFSET) @Stable private int threadLocalAllocBufferPfTopOffset;
+     @HotSpotVMField(name = "ThreadLocalAllocBuffer::_slow_allocations", type = "unsigned", get = HotSpotVMField.Type.OFFSET) @Stable private int threadLocalAllocBufferSlowAllocationsOffset;
+     @HotSpotVMField(name = "ThreadLocalAllocBuffer::_fast_refill_waste", type = "unsigned", get = HotSpotVMField.Type.OFFSET) @Stable private int threadLocalAllocBufferFastRefillWasteOffset;
+     @HotSpotVMField(name = "ThreadLocalAllocBuffer::_number_of_refills", type = "unsigned", get = HotSpotVMField.Type.OFFSET) @Stable private int threadLocalAllocBufferNumberOfRefillsOffset;
+@@ -1283,6 +1285,10 @@
+         return threadTlabOffset + threadLocalAllocBufferTopOffset;
+     }
+ 
++    public int threadTlabPfTopOffset() {
++        return threadTlabOffset + threadLocalAllocBufferPfTopOffset;
++    }
++
+     @HotSpotVMFlag(name = "TLABStats") @Stable public boolean tlabStats;
+     @Stable public boolean inlineContiguousAllocationSupported;
+ 
+--- old/graal/com.oracle.graal.hotspot/src/com/oracle/graal/hotspot/replacements/NewObjectSnippets.java	2014-04-11 16:41:49.084234501 +0200
++++ new/graal/com.oracle.graal.hotspot/src/com/oracle/graal/hotspot/replacements/NewObjectSnippets.java	2014-04-11 16:41:49.028234502 +0200
+@@ -105,7 +105,7 @@
+         return ProfileAllocations.getValue();
+     }
+ 
+-    private static void profileAllocation(String path, long size, String typeContext) {
++    protected static void profileAllocation(String path, long size, String typeContext) {
+         if (doProfile()) {
+             String name = createName(path, typeContext);
+ 
+@@ -347,7 +347,7 @@
+     /**
+      * Formats some allocated memory with an object header and zeroes out the rest.
+      */
+-    private static Object formatObject(Word hub, int size, Word memory, Word compileTimePrototypeMarkWord, boolean fillContents, boolean constantSize, boolean noAsserts, boolean useSnippetCounters) {
++    protected static Object formatObject(Word hub, int size, Word memory, Word compileTimePrototypeMarkWord, boolean fillContents, boolean constantSize, boolean noAsserts, boolean useSnippetCounters) {
+         Word prototypeMarkWord = useBiasedLocking() ? hub.readWord(prototypeMarkWordOffset(), PROTOTYPE_MARK_WORD_LOCATION) : compileTimePrototypeMarkWord;
+         initializeObjectHeader(memory, prototypeMarkWord, hub);
+         if (fillContents) {
+--- old/graal/com.oracle.graal.hotspot/src/com/oracle/graal/hotspot/stubs/NewInstanceStub.java	2014-04-11 16:41:49.284234495 +0200
++++ new/graal/com.oracle.graal.hotspot/src/com/oracle/graal/hotspot/stubs/NewInstanceStub.java	2014-04-11 16:41:49.232234497 +0200
+@@ -231,7 +231,7 @@
+      * @param log specifies if logging is enabled
+      * @return the allocated chunk or {@link Word#zero()} if allocation fails
+      */
+-    static Word edenAllocate(Word sizeInBytes, boolean log) {
++    public static Word edenAllocate(Word sizeInBytes, boolean log) {
+         Word heapTopAddress = Word.unsigned(heapTopAddress());
+         Word heapEndAddress = Word.unsigned(heapEndAddress());
+ 
+--- old/graal/com.oracle.graal.hsail/src/com/oracle/graal/hsail/HSAIL.java	2014-04-11 16:41:49.580234488 +0200
++++ new/graal/com.oracle.graal.hsail/src/com/oracle/graal/hsail/HSAIL.java	2014-04-11 16:41:49.508234489 +0200
+@@ -131,6 +131,8 @@
+     public static final Register d17 = new Register(81, 17, "d17", CPU);
+     public static final Register d18 = new Register(82, 18, "d18", CPU);
+     public static final Register d19 = new Register(83, 19, "d19", CPU);
++    public static final Register d20 = new Register(84, 20, "d20", CPU);
++    public static final Register threadRegister = d20;
+ 
+     // @formatter:off
+     public static final Register[] cRegisters = {
+@@ -145,7 +147,7 @@
+     };
+ 
+     public static final Register[] dRegisters = {
+-        d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14, d15
++        d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14, d15, threadRegister
+     };
+ 
+     public static final Register[] qRegisters = {
+@@ -156,7 +158,7 @@
+         c0, c1, c2, c3, c4, c5, c6, c7, s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15,
+         d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13,
+         d14, d15, q0, q1, q2, q3, q4, q5, q6, q7, q8, q9, q10, q11,
+-        q12, q13, q14, q15
++        q12, q13, q14, q15, threadRegister
+     };
+ 
+     // @formatter:on
+--- old/graal/com.oracle.graal.lir.hsail/src/com/oracle/graal/lir/hsail/HSAILMove.java	2014-04-11 16:41:49.856234480 +0200
++++ new/graal/com.oracle.graal.lir.hsail/src/com/oracle/graal/lir/hsail/HSAILMove.java	2014-04-11 16:41:49.776234482 +0200
+@@ -95,6 +95,13 @@
+             super(moveKind);
+             this.result = result;
+             this.input = input;
++            checkForNullObjectInput();
++        }
++
++        private void checkForNullObjectInput() {
++            if (result.getKind() == Kind.Object && isConstant(input) && input.getKind() == Kind.Long && ((Constant) input).asLong() == 0) {
++                input = Constant.NULL_OBJECT;
++            }
+         }
+ 
+         @Override
+@@ -481,4 +488,28 @@
+             throw GraalInternalError.shouldNotReachHere();
+         }
+     }
++
++    @Opcode("ATOMICADD")
++    public static class AtomicGetAndAddOp extends HSAILLIRInstruction {
++
++        @Def protected AllocatableValue result;
++        @Use({COMPOSITE}) protected HSAILAddressValue address;
++        @Use({REG, CONST}) protected Value delta;
++
++        public AtomicGetAndAddOp(AllocatableValue result, HSAILAddressValue address, Value delta) {
++            this.result = result;
++            this.address = address;
++            this.delta = delta;
++        }
++
++        public HSAILAddressValue getAddress() {
++            return address;
++        }
++
++        @Override
++        public void emitCode(CompilationResultBuilder crb, HSAILAssembler masm) {
++            masm.emitAtomicAdd(result, address.toAddress(), delta);
++        }
++    }
++
+ }
+--- old/src/gpu/hsail/vm/gpu_hsail.cpp	2014-04-11 16:41:50.100234474 +0200
++++ new/src/gpu/hsail/vm/gpu_hsail.cpp	2014-04-11 16:41:50.044234475 +0200
+@@ -59,16 +59,15 @@
+ 
+ #define OBJECT                "Ljava/lang/Object;"
+ #define STRING                "Ljava/lang/String;"
++#define JLTHREAD              "Ljava/lang/Thread;"
+ #define HS_INSTALLED_CODE     "Lcom/oracle/graal/hotspot/meta/HotSpotInstalledCode;"
+ #define HS_COMPILED_NMETHOD   "Lcom/oracle/graal/hotspot/HotSpotCompiledNmethod;"
+ #define HS_NMETHOD            "Lcom/oracle/graal/hotspot/meta/HotSpotNmethod;"
+ 
+-//  public native void executeKernel(HotSpotNmethod kernel, int jobSize, int i, int j, Object[] args) throws InvalidInstalledCodeException;
+-
+ JNINativeMethod Hsail::HSAIL_methods[] = {
+   {CC"initialize",       CC"()Z",                               FN_PTR(Hsail::initialize)},
+   {CC"generateKernel",   CC"([B" STRING ")J",                   FN_PTR(Hsail::generate_kernel)},
+-  {CC"executeKernel0",   CC"("HS_INSTALLED_CODE"I["OBJECT"["OBJECT")Z",  FN_PTR(Hsail::execute_kernel_void_1d)},
++  {CC"executeKernel0",   CC"("HS_INSTALLED_CODE"I["OBJECT"["OBJECT"["JLTHREAD"I)Z",  FN_PTR(Hsail::execute_kernel_void_1d)},
+ };
+ 
+ void * Hsail::_device_context = NULL;
+@@ -86,6 +85,43 @@
+ Hsail::okra_clearargs_func_t       Hsail::_okra_clearargs;
+ Hsail::okra_register_heap_func_t   Hsail::_okra_register_heap;
+ 
++struct Stats {
++  int _dispatches;
++  int _deopts;
++  int _overflows;
++  bool _changeSeen;
++
++public:
++  Stats() {
++    _dispatches = _deopts = _overflows = 0;
++    _changeSeen = false;
++  }
++
++  void incDeopts() {
++    _deopts++;
++    _changeSeen = true;
++  }
++  void incOverflows() {
++    _overflows++;
++    _changeSeen = true;
++  }
++
++  void finishDispatch() {
++    _dispatches++;
++    if (_changeSeen) {
++      // print();
++      _changeSeen = false;
++    }
++  }
++
++  void print() {
++    tty->print_cr("Disp=%d, Deopts=%d, Ovflows=%d", _dispatches, _deopts, _overflows);
++  }
++
++};
++
++static Stats kernelStats;
++
+ 
+ void Hsail::register_heap() {
+   // After the okra functions are set up and the heap is initialized, register the java heap with HSA
+@@ -97,7 +133,8 @@
+   _okra_register_heap(Universe::heap()->base(), Universe::heap()->capacity());
+ }
+ 
+-GPU_VMENTRY(jboolean, Hsail::execute_kernel_void_1d, (JNIEnv* env, jclass, jobject kernel_handle, jint dimX, jobject args_handle, jobject oops_save_handle))
++GPU_VMENTRY(jboolean, Hsail::execute_kernel_void_1d, (JNIEnv* env, jclass, jobject kernel_handle, jint dimX, jobject args, jobject oops_save,
++                                                      jobject donor_threads, jint allocBytesPerWorkitem))
+ 
+   ResourceMark rm;
+   jlong nmethodValue = HotSpotInstalledCode::codeBlob(kernel_handle);
+@@ -113,7 +150,7 @@
+     SharedRuntime::throw_and_post_jvmti_exception(JavaThread::current(), vmSymbols::com_oracle_graal_api_code_InvalidInstalledCodeException(), NULL);
+   }
+ 
+-  return execute_kernel_void_1d_internal((address) kernel, dimX, args_handle, mh, nm, oops_save_handle, CHECK_0);
++  return execute_kernel_void_1d_internal((address) kernel, dimX, args, mh, nm, oops_save, donor_threads, allocBytesPerWorkitem, CHECK_0);
+ GPU_END
+ 
+ static void showRanges(jboolean *a, int len) {
+@@ -133,10 +170,80 @@
+   }
+ }
+ 
+-jboolean Hsail::execute_kernel_void_1d_internal(address kernel, int dimX, jobject args_handle, methodHandle& mh, nmethod *nm, jobject oops_save_handle, TRAPS) {
++// fill and retire old tlab and get a new one
++// if we can't get one, no problem someone will eventually do a gc
++void Hsail::getNewTlabForDonorThread(ThreadLocalAllocBuffer* tlab, size_t tlabMinHsail) {
++  tlab->clear_before_allocation();    // fill and retire old tlab (will also check for null)
++
++  // get a size for a new tlab that is at least tlabMinHsail.
++  size_t new_tlab_size = tlab->compute_size(tlabMinHsail);
++  if (new_tlab_size == 0) return;
++
++  HeapWord* tlab_start = Universe::heap()->allocate_new_tlab(new_tlab_size);
++  if (tlab_start == NULL) return;
++
++  // ..and clear it if required
++  if (ZeroTLAB) {
++    Copy::zero_to_words(tlab_start, new_tlab_size);
++  }
++  // and init the tlab pointers
++  tlab->fill(tlab_start, tlab_start, new_tlab_size);
++}
++
++static void printTlabInfo (ThreadLocalAllocBuffer* tlab) {
++  HeapWord *start = tlab->start();
++  HeapWord *top = tlab->top();
++  HeapWord *end = tlab->end();
++  // sizes are in bytes
++  size_t tlabFree = tlab->free() * HeapWordSize;
++  size_t tlabUsed = tlab->used() * HeapWordSize;
++  size_t tlabSize = tlabFree + tlabUsed;
++  double freePct = 100.0 * (double) tlabFree/(double) tlabSize;
++  tty->print_cr("(%p, %p, %p), siz=%ld, free=%ld (%f%%)", start, top, end, tlabSize, tlabFree, freePct);
++}
++
++
+ 
++jboolean Hsail::execute_kernel_void_1d_internal(address kernel, int dimX, jobject args, methodHandle& mh, nmethod *nm, jobject oops_save,
++                                                jobject donor_threads, int allocBytesPerWorkitem, TRAPS) {
+   ResourceMark rm(THREAD);
+-  objArrayOop argsArray = (objArrayOop) JNIHandles::resolve(args_handle);
++  objArrayOop argsArray = (objArrayOop) JNIHandles::resolve(args);
++
++  // TODO: avoid donor thread logic if kernel does not allocate
++  objArrayOop donorThreadObjects = (objArrayOop) JNIHandles::resolve(donor_threads);
++  int numDonorThreads = donorThreadObjects->length();
++  guarantee(numDonorThreads > 0, "need at least one donor thread");
++  JavaThread** donorThreads = NEW_RESOURCE_ARRAY(JavaThread*, numDonorThreads);
++  for (int i = 0; i < numDonorThreads; i++) {
++    donorThreads[i] = java_lang_Thread::thread(donorThreadObjects->obj_at(i));
++  }
++
++
++  // compute tlabMinHsail based on number of workitems, number of donor
++  // threads, allocBytesPerWorkitem rounded up
++  size_t tlabMinHsail = (allocBytesPerWorkitem * dimX + (numDonorThreads - 1)) / numDonorThreads;
++  if (TraceGPUInteraction) {
++    tty->print_cr("computed tlabMinHsail = %d", tlabMinHsail);
++  }
++
++  for (int i = 0; i < numDonorThreads; i++) {
++    JavaThread* donorThread = donorThreads[i];
++    ThreadLocalAllocBuffer* tlab = &donorThread->tlab();
++    if (TraceGPUInteraction) {
++      tty->print("donorThread %d, is %p, tlab at %p -> ", i, donorThread, tlab);
++      printTlabInfo(tlab);
++    }
++
++    // note: this used vs. free limit checking should be based on some
++    // heuristic where we see how much this kernel tends to allocate
++    if ((tlab->end() == NULL) || (tlab->free() * HeapWordSize < tlabMinHsail)) {
++      getNewTlabForDonorThread(tlab, tlabMinHsail);
++      if (TraceGPUInteraction) {
++        tty->print("donorThread %d, refilled tlab, -> ", i);
++        printTlabInfo(tlab);
++      }
++    }
++  }
+ 
+   // Reset the kernel arguments
+   _okra_clearargs(kernel);
+@@ -146,6 +253,7 @@
+     e = new (ResourceObj::C_HEAP, mtInternal) HSAILDeoptimizationInfo();
+     e->set_never_ran_array(NEW_C_HEAP_ARRAY(jboolean, dimX, mtInternal));
+     memset(e->never_ran_array(), 0, dimX * sizeof(jboolean));
++    e->set_donor_threads(donorThreads);
+   }
+ 
+   // This object sets up the kernel arguments
+@@ -169,6 +277,25 @@
+     success = _okra_execute_with_range(kernel, dimX);
+   }
+ 
++  // fix up any tlab tops that overflowed
++  bool anyOverflows = false;
++  for (int i = 0; i < numDonorThreads; i++) {
++    JavaThread * donorThread = donorThreads[i];
++    ThreadLocalAllocBuffer* tlab = &donorThread->tlab();
++    if (tlab->top() > tlab->end()) {
++      anyOverflows = true;
++      long overflowAmount = (long) tlab->top() - (long) tlab->pf_top(); 
++      // tlab->set_top is private this ugly hack gets around that
++      *(long *)((char *)tlab + in_bytes(tlab->top_offset())) = (long) tlab->pf_top();
++      if (TraceGPUInteraction) {
++        tty->print_cr("donorThread %d at %p overflowed by %ld bytes, setting last good top to %p", i, donorThread, overflowAmount, tlab->top());
++      }
++    }
++  }
++  if (anyOverflows) {
++    kernelStats.incOverflows();
++  }
++
+   if (UseHSAILDeoptimization) {
+     // check if any workitem requested a deopt
+     // currently we only support at most one such workitem
+@@ -180,10 +307,9 @@
+         sprintf(msg, "deopt error detected, slot for workitem %d was not empty", -1 * (deoptcode + 1));
+         guarantee(deoptcode == 1, msg);
+       }
+-
++      kernelStats.incDeopts();
+       {
+         TraceTime t3("handle deoptimizing workitems", TraceGPUInteraction);
+-
+         if (TraceGPUInteraction) {
+           tty->print_cr("deopt happened.");
+           HSAILKernelDeoptimization * pdeopt = &e->_deopt_save_states[0];
+@@ -194,7 +320,7 @@
+         // the hsail frames in oops_save so they get adjusted by any
+         // GC. Need to do this before leaving thread_in_vm mode.
+         // resolve handle only needed once here (not exiting vm mode)
+-        objArrayOop oopsSaveArray = (objArrayOop) JNIHandles::resolve(oops_save_handle);
++        objArrayOop oopsSaveArray = (objArrayOop) JNIHandles::resolve(oops_save);
+ 
+         // since slots are allocated from the beginning, we know how far to look
+         assert(e->num_deopts() < MAX_DEOPT_SAVE_STATES_SIZE, "deopt save state overflow");
+@@ -228,7 +354,7 @@
+ 
+             // update the hsailFrame from the oopsSaveArray
+             // re-resolve the handle
+-            oopsSaveArray = (objArrayOop) JNIHandles::resolve(oops_save_handle);
++            oopsSaveArray = (objArrayOop) JNIHandles::resolve(oops_save);
+ 
+             int dregOopMap = hsailFrame->dreg_oops_map();
+             for (int bit = 0; bit < 16; bit++) {
+@@ -296,7 +422,7 @@
+               JavaValue result(T_VOID);
+               JavaCallArguments javaArgs;
+               // re-resolve the args_handle here
+-              objArrayOop resolvedArgsArray = (objArrayOop) JNIHandles::resolve(args_handle);
++              objArrayOop resolvedArgsArray = (objArrayOop) JNIHandles::resolve(args);
+               // This object sets up the javaCall arguments
+               // the way argsArray is set up, this should work for instance methods as well
+               // (the receiver will be the first oop pushed)
+@@ -317,10 +443,11 @@
+         } // end of never-ran handling
+       }
+     }
+-
++    
+     FREE_C_HEAP_ARRAY(jboolean, e->never_ran_array(), mtInternal);
+     delete e;
+   }
++  kernelStats.finishDispatch();
+   return success;
+ }
+ 
+--- old/src/gpu/hsail/vm/gpu_hsail.hpp	2014-04-11 16:41:50.316234468 +0200
++++ new/src/gpu/hsail/vm/gpu_hsail.hpp	2014-04-11 16:41:50.260234469 +0200
+@@ -60,6 +60,7 @@
+    private:
+     jint _deopt_occurred;
+     jint _deopt_next_index;
++    JavaThread** _donor_threads;
+     jboolean * _never_ran_array;
+ 
+    public:
+@@ -77,6 +78,7 @@
+     inline jint num_deopts() { return _deopt_next_index; }
+     inline jboolean *never_ran_array() { return _never_ran_array; }
+     inline void  set_never_ran_array(jboolean *p) { _never_ran_array = p; }
++    inline void  set_donor_threads(JavaThread **threads) { _donor_threads = threads; }
+   };
+ 
+ 
+@@ -91,13 +93,16 @@
+   JNIEXPORT static jlong generate_kernel(JNIEnv *env, jclass, jbyteArray code_handle, jstring name_handle);
+ 
+   // static native boolean executeKernel0(HotSpotInstalledCode kernel, int jobSize, Object[] args);
+-  JNIEXPORT static jboolean execute_kernel_void_1d(JNIEnv *env, jclass, jobject hotspotInstalledCode, jint dimX, jobject args, jobject oopsSave);
++  JNIEXPORT static jboolean execute_kernel_void_1d(JNIEnv *env, jclass, jobject hotspotInstalledCode, jint dimX, jobject args, jobject oopsSave,
++                                                   jobject donorThreads, int allocBytesPerWorkitem);
+ 
+-  // static native void setSimulatorSingleThreaded0();
+-  JNIEXPORT static void setSimulatorSingleThreaded0(JNIEnv *env, jclass);
++  // static native void getThreadPointers(Object[] donorThreads, long[] threadPointersOut);
++  JNIEXPORT static void get_thread_pointers(JNIEnv *env, jclass, jobject donor_threads_handle, jobject thread_ptrs_handle);
+ 
++  static void getNewTlabForDonorThread(ThreadLocalAllocBuffer* tlab, size_t tlabMinHsail);
+ 
+-  static jboolean execute_kernel_void_1d_internal(address kernel, int dimX, jobject args, methodHandle& mh, nmethod *nm, jobject oopsSave, TRAPS);
++  static jboolean execute_kernel_void_1d_internal(address kernel, int dimX, jobject args, methodHandle& mh, nmethod *nm, jobject oopsSave,
++                                                  jobject donorThreads, int allocBytesPerWorkitem, TRAPS);
+ 
+   static void register_heap();
+ 
+--- old/src/gpu/hsail/vm/vmStructs_hsail.hpp	2014-04-11 16:41:50.520234463 +0200
++++ new/src/gpu/hsail/vm/vmStructs_hsail.hpp	2014-04-11 16:41:50.464234464 +0200
+@@ -32,17 +32,18 @@
+ // constants required by the Serviceability Agent. This file is
+ // referenced by vmStructs.cpp.
+ 
+-#define VM_STRUCTS_GPU_HSAIL(nonstatic_field)                                                                                                    \
++#define VM_STRUCTS_GPU_HSAIL(nonstatic_field)                                                                                         \
+   nonstatic_field(HSAILFrame, _pc_offset,                                                  jint)                                      \
+   nonstatic_field(HSAILFrame, _num_s_regs,                                                 jbyte)                                     \
+   nonstatic_field(HSAILFrame, _save_area[0],                                               jlong)                                     \
+-                                                                                                                                                                                                                                                                                      \
++                                                                                                                                      \
+   nonstatic_field(Hsail::HSAILKernelDeoptimization, _workitemid,                                jint)                                 \
+   nonstatic_field(Hsail::HSAILKernelDeoptimization, _actionAndReason,                           jint)                                 \
+-  nonstatic_field(Hsail::HSAILKernelDeoptimization, _first_frame,                               HSAILFrame)                      \
+-                                                                                                                                           \
++  nonstatic_field(Hsail::HSAILKernelDeoptimization, _first_frame,                               HSAILFrame)                           \
++                                                                                                                                      \
+   nonstatic_field(Hsail::HSAILDeoptimizationInfo, _deopt_occurred,                         jint)                                      \
+   nonstatic_field(Hsail::HSAILDeoptimizationInfo, _deopt_next_index,                       jint)                                      \
++  nonstatic_field(Hsail::HSAILDeoptimizationInfo, _donor_threads,                          JavaThread**)                              \
+   nonstatic_field(Hsail::HSAILDeoptimizationInfo, _never_ran_array,                        jboolean *)                                \
+   nonstatic_field(Hsail::HSAILDeoptimizationInfo, _deopt_save_states[0],                   Hsail::HSAILKernelDeoptimization)          \
+   nonstatic_field(Hsail::HSAILDeoptimizationInfo, _deopt_save_states[1],                   Hsail::HSAILKernelDeoptimization)
+--- old/src/share/vm/gc_interface/collectedHeap.hpp	2014-04-11 16:41:50.728234457 +0200
++++ new/src/share/vm/gc_interface/collectedHeap.hpp	2014-04-11 16:41:50.668234459 +0200
+@@ -84,6 +84,7 @@
+ class CollectedHeap : public CHeapObj<mtInternal> {
+   friend class VMStructs;
+   friend class IsGCActiveMark; // Block structured external access to _is_gc_active
++  friend class Hsail;  // access to allocate_new_tlab
+ 
+ #ifdef ASSERT
+   static int       _fire_out_of_memory_count;
+--- old/src/share/vm/runtime/vmStructs.cpp	2014-04-11 16:41:50.940234451 +0200
++++ new/src/share/vm/runtime/vmStructs.cpp	2014-04-11 16:41:50.876234453 +0200
+@@ -576,6 +576,7 @@
+   nonstatic_field(ThreadLocalAllocBuffer,      _start,                                        HeapWord*)                             \
+   nonstatic_field(ThreadLocalAllocBuffer,      _top,                                          HeapWord*)                             \
+   nonstatic_field(ThreadLocalAllocBuffer,      _end,                                          HeapWord*)                             \
++  nonstatic_field(ThreadLocalAllocBuffer,      _pf_top,                                       HeapWord*)                             \
+   nonstatic_field(ThreadLocalAllocBuffer,      _desired_size,                                 size_t)                                \
+   nonstatic_field(ThreadLocalAllocBuffer,      _refill_waste_limit,                           size_t)                                \
+      static_field(ThreadLocalAllocBuffer,      _target_refills,                               unsigned)                              \
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewBase.java	2014-04-11 16:41:51.132234446 +0200
+@@ -0,0 +1,81 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import com.oracle.graal.compiler.hsail.test.infra.GraalKernelTester;
++import java.util.Arrays;
++
++/**
++ * Base Class for tests that allocate escaping objects.
++ */
++
++public class EscapingNewBase extends GraalKernelTester {
++
++    final int NUM = getRange();
++
++    int getRange() {
++        return 24;
++    }
++
++    @Result public Object[] outArray = new Object[NUM];
++    public Object[] savedOutArray;
++    @Result public boolean savedOutArrayMatch1;
++    @Result public boolean savedOutArrayMatch2;
++    @Result public boolean savedOutArrayMatch3;
++
++    void setupArrays() {
++        for (int i = 0; i < NUM; i++) {
++            outArray[i] = null;
++        }
++    }
++
++    int getDispatches() {
++        return 1;
++    }
++
++    @Override
++    protected boolean supportsRequiredCapabilities() {
++        return canHandleObjectAllocation();
++    }
++
++    @Override
++    public void runTest() {
++        setupArrays();
++
++        dispatchMethodKernel(NUM);
++        // use System.gc() to ensure new objects are in form that gc likes
++        System.gc();
++        savedOutArray = Arrays.copyOf(outArray, NUM);
++        savedOutArrayMatch1 = Arrays.equals(outArray, savedOutArray);
++        if (getDispatches() > 1) {
++            // redispatch kernel without gc
++            dispatchMethodKernel(NUM);
++            savedOutArrayMatch2 = Arrays.equals(outArray, savedOutArray);
++            // and one more time with gc
++            dispatchMethodKernel(NUM);
++            savedOutArrayMatch3 = Arrays.equals(outArray, savedOutArray);
++            System.gc();
++        }
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewFloatStringTest.java	2014-04-11 16:41:51.316234441 +0200
+@@ -0,0 +1,43 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++/**
++ * Tests creating a new String from a float.
++ */
++
++public class EscapingNewFloatStringTest extends EscapingNewBase {
++
++    @Result public String[] myOutArray = new String[NUM];
++
++    public void run(int gid) {
++        outArray[gid] = Float.toString(gid * 1.11f);
++        myOutArray[gid] = Float.toString(gid * 2.22f);
++    }
++
++    // problems runs out of memory space while inlining
++    // @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewFloatTest.java	2014-04-11 16:41:51.500234437 +0200
+@@ -0,0 +1,40 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++public class EscapingNewFloatTest extends EscapingNewBase {
++    @Result Float[] myOutArray = new Float[NUM];
++
++    public void run(int gid) {
++        outArray[gid] = (gid + 1) * 1.11f;
++        myOutArray[gid] = (gid + 1) * 2.22f;
++    }
++
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewIntArrayTest.java	2014-04-11 16:41:51.688234432 +0200
+@@ -0,0 +1,63 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of an integer array per workitem.
++ */
++
++public class EscapingNewIntArrayTest extends EscapingNewBase {
++
++    public void run(int gid) {
++        int size = gid + 1;
++        int[] ary = new int[size];
++        for (int i = 0; i < ary.length; i++) {
++            ary[i] = i * 3;
++        }
++        outArray[gid] = ary;
++    }
++
++    private static final boolean DEBUG = Boolean.getBoolean("hsail.debug");
++
++    @Override
++    public void runTest() {
++        super.runTest();
++        if (DEBUG) {
++            for (int i = 0; i < NUM; i++) {
++                int[] ary = (int[]) outArray[i];
++                System.out.print("ary len " + ary.length + ":  ");
++                for (int val : ary) {
++                    System.out.print(val + ",");
++                }
++                System.out.println();
++            }
++        }
++    }
++
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewIntegerTest.java	2014-04-11 16:41:51.876234427 +0200
+@@ -0,0 +1,44 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of a java.lang.Integer per workitem.
++ */
++
++public class EscapingNewIntegerTest extends EscapingNewBase {
++    @Result Integer[] myOutArray = new Integer[NUM];
++
++    public void run(int gid) {
++        outArray[gid] = (gid + 1) * 111;
++        myOutArray[gid] = (gid + 1) * 222;
++    }
++
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewStoreFieldTest.java	2014-04-11 16:41:52.068234422 +0200
+@@ -0,0 +1,72 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import com.oracle.graal.compiler.hsail.test.infra.GraalKernelTester;
++import org.junit.Test;
++
++/**
++ * Tests allocation of a Vec3 object stored in a field by workitem #1.
++ */
++
++public class EscapingNewStoreFieldTest extends GraalKernelTester {
++
++    static final int NUM = 20;
++    public float[] inArray = new float[NUM];
++    @Result public Vec3 outField;
++
++    void setupArrays() {
++        for (int i = 0; i < NUM; i++) {
++            inArray[i] = i;
++        }
++    }
++
++    public void run(int gid) {
++        if (gid == 1) {
++            float inval = inArray[gid];
++            outField = new Vec3(inval + 1, inval + 2, inval + 3);
++        }
++    }
++
++    @Override
++    public void runTest() {
++        setupArrays();
++
++        dispatchMethodKernel(NUM);
++
++        // see what happens if we do it again
++        dispatchMethodKernel(NUM);
++        System.gc();
++    }
++
++    @Override
++    protected boolean supportsRequiredCapabilities() {
++        return canHandleObjectAllocation();
++    }
++
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewStringConcatTest.java	2014-04-11 16:41:52.264234416 +0200
+@@ -0,0 +1,54 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of a new String based on string concatenation.
++ */
++
++public class EscapingNewStringConcatTest extends EscapingNewBase {
++
++    @Result public String[] myOutArray = new String[NUM];
++    public String[] inArray = new String[NUM];
++
++    @Override
++    void setupArrays() {
++        super.setupArrays();
++        for (int i = 0; i < NUM; i++) {
++            inArray[i] = Integer.toString(i + 100);
++        }
++    }
++
++    public void run(int gid) {
++        outArray[gid] = inArray[gid] + inArray[(gid + NUM / 2) % NUM];
++        myOutArray[gid] = inArray[(gid + NUM / 2) % NUM] + inArray[gid];
++    }
++
++    // Node implementing Lowerable not handled in HSAIL Backend: 6274|MonitorEnter
++    @Test(expected = com.oracle.graal.graph.GraalInternalError.class)
++    public void test() {
++        testGeneratedHsail();
++    }
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewStringInternTest.java	2014-04-11 16:41:52.452234411 +0200
+@@ -0,0 +1,42 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of a new String based on string interning.
++ */
++
++public class EscapingNewStringInternTest extends EscapingNewBase {
++
++    public void run(int gid) {
++        outArray[gid] = Integer.toString(gid * 111).intern();
++    }
++
++    // at node: 12|Invoke#Direct#intern
++    @Test(expected = com.oracle.graal.graph.GraalInternalError.class)
++    public void test() {
++        testGeneratedHsail();
++    }
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewStringLargeRangeTest.java	2014-04-11 16:41:52.708234405 +0200
+@@ -0,0 +1,43 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of a new String from integer with a large range of workitems.
++ */
++
++public class EscapingNewStringLargeRangeTest extends EscapingNewStringTest {
++
++    @Override
++    int getRange() {
++        return 125000;
++    }
++
++    @Override
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewStringTest.java	2014-04-11 16:41:53.040234396 +0200
+@@ -0,0 +1,44 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of a new String from an integer per workitem.
++ */
++
++public class EscapingNewStringTest extends EscapingNewBase {
++
++    @Result public String[] myOutArray = new String[NUM];
++
++    public void run(int gid) {
++        outArray[gid] = Integer.toString(gid * 111);
++        myOutArray[gid] = Integer.toString(gid * 222);
++    }
++
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewVec3ArrayTest.java	2014-04-11 16:41:53.336234388 +0200
+@@ -0,0 +1,64 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of an array of Vec3 objects per workitem.
++ */
++
++public class EscapingNewVec3ArrayTest extends EscapingNewBase {
++
++    public void run(int gid) {
++        int size = gid + 1;
++        Vec3[] vec3ary = new Vec3[size];
++        for (int i = 0; i < vec3ary.length; i++) {
++            vec3ary[i] = new Vec3(size + i + 1.1f, size + i + 2.2f, size + i + 3.3f);
++        }
++        outArray[gid] = vec3ary;
++    }
++
++    private static final boolean DEBUG = Boolean.getBoolean("hsail.debug");
++
++    @Override
++    public void runTest() {
++        super.runTest();
++        if (DEBUG) {
++            System.out.println("dumping results");
++            for (int i = 0; i < NUM; i++) {
++                Vec3[] ary = (Vec3[]) outArray[i];
++                System.out.print("ary len " + ary.length + ":  ");
++                for (Vec3 val : ary) {
++                    System.out.print(val + ", ");
++                }
++                System.out.println();
++            }
++        }
++    }
++
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewVec3Base.java	2014-04-11 16:41:53.540234382 +0200
+@@ -0,0 +1,50 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++/**
++ * Base class for Vec3 object allocation tests.
++ */
++
++public class EscapingNewVec3Base extends EscapingNewBase {
++
++    float[] inArray = new float[NUM];
++    @Result Vec3[] myOutArray = new Vec3[NUM];
++
++    @Override
++    void setupArrays() {
++        super.setupArrays();
++        for (int i = 0; i < NUM; i++) {
++            inArray[i] = i;
++            myOutArray[i] = null;
++        }
++    }
++
++    public void run(int gid) {
++        float inval = inArray[gid];
++        // allocate and store in Object array
++        outArray[gid] = new Vec3(inval + 1.1f, inval + 2.1f, inval + 3.1f);
++        // allocate and store in Vec3 array
++        myOutArray[gid] = new Vec3(inval + 4.1f, inval + 5.1f, inval + 6.1f);
++    }
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewVec3LargeRangeDisp3Test.java	2014-04-11 16:41:53.772234376 +0200
+@@ -0,0 +1,49 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of a new Vec3 object with a large range of workitems with 3 dispatches.
++ */
++
++public class EscapingNewVec3LargeRangeDisp3Test extends EscapingNewVec3Test {
++
++    @Override
++    int getRange() {
++        return 250000;
++    }
++
++    @Override
++    int getDispatches() {
++        return 3;
++    }
++
++    @Override
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewVec3LargeRangeTest.java	2014-04-11 16:41:53.968234371 +0200
+@@ -0,0 +1,44 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of a new Vec3 object with a large range of workitems.
++ */
++
++public class EscapingNewVec3LargeRangeTest extends EscapingNewVec3Test {
++
++    @Override
++    int getRange() {
++        return 250000;
++    }
++
++    @Override
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewVec3MediumRangeTest.java	2014-04-11 16:41:54.164234366 +0200
+@@ -0,0 +1,44 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of a new Vec3 object with a medium range of workitems.
++ */
++
++public class EscapingNewVec3MediumRangeTest extends EscapingNewVec3Test {
++
++    @Override
++    int getRange() {
++        return 100000;
++    }
++
++    @Override
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewVec3Partial2Test.java	2014-04-11 16:41:54.352234361 +0200
+@@ -0,0 +1,49 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of a new Vec3 object but skipping one workitem.
++ */
++
++public class EscapingNewVec3Partial2Test extends EscapingNewVec3Base {
++
++    int testGid = NUM / 2;
++
++    @Override
++    public void run(int gid) {
++        float inval = inArray[gid];
++        if (gid != testGid) {
++            outArray[gid] = new Vec3(inval + 1.1f, inval + 2.1f, inval + 3.1f);
++            myOutArray[gid] = new Vec3(inval + 4.1f, inval + 5.1f, inval + 6.1f);
++        }
++    }
++
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewVec3PartialTest.java	2014-04-11 16:41:54.616234354 +0200
+@@ -0,0 +1,45 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of a new Vec3 object but only for half of the workitems.
++ */
++
++public class EscapingNewVec3PartialTest extends EscapingNewVec3Base {
++
++    @Override
++    public void run(int gid) {
++        float inval = inArray[gid];
++        outArray[gid] = (gid % 2 == 0 ? new Vec3(inval + 1.1f, inval + 2.1f, inval + 3.1f) : null);
++        myOutArray[gid] = (gid % 2 != 0 ? new Vec3(inval + 4.1f, inval + 5.1f, inval + 6.1f) : null);
++    }
++
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/EscapingNewVec3Test.java	2014-04-11 16:41:54.824234348 +0200
+@@ -0,0 +1,38 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests allocation of a new Vec3 object per workitem.
++ */
++
++public class EscapingNewVec3Test extends EscapingNewVec3Base {
++
++    @Test
++    public void test() {
++        testGeneratedHsail();
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.compiler.hsail.test/src/com/oracle/graal/compiler/hsail/test/IntTestBranchTest.java	2014-04-11 16:41:55.020234343 +0200
+@@ -0,0 +1,52 @@
++/*
++ * Copyright (c) 2009, 2012, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++package com.oracle.graal.compiler.hsail.test;
++
++import org.junit.Test;
++
++/**
++ * Tests code generation for IntegerTestNode for HSAIL backend.
++ */
++public class IntTestBranchTest extends StaticMethodTwoIntArrays {
++
++    /**
++     * The static "kernel" method we will be testing. By convention the gid is the last parameter.
++     * 
++     * @param out
++     * @param in
++     * @param gid
++     */
++    public static void run(int[] out, int[] in, int gid) {
++        if ((in[gid] & 3) != 0) {
++            out[gid] = in[gid] * 2;
++        } else {
++            out[gid] = in[gid] * 3;
++        }
++    }
++
++    @Test
++    public void test() {
++        super.testGeneratedHsail();
++    }
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/DonorThreadPool.java	2014-04-11 16:41:55.248234337 +0200
+@@ -0,0 +1,74 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.hotspot.hsail;
++
++import static com.oracle.graal.hotspot.hsail.HSAILHotSpotBackend.Options.*;
++
++import java.util.concurrent.*;
++
++import com.oracle.graal.hotspot.hsail.HSAILHotSpotBackend.Options;
++
++/**
++ * Thread pool for HSAIL allocation support.
++ */
++public class DonorThreadPool {
++
++    private final Thread[] threads;
++
++    void waitAt(CyclicBarrier barrier) {
++        try {
++            barrier.await();
++        } catch (Exception e) {
++            e.printStackTrace();
++        }
++    }
++
++    /**
++     * Creates a pool of threads whose size is given by {@link Options#HsailDonorThreads}.
++     */
++    DonorThreadPool() {
++        int size = HsailDonorThreads.getValue();
++        this.threads = new Thread[size];
++        CyclicBarrier barrier = new CyclicBarrier(size + 1);
++
++        // fill in threads
++        for (int i = 0; i < size; i++) {
++            threads[i] = new Thread(new Runnable() {
++                @Override
++                public void run() {
++                    while (true) {
++                        waitAt(barrier);
++                    }
++                }
++            }, "HsailDonorThread-" + i);
++            threads[i].setDaemon(true);
++            threads[i].start();
++        }
++        // creating thread waits at barrier to make sure others have started
++        waitAt(barrier);
++    }
++
++    public Thread[] getThreads() {
++        return threads;
++    }
++}
+\ No newline at end of file
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/nodes/AtomicGetAndAddNode.java	2014-04-11 16:41:55.628234327 +0200
+@@ -0,0 +1,83 @@
++/*
++ * Copyright (c) 2011, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.hotspot.hsail.nodes;
++
++import com.oracle.graal.api.meta.*;
++import com.oracle.graal.nodes.*;
++import com.oracle.graal.nodes.extended.*;
++import com.oracle.graal.nodes.spi.*;
++import com.oracle.graal.nodes.type.*;
++
++/**
++ * Represents an atomic get-and-add operation. The result is the get value (before the delta is
++ * added)
++ */
++public class AtomicGetAndAddNode extends AbstractStateSplit implements Lowerable, MemoryCheckpoint.Single {
++
++    @Input private ValueNode base;
++    @Input private ValueNode offset;
++    @Input private ValueNode delta;
++    @Input private LocationIdentity locationIdentity;
++
++    public ValueNode base() {
++        return base;
++    }
++
++    public ValueNode offset() {
++        return offset;
++    }
++
++    public ValueNode delta() {
++        return delta;
++    }
++
++    @SuppressWarnings("unused")
++    public AtomicGetAndAddNode(ValueNode base, ValueNode offset, ValueNode location /* ignored */, ValueNode delta) {
++        super(StampFactory.forKind(Kind.Long.getStackKind()));
++        this.base = base;
++        this.offset = offset;
++        this.delta = delta;
++    }
++
++    @Override
++    public LocationIdentity getLocationIdentity() {
++        return locationIdentity;
++    }
++
++    @Override
++    public void lower(LoweringTool tool) {
++        tool.getLowerer().lower(this, tool);
++    }
++
++    @NodeIntrinsic
++    public native static long atomicGetAndAdd(long base, int offset, LocationIdentity locationIdentity, int delta);
++
++    public MemoryCheckpoint asMemoryCheckpoint() {
++        return this;
++    }
++
++    public MemoryPhiNode asMemoryPhi() {
++        return null;
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/nodes/LoweredAtomicGetAndAddNode.java	2014-04-11 16:41:55.984234318 +0200
+@@ -0,0 +1,90 @@
++/*
++ * Copyright (c) 2013, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.hotspot.hsail.nodes;
++
++import com.oracle.graal.api.meta.*;
++import com.oracle.graal.graph.*;
++import com.oracle.graal.nodes.*;
++import com.oracle.graal.nodes.extended.*;
++import com.oracle.graal.nodes.spi.*;
++import com.oracle.graal.nodes.type.*;
++import com.oracle.graal.hotspot.hsail.*;
++
++/**
++ * Represents the lowered version of an atomic get-and-add operation{@code AtomicGetAndAddNode}.
++ */
++public class LoweredAtomicGetAndAddNode extends FixedAccessNode implements StateSplit, LIRLowerable, MemoryCheckpoint.Single {
++
++    @Input private ValueNode delta;
++    @Input(InputType.State) private FrameState stateAfter;
++
++    public FrameState stateAfter() {
++        return stateAfter;
++    }
++
++    public void setStateAfter(FrameState x) {
++        assert x == null || x.isAlive() : "frame state must be in a graph";
++        updateUsages(stateAfter, x);
++        stateAfter = x;
++    }
++
++    public boolean hasSideEffect() {
++        return true;
++    }
++
++    public ValueNode getDelta() {
++        return delta;
++    }
++
++    public LoweredAtomicGetAndAddNode(ValueNode object, LocationNode location, ValueNode delta, BarrierType barrierType, boolean compressible) {
++        super(object, location, StampFactory.forKind(Kind.Long.getStackKind()), barrierType, compressible);
++        this.delta = delta;
++    }
++
++    @Override
++    public LocationIdentity getLocationIdentity() {
++        return location().getLocationIdentity();
++    }
++
++    @Override
++    public boolean canNullCheck() {
++        return false;
++    }
++
++    @Override
++    public void generate(NodeLIRBuilderTool gen) {
++        HSAILHotSpotNodeLIRBuilder hsailGen = (HSAILHotSpotNodeLIRBuilder) gen;
++        hsailGen.visitAtomicGetAndAdd(this, location().generateAddress(hsailGen, hsailGen.operand(object())));
++    }
++
++    @Override
++    public MemoryCheckpoint asMemoryCheckpoint() {
++        return this;
++    }
++
++    @Override
++    public MemoryPhiNode asMemoryPhi() {
++        return null;
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/replacements/HSAILHotSpotReplacementsUtil.java	2014-04-11 16:41:56.356234308 +0200
+@@ -0,0 +1,73 @@
++/*
++ * Copyright (c) 2012, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.hotspot.hsail.replacements;
++
++import com.oracle.graal.api.code.*;
++import com.oracle.graal.api.meta.*;
++import com.oracle.graal.replacements.Snippet.Fold;
++import com.oracle.graal.word.*;
++import com.oracle.graal.hotspot.replacements.HotSpotReplacementsUtil;
++import com.oracle.graal.hotspot.meta.*;
++import com.oracle.graal.hotspot.hsail.nodes.*;
++
++//JaCoCo Exclude
++
++/**
++ * A collection of methods used in HSAIL-specific snippets and substitutions.
++ */
++public class HSAILHotSpotReplacementsUtil extends HotSpotReplacementsUtil {
++
++    private static HotSpotRegistersProvider hsailRegisters;
++
++    public static void initialize(HotSpotRegistersProvider registers) {
++        hsailRegisters = registers;
++    }
++
++    /**
++     * Gets the value of the thread register as a Word.
++     */
++    public static Word thread() {
++        return registerAsWord(threadRegister(), true, false);
++    }
++
++    @Fold
++    public static Register threadRegister() {
++        return hsailRegisters.getThreadRegister();
++    }
++
++    public static Word atomicGetAndAddTlabTop(Word thread, int size) {
++        return Word.unsigned(AtomicGetAndAddNode.atomicGetAndAdd(thread.rawValue(), threadTlabTopOffset(), TLAB_TOP_LOCATION, size));
++    }
++
++    public static final LocationIdentity TLAB_PFTOP_LOCATION = new NamedLocationIdentity("TlabPfTop");
++
++    @Fold
++    public static int threadTlabPfTopOffset() {
++        return config().threadTlabPfTopOffset();
++    }
++
++    public static void writeTlabPfTop(Word thread, Word val) {
++        thread.writeWord(threadTlabPfTopOffset(), val, TLAB_PFTOP_LOCATION);
++    }
++
++}
+--- /dev/null	2014-04-02 15:54:20.029555970 +0200
++++ new/graal/com.oracle.graal.hotspot.hsail/src/com/oracle/graal/hotspot/hsail/replacements/HSAILNewObjectSnippets.java	2014-04-11 16:41:56.708234298 +0200
+@@ -0,0 +1,255 @@
++/*
++ * Copyright (c) 2012, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package com.oracle.graal.hotspot.hsail.replacements;
++
++import static com.oracle.graal.api.code.UnsignedMath.*;
++import static com.oracle.graal.hotspot.hsail.replacements.HSAILHotSpotReplacementsUtil.*;
++import static com.oracle.graal.hotspot.hsail.replacements.HSAILNewObjectSnippets.Options.*;
++import static com.oracle.graal.nodes.PiArrayNode.*;
++import static com.oracle.graal.nodes.extended.BranchProbabilityNode.*;
++import static com.oracle.graal.phases.GraalOptions.*;
++import static com.oracle.graal.replacements.SnippetTemplate.*;
++
++import com.oracle.graal.api.code.*;
++import com.oracle.graal.api.meta.*;
++import com.oracle.graal.debug.*;
++import com.oracle.graal.hotspot.*;
++import com.oracle.graal.hotspot.meta.*;
++import com.oracle.graal.hotspot.replacements.*;
++import com.oracle.graal.hotspot.stubs.*;
++import com.oracle.graal.nodes.*;
++import com.oracle.graal.nodes.java.*;
++import com.oracle.graal.nodes.spi.*;
++import com.oracle.graal.nodes.type.*;
++import com.oracle.graal.options.*;
++import com.oracle.graal.replacements.*;
++import com.oracle.graal.replacements.Snippet.ConstantParameter;
++import com.oracle.graal.replacements.SnippetTemplate.AbstractTemplates;
++import com.oracle.graal.replacements.SnippetTemplate.Arguments;
++import com.oracle.graal.replacements.SnippetTemplate.SnippetInfo;
++import com.oracle.graal.word.*;
++
++/**
++ * HSAIL-specific Snippets used for implementing NEW and NEWARRAY.
++ */
++public class HSAILNewObjectSnippets extends NewObjectSnippets {
++
++    static public class Options {
++
++        // @formatter:off
++        @Option(help = "In HSAIL allocation, allow allocation from eden as fallback if TLAB is full")
++        static final OptionValue<Boolean> HsailUseEdenAllocate = new OptionValue<>(false);
++
++        @Option(help = "Estimate of number of bytes allocated by each HSAIL workitem, used to size TLABs")
++        static public final OptionValue<Integer> HsailAllocBytesPerWorkitem = new OptionValue<>(64);
++
++        // @formatter:on
++    }
++
++    private static final boolean hsailUseEdenAllocate = HsailUseEdenAllocate.getValue();
++
++    @Snippet
++    public static Object allocateInstanceAtomic(@ConstantParameter int size, Word hub, Word prototypeMarkWord, @ConstantParameter boolean fillContents, @ConstantParameter String typeContext) {
++        Word thread = thread();
++        boolean haveResult = false;
++        if (useTLAB()) {
++            Word top = atomicGetAndAddTlabTop(thread, size);
++            Word end = readTlabEnd(thread);
++            Word newTop = top.add(size);
++            if (probability(FAST_PATH_PROBABILITY, newTop.belowOrEqual(end))) {
++                // writeTlabTop(thread, newTop) was done by the atomicGetAndAdd
++                Object result = formatObject(hub, size, top, prototypeMarkWord, fillContents, true, false, true);
++                profileAllocation("instance", size, typeContext);
++                return piCast(verifyOop(result), StampFactory.forNodeIntrinsic());
++            } else {
++                // only one overflower will be the first overflower, detectable because
++                // oldtop was still below end
++                if (top.belowOrEqual(end)) {
++                    // hack alert: store the last good top before overflow into pf_top
++                    // we will move it back into top later when back in the VM
++                    writeTlabPfTop(thread, top);
++                }
++                // useless logic but see notes on deopt path below
++                haveResult = newTop.belowOrEqual(end);
++            }
++        }
++        if (hsailUseEdenAllocate) {
++            // originally:
++            // result = NewInstanceStubCall.call(hub);
++
++            // we could not allocate from tlab, try allocating directly from eden
++            // false for no logging
++            Word memory = NewInstanceStub.edenAllocate(Word.unsigned(size), false);
++            if (memory.notEqual(0)) {
++                new_eden.inc();
++                Object result = formatObject(hub, size, memory, prototypeMarkWord, fillContents, true, false, true);
++                profileAllocation("instance", size, typeContext);
++                return piCast(verifyOop(result), StampFactory.forNodeIntrinsic());
++            }
++        }
++        // haveResult test here helps avoid dropping earlier stores were seen to be dropped without
++        // this.
++        if (!haveResult) {
++            DeoptimizeNode.deopt(DeoptimizationAction.None, DeoptimizationReason.RuntimeConstraint);
++        }
++        // will never get here but this keeps the compiler happy
++        return Word.zero().toObject();
++    }
++
++    @Snippet
++    public static Object allocateArrayAtomic(Word hub, int length, Word prototypeMarkWord, @ConstantParameter int headerSize, @ConstantParameter int log2ElementSize,
++                    @ConstantParameter boolean fillContents, @ConstantParameter boolean maybeUnroll, @ConstantParameter String typeContext) {
++        if (!belowThan(length, MAX_ARRAY_FAST_PATH_ALLOCATION_LENGTH)) {
++            // This handles both negative array sizes and very large array sizes
++            DeoptimizeNode.deopt(DeoptimizationAction.None, DeoptimizationReason.RuntimeConstraint);
++        }
++        return allocateArrayAtomicImpl(hub, length, prototypeMarkWord, headerSize, log2ElementSize, fillContents, maybeUnroll, typeContext);
++    }
++
++    private static Object allocateArrayAtomicImpl(Word hub, int length, Word prototypeMarkWord, int headerSize, int log2ElementSize, boolean fillContents, boolean maybeUnroll, String typeContext) {
++        int alignment = wordSize();
++        int allocationSize = computeArrayAllocationSize(length, alignment, headerSize, log2ElementSize);
++        Word thread = thread();
++        boolean haveResult = false;
++        if (useTLAB()) {
++            Word top = atomicGetAndAddTlabTop(thread, allocationSize);
++            Word end = readTlabEnd(thread);
++            Word newTop = top.add(allocationSize);
++            if (probability(FAST_PATH_PROBABILITY, newTop.belowOrEqual(end))) {
++                // writeTlabTop(thread, newTop) was done by the atomicGetAndAdd
++                newarray_loopInit.inc();
++                // we are not in a stub so we can set useSnippetCounters to true
++                Object result = formatArray(hub, allocationSize, length, headerSize, top, prototypeMarkWord, fillContents, maybeUnroll, true);
++                profileAllocation("array", allocationSize, typeContext);
++                return piArrayCast(verifyOop(result), length, StampFactory.forNodeIntrinsic());
++            } else {
++                // only one overflower will be the first overflower, detectable because
++                // oldtop was still below end
++                if (top.belowOrEqual(end)) {
++                    // hack alert: store the last good top before overflow into pf_top
++                    // we will move it back into top later when back in the VM
++                    writeTlabPfTop(thread, top);
++                }
++                // useless logic but see notes on deopt path below
++                haveResult = newTop.belowOrEqual(end);
++            }
++        }
++        // we could not allocate from tlab, try allocating directly from eden
++        if (hsailUseEdenAllocate) {
++            // false for no logging
++            Word memory = NewInstanceStub.edenAllocate(Word.unsigned(allocationSize), false);
++            if (memory.notEqual(0)) {
++                newarray_eden.inc();
++                // we are not in a stub so we can set useSnippetCounters to true
++                Object result = formatArray(hub, allocationSize, length, headerSize, memory, prototypeMarkWord, fillContents, maybeUnroll, true);
++                profileAllocation("array", allocationSize, typeContext);
++                return piArrayCast(verifyOop(result), length, StampFactory.forNodeIntrinsic());
++            }
++        }
++        if (!haveResult) {
++            DeoptimizeNode.deopt(DeoptimizationAction.None, DeoptimizationReason.RuntimeConstraint);
++        }
++        // will never get here but this keeps the compiler happy
++        return Word.zero().toObject();
++    }
++
++    public static class Templates extends AbstractTemplates {
++
++        private final SnippetInfo allocateInstance = snippet(HSAILNewObjectSnippets.class, "allocateInstanceAtomic");
++        private final SnippetInfo allocateArray = snippet(HSAILNewObjectSnippets.class, "allocateArrayAtomic");
++
++        // private final SnippetInfo allocateArrayDynamic = snippet(NewObjectSnippets.class,
++        // "allocateArrayDynamic");
++        // private final SnippetInfo newmultiarray = snippet(NewObjectSnippets.class,
++        // "newmultiarray");
++
++        public Templates(HotSpotProviders providers, TargetDescription target) {
++            super(providers, providers.getSnippetReflection(), target);
++        }
++
++        /**
++         * Lowers a {@link NewInstanceNode}.
++         */
++        public void lower(NewInstanceNode newInstanceNode, LoweringTool tool) {
++            StructuredGraph graph = newInstanceNode.graph();
++            HotSpotResolvedObjectType type = (HotSpotResolvedObjectType) newInstanceNode.instanceClass();
++            assert !type.isArray();
++            ConstantNode hub = ConstantNode.forConstant(type.klass(), providers.getMetaAccess(), graph);
++            int size = instanceSize(type);
++
++            Arguments args = new Arguments(allocateInstance, graph.getGuardsStage(), tool.getLoweringStage());
++            args.addConst("size", size);
++            args.add("hub", hub);
++            args.add("prototypeMarkWord", type.prototypeMarkWord());
++            args.addConst("fillContents", newInstanceNode.fillContents());
++            args.addConst("typeContext", MetaUtil.toJavaName(type, false));
++
++            SnippetTemplate template = template(args);
++            Debug.log("Lowering allocateInstance in %s: node=%s, template=%s, arguments=%s", graph, newInstanceNode, template, args);
++            template.instantiate(providers.getMetaAccess(), newInstanceNode, DEFAULT_REPLACER, args);
++        }
++
++        /**
++         * Lowers a {@link NewArrayNode}.
++         */
++        public void lower(NewArrayNode newArrayNode, LoweringTool tool) {
++            StructuredGraph graph = newArrayNode.graph();
++            ResolvedJavaType elementType = newArrayNode.elementType();
++            HotSpotResolvedObjectType arrayType = (HotSpotResolvedObjectType) elementType.getArrayClass();
++            Kind elementKind = elementType.getKind();
++            ConstantNode hub = ConstantNode.forConstant(arrayType.klass(), providers.getMetaAccess(), graph);
++            final int headerSize = HotSpotGraalRuntime.getArrayBaseOffset(elementKind);
++            // lowerer extends HotSpotLoweringProvider so we can just use that
++            HotSpotLoweringProvider lowerer = (HotSpotLoweringProvider) providers.getLowerer();
++            int log2ElementSize = CodeUtil.log2(lowerer.getScalingFactor(elementKind));
++
++            Arguments args = new Arguments(allocateArray, graph.getGuardsStage(), tool.getLoweringStage());
++            args.add("hub", hub);
++            args.add("length", newArrayNode.length());
++            args.add("prototypeMarkWord", arrayType.prototypeMarkWord());
++            args.addConst("headerSize", headerSize);
++            args.addConst("log2ElementSize", log2ElementSize);
++            args.addConst("fillContents", newArrayNode.fillContents());
++            args.addConst("maybeUnroll", newArrayNode.length().isConstant());
++            args.addConst("typeContext", MetaUtil.toJavaName(arrayType, false));
++
++            SnippetTemplate template = template(args);
++            Debug.log("Lowering allocateArray in %s: node=%s, template=%s, arguments=%s", graph, newArrayNode, template, args);
++            template.instantiate(providers.getMetaAccess(), newArrayNode, DEFAULT_REPLACER, args);
++        }
++
++        private static int instanceSize(HotSpotResolvedObjectType type) {
++            int size = type.instanceSize();
++            assert (size % wordSize()) == 0;
++            assert size >= 0;
++            return size;
++        }
++    }
++
++    private static final SnippetCounter.Group countersNew = SnippetCounters.getValue() ? new SnippetCounter.Group("NewInstance") : null;
++    private static final SnippetCounter new_eden = new SnippetCounter(countersNew, "eden", "used edenAllocate");
++
++    private static final SnippetCounter.Group countersNewArray = SnippetCounters.getValue() ? new SnippetCounter.Group("NewArray") : null;
++    private static final SnippetCounter newarray_loopInit = new SnippetCounter(countersNewArray, "tlabLoopInit", "TLAB alloc with zeroing in a loop");
++    private static final SnippetCounter newarray_eden = new SnippetCounter(countersNewArray, "eden", "used edenAllocate");
++}

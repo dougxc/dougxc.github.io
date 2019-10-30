@@ -1,0 +1,346 @@
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2016-08-20 09:55:40.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2016-08-20 09:55:40.000000000 +0200
+@@ -244,17 +244,21 @@
+     native void resolveInvokeDynamicInPool(HotSpotConstantPool constantPool, int cpi);
+ 
+     /**
+-     * Ensures that the type referenced by the entry for a
++     * If {@code cpi} denotes an entry representing a
+      * <a href="https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-2.html#jvms-2.9">signature
+-     * polymorphic</a> method at index {@code cpi} in {@code constantPool} is loaded and
+-     * initialized.
+-     *
+-     * The behavior of this method is undefined if {@code cpi} does not denote an entry representing
+-     * a signature polymorphic method.
++     * polymorphic</a> method, this method ensures that the type referenced by the entry is loaded
++     * and initialized. It {@code cpi} does not denote a signature polymorphic method, this method
++     * does nothing.
+      */
+     native void resolveInvokeHandleInPool(HotSpotConstantPool constantPool, int cpi);
+ 
+     /**
++     * Gets the list of type names (in the format of {@link JavaType#getName()}) denoting the
++     * classes that define signature polymorphic methods.
++     */
++    native String[] getSignaturePolymorphicHolders();
++
++    /**
+      * Gets the resolved type denoted by the entry at index {@code cpi} in {@code constantPool}.
+      *
+      * The behavior of this method is undefined if {@code cpi} does not denote an entry representing
+@@ -610,4 +614,5 @@
+      * @return the number of bytes required for deoptimization of this frame state
+      */
+     native int interpreterFrameSize(BytecodeFrame frame);
++
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantPool.java	2016-08-20 09:55:40.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantPool.java	2016-08-20 09:55:40.000000000 +0200
+@@ -282,7 +282,7 @@
+      * @return constant pool tag
+      */
+     private JVM_CONSTANT getTagAt(int index) {
+-        assertBounds(index);
++        assert checkBounds(index);
+         HotSpotVMConfig config = config();
+         final long metaspaceConstantPoolTags = UNSAFE.getAddress(getMetaspaceConstantPool() + config.constantPoolTagsOffset);
+         final int tag = UNSAFE.getByteVolatile(null, metaspaceConstantPoolTags + config.arrayU1DataOffset + index);
+@@ -299,7 +299,7 @@
+      * @return constant pool entry
+      */
+     private long getEntryAt(int index) {
+-        assertBounds(index);
++        assert checkBounds(index);
+         int offset = index * runtime().getHostJVMCIBackend().getTarget().wordSize;
+         return UNSAFE.getAddress(getMetaspaceConstantPool() + config().constantPoolSize + offset);
+     }
+@@ -311,7 +311,7 @@
+      * @return integer constant pool entry at index
+      */
+     private int getIntAt(int index) {
+-        assertTag(index, JVM_CONSTANT.Integer);
++        assert checkTag(index, JVM_CONSTANT.Integer);
+         int offset = index * runtime().getHostJVMCIBackend().getTarget().wordSize;
+         return UNSAFE.getInt(getMetaspaceConstantPool() + config().constantPoolSize + offset);
+     }
+@@ -323,7 +323,7 @@
+      * @return long constant pool entry
+      */
+     private long getLongAt(int index) {
+-        assertTag(index, JVM_CONSTANT.Long);
++        assert checkTag(index, JVM_CONSTANT.Long);
+         int offset = index * runtime().getHostJVMCIBackend().getTarget().wordSize;
+         return UNSAFE.getLong(getMetaspaceConstantPool() + config().constantPoolSize + offset);
+     }
+@@ -335,7 +335,7 @@
+      * @return float constant pool entry
+      */
+     private float getFloatAt(int index) {
+-        assertTag(index, JVM_CONSTANT.Float);
++        assert checkTag(index, JVM_CONSTANT.Float);
+         int offset = index * runtime().getHostJVMCIBackend().getTarget().wordSize;
+         return UNSAFE.getFloat(getMetaspaceConstantPool() + config().constantPoolSize + offset);
+     }
+@@ -347,7 +347,7 @@
+      * @return float constant pool entry
+      */
+     private double getDoubleAt(int index) {
+-        assertTag(index, JVM_CONSTANT.Double);
++        assert checkTag(index, JVM_CONSTANT.Double);
+         int offset = index * runtime().getHostJVMCIBackend().getTarget().wordSize;
+         return UNSAFE.getDouble(getMetaspaceConstantPool() + config().constantPoolSize + offset);
+     }
+@@ -359,7 +359,7 @@
+      * @return {@code JVM_CONSTANT_NameAndType} constant pool entry
+      */
+     private int getNameAndTypeAt(int index) {
+-        assertTag(index, JVM_CONSTANT.NameAndType);
++        assert checkTag(index, JVM_CONSTANT.NameAndType);
+         int offset = index * runtime().getHostJVMCIBackend().getTarget().wordSize;
+         return UNSAFE.getInt(getMetaspaceConstantPool() + config().constantPoolSize + offset);
+     }
+@@ -441,7 +441,7 @@
+      * @return klass reference index
+      */
+     private int getUncachedKlassRefIndexAt(int index) {
+-        assertTagIsFieldOrMethod(index);
++        assert checkTagIsFieldOrMethod(index);
+         int offset = index * runtime().getHostJVMCIBackend().getTarget().wordSize;
+         final int refIndex = UNSAFE.getInt(getMetaspaceConstantPool() + config().constantPoolSize + offset);
+         // klass ref index is in the low 16-bits.
+@@ -449,23 +449,27 @@
+     }
+ 
+     /**
+-     * Asserts that the constant pool index {@code index} is in the bounds of the constant pool.
++     * Checks that the constant pool index {@code index} is in the bounds of the constant pool.
+      *
+      * @param index constant pool index
++     * @throws AssertionError if the check fails
+      */
+-    private void assertBounds(int index) {
++    private boolean checkBounds(int index) {
+         assert 0 <= index && index < length() : "index " + index + " not between 0 and " + length();
++        return true;
+     }
+ 
+     /**
+-     * Asserts that the constant pool tag at index {@code index} is equal to {@code tag}.
++     * Checks that the constant pool tag at index {@code index} is equal to {@code tag}.
+      *
+      * @param index constant pool index
+      * @param tag expected tag
++     * @throws AssertionError if the check fails
+      */
+-    private void assertTag(int index, JVM_CONSTANT tag) {
++    private boolean checkTag(int index, JVM_CONSTANT tag) {
+         final JVM_CONSTANT tagAt = getTagAt(index);
+         assert tagAt == tag : "constant pool tag at index " + index + " is " + tagAt + " but expected " + tag;
++        return true;
+     }
+ 
+     /**
+@@ -473,10 +477,12 @@
+      * or a {@link JVM_CONSTANT#MethodRef}, or a {@link JVM_CONSTANT#InterfaceMethodref}.
+      *
+      * @param index constant pool index
++     * @throws AssertionError if the check fails
+      */
+-    private void assertTagIsFieldOrMethod(int index) {
++    private boolean checkTagIsFieldOrMethod(int index) {
+         final JVM_CONSTANT tagAt = getTagAt(index);
+         assert tagAt == JVM_CONSTANT.Fieldref || tagAt == JVM_CONSTANT.MethodRef || tagAt == JVM_CONSTANT.InterfaceMethodref : tagAt;
++        return true;
+     }
+ 
+     @Override
+@@ -523,7 +529,7 @@
+ 
+     @Override
+     public String lookupUtf8(int cpi) {
+-        assertTag(cpi, JVM_CONSTANT.Utf8);
++        assert checkTag(cpi, JVM_CONSTANT.Utf8);
+         return compilerToVM().getSymbol(getEntryAt(cpi));
+     }
+ 
+@@ -690,11 +696,10 @@
+                     UNSAFE.ensureClassInitialized(klass);
+                 }
+                 if (tag == JVM_CONSTANT.MethodRef) {
+-                    if (Bytecodes.isInvokeHandleAlias(opcode)) {
++                    if (Bytecodes.isInvokeHandleAlias(opcode) && isSignaturePolymorphicHolder(type)) {
+                         final int methodRefCacheIndex = rawIndexToConstantPoolIndex(cpi, opcode);
+-                        if (isInvokeHandle(methodRefCacheIndex, type)) {
+-                            compilerToVM().resolveInvokeHandleInPool(this, methodRefCacheIndex);
+-                        }
++                        assert checkTag(compilerToVM().constantPoolRemapInstructionOperandFromCache(this, methodRefCacheIndex), JVM_CONSTANT.MethodRef);
++                        compilerToVM().resolveInvokeHandleInPool(this, methodRefCacheIndex);
+                     }
+                 }
+ 
+@@ -708,11 +713,26 @@
+                 // nothing
+                 break;
+         }
++
+     }
+ 
+-    private boolean isInvokeHandle(int methodRefCacheIndex, HotSpotResolvedObjectTypeImpl klass) {
+-        assertTag(compilerToVM().constantPoolRemapInstructionOperandFromCache(this, methodRefCacheIndex), JVM_CONSTANT.MethodRef);
+-        return ResolvedJavaMethod.isSignaturePolymorphic(klass, getNameOf(methodRefCacheIndex), runtime().getHostJVMCIBackend().getMetaAccess());
++    // Lazily initialized.
++    private static String[] signaturePolymorphicHolders;
++
++    /**
++     * Determines if {@code type} contains signature polymorphic methods.
++     */
++    private static boolean isSignaturePolymorphicHolder(final HotSpotResolvedObjectTypeImpl type) {
++        String name = type.getName();
++        if (signaturePolymorphicHolders == null) {
++            signaturePolymorphicHolders = compilerToVM().getSignaturePolymorphicHolders();
++        }
++        for (String holder : signaturePolymorphicHolders) {
++            if (name.equals(holder)) {
++                return true;
++            }
++        }
++        return false;
+     }
+ 
+     @Override
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaMethod.java	2016-08-20 09:55:41.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaMethod.java	2016-08-20 09:55:41.000000000 +0200
+@@ -23,7 +23,6 @@
+ package jdk.vm.ci.meta;
+ 
+ import java.lang.annotation.Annotation;
+-import java.lang.invoke.MethodHandle;
+ import java.lang.reflect.AnnotatedElement;
+ import java.lang.reflect.Array;
+ import java.lang.reflect.Method;
+@@ -330,22 +329,4 @@
+     }
+ 
+     SpeculationLog getSpeculationLog();
+-
+-    /**
+-     * Determines if the method identified by its holder and name is a
+-     * <a href="https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-2.html#jvms-2.9">signature
+-     * polymorphic</a> method.
+-     */
+-    static boolean isSignaturePolymorphic(JavaType holder, String name, MetaAccessProvider metaAccess) {
+-        if (!holder.getName().equals("Ljava/lang/invoke/MethodHandle;")) {
+-            return false;
+-        }
+-        ResolvedJavaType methodHandleType = metaAccess.lookupJavaType(MethodHandle.class);
+-        Signature signature = metaAccess.parseMethodDescriptor("([Ljava/lang/Object;)Ljava/lang/Object;");
+-        ResolvedJavaMethod method = methodHandleType.findMethod(name, signature);
+-        if (method == null) {
+-            return false;
+-        }
+-        return method.isNative() && method.isVarArgs();
+-    }
+ }
+--- old/src/share/vm/jvmci/jvmciCompilerToVM.cpp	2016-08-20 09:55:41.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciCompilerToVM.cpp	2016-08-20 09:55:41.000000000 +0200
+@@ -1266,10 +1266,23 @@
+ 
+ C2V_VMENTRY(void, resolveInvokeHandleInPool, (JNIEnv*, jobject, jobject jvmci_constant_pool, jint index))
+   constantPoolHandle cp = CompilerToVM::asConstantPool(jvmci_constant_pool);
+-  CallInfo callInfo;
+-  LinkResolver::resolve_invoke(callInfo, Handle(), cp, index, Bytecodes::_invokehandle, CHECK);
+-  ConstantPoolCacheEntry* cp_cache_entry = cp_cache_entry = cp->cache()->entry_at(cp->decode_cpcache_index(index));
+-  cp_cache_entry->set_method_handle(cp, callInfo);
++  KlassHandle holder = cp->klass_ref_at(index, CHECK);
++  Symbol* name = cp->name_ref_at(index);
++  if (MethodHandles::is_signature_polymorphic_name(holder(), name)) {
++    CallInfo callInfo;
++    LinkResolver::resolve_invoke(callInfo, Handle(), cp, index, Bytecodes::_invokehandle, CHECK);
++    ConstantPoolCacheEntry* cp_cache_entry = cp_cache_entry = cp->cache()->entry_at(cp->decode_cpcache_index(index));
++    cp_cache_entry->set_method_handle(cp, callInfo);
++  }
++C2V_END
++
++C2V_VMENTRY(jobject, getSignaturePolymorphicHolders, (JNIEnv*, jobject))
++  objArrayHandle holders = oopFactory::new_objArray(SystemDictionary::String_klass(), 2, CHECK_NULL);
++  Handle mh = java_lang_String::create_from_str("Ljava/lang/invoke/MethodHandle;", CHECK_NULL);
++  Handle vh = java_lang_String::create_from_str("Ljava/lang/invoke/VarHandle;", CHECK_NULL);
++  holders->obj_at_put(0, mh());
++  holders->obj_at_put(1, vh());
++  return JNIHandles::make_local(THREAD, holders());
+ C2V_END
+ 
+ C2V_VMENTRY(jboolean, shouldDebugNonSafepoints, (JNIEnv*, jobject))
+@@ -1511,6 +1524,7 @@
+   {CC "resolveInvokeDynamicInPool",                   CC "(" HS_CONSTANT_POOL "I)V",                                                        FN_PTR(resolveInvokeDynamicInPool)},
+   {CC "resolveInvokeHandleInPool",                    CC "(" HS_CONSTANT_POOL "I)V",                                                        FN_PTR(resolveInvokeHandleInPool)},
+   {CC "resolveMethod",                                CC "(" HS_RESOLVED_KLASS HS_RESOLVED_METHOD HS_RESOLVED_KLASS ")" HS_RESOLVED_METHOD, FN_PTR(resolveMethod)},
++  {CC "getSignaturePolymorphicHolders",               CC "()[" STRING,                                                                      FN_PTR(getSignaturePolymorphicHolders)},
+   {CC "getVtableIndexForInterfaceMethod",             CC "(" HS_RESOLVED_KLASS HS_RESOLVED_METHOD ")I",                                     FN_PTR(getVtableIndexForInterfaceMethod)},
+   {CC "getClassInitializer",                          CC "(" HS_RESOLVED_KLASS ")" HS_RESOLVED_METHOD,                                      FN_PTR(getClassInitializer)},
+   {CC "hasFinalizableSubclass",                       CC "(" HS_RESOLVED_KLASS ")Z",                                                        FN_PTR(hasFinalizableSubclass)},
+--- old/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaMethod.java	2016-08-20 09:55:42.000000000 +0200
++++ new/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaMethod.java	2016-08-20 09:55:42.000000000 +0200
+@@ -34,19 +34,16 @@
+ 
+ package jdk.vm.ci.runtime.test;
+ 
+-import jdk.vm.ci.meta.ConstantPool;
+-import jdk.vm.ci.meta.ExceptionHandler;
+-import jdk.vm.ci.meta.ResolvedJavaMethod;
+-import jdk.vm.ci.meta.ResolvedJavaType;
+-import org.junit.Assert;
+-import org.junit.Test;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertTrue;
+ 
+ import java.lang.annotation.Annotation;
+ import java.lang.annotation.ElementType;
+ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
+ import java.lang.annotation.Target;
+-import java.lang.invoke.MethodHandle;
+ import java.lang.reflect.Constructor;
+ import java.lang.reflect.Member;
+ import java.lang.reflect.Method;
+@@ -58,10 +55,13 @@
+ import java.util.Map;
+ import java.util.Set;
+ 
+-import static org.junit.Assert.assertEquals;
+-import static org.junit.Assert.assertFalse;
+-import static org.junit.Assert.assertNotNull;
+-import static org.junit.Assert.assertTrue;
++import org.junit.Assert;
++import org.junit.Test;
++
++import jdk.vm.ci.meta.ConstantPool;
++import jdk.vm.ci.meta.ExceptionHandler;
++import jdk.vm.ci.meta.ResolvedJavaMethod;
++import jdk.vm.ci.meta.ResolvedJavaType;
+ 
+ /**
+  * Tests for {@link ResolvedJavaMethod}.
+@@ -408,20 +408,6 @@
+         }
+     }
+ 
+-    @Test
+-    public void isSignaturePolymorphicTest() {
+-        ResolvedJavaType methodHandleType = metaAccess.lookupJavaType(MethodHandle.class);
+-        assertTrue(ResolvedJavaMethod.isSignaturePolymorphic(methodHandleType, "invokeExact", metaAccess));
+-        assertTrue(ResolvedJavaMethod.isSignaturePolymorphic(methodHandleType, "invoke", metaAccess));
+-        assertTrue(ResolvedJavaMethod.isSignaturePolymorphic(methodHandleType, "invokeBasic", metaAccess));
+-        assertTrue(ResolvedJavaMethod.isSignaturePolymorphic(methodHandleType, "linkToVirtual", metaAccess));
+-        assertTrue(ResolvedJavaMethod.isSignaturePolymorphic(methodHandleType, "linkToStatic", metaAccess));
+-        assertTrue(ResolvedJavaMethod.isSignaturePolymorphic(methodHandleType, "linkToSpecial", metaAccess));
+-        assertTrue(ResolvedJavaMethod.isSignaturePolymorphic(methodHandleType, "linkToInterface", metaAccess));
+-        assertFalse(ResolvedJavaMethod.isSignaturePolymorphic(methodHandleType, "type", metaAccess));
+-        assertFalse(ResolvedJavaMethod.isSignaturePolymorphic(metaAccess.lookupJavaType(Object.class), "toString", metaAccess));
+-    }
+-
+     /**
+      * All public non-final methods should be available in the vtable.
+      */

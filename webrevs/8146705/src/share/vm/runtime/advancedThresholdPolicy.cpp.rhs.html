@@ -1,0 +1,737 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2010, 2015, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #include "precompiled.hpp"
+  26 #include "code/codeCache.hpp"
+  27 #include "compiler/compileTask.hpp"
+  28 #include "runtime/advancedThresholdPolicy.hpp"
+  29 #include "runtime/simpleThresholdPolicy.inline.hpp"
+  30 
+  31 #ifdef TIERED
+  32 // Print an event.
+  33 void AdvancedThresholdPolicy::print_specific(EventType type, methodHandle mh, methodHandle imh,
+  34                                              int bci, CompLevel level) {
+  35   tty-&gt;print(" rate=");
+  36   if (mh-&gt;prev_time() == 0) tty-&gt;print("n/a");
+  37   else tty-&gt;print("%f", mh-&gt;rate());
+  38 
+  39   tty-&gt;print(" k=%.2lf,%.2lf", threshold_scale(CompLevel_full_profile, Tier3LoadFeedback),
+  40                                threshold_scale(CompLevel_full_optimization, Tier4LoadFeedback));
+  41 
+  42 }
+  43 
+  44 void AdvancedThresholdPolicy::initialize() {
+  45   // Turn on ergonomic compiler count selection
+  46   if (FLAG_IS_DEFAULT(CICompilerCountPerCPU) &amp;&amp; FLAG_IS_DEFAULT(CICompilerCount)) {
+  47     FLAG_SET_DEFAULT(CICompilerCountPerCPU, true);
+  48   }
+  49   int count = CICompilerCount;
+  50   if (CICompilerCountPerCPU) {
+  51     // Simple log n seems to grow too slowly for tiered, try something faster: log n * log log n
+  52     int log_cpu = log2_intptr(os::active_processor_count());
+  53     int loglog_cpu = log2_intptr(MAX2(log_cpu, 1));
+  54     count = MAX2(log_cpu * loglog_cpu, 1) * 3 / 2;
+  55   }
+  56 
+  57   set_c1_count(MAX2(count / 3, 1));
+  58   set_c2_count(MAX2(count - c1_count(), 1));
+  59   FLAG_SET_ERGO(intx, CICompilerCount, c1_count() + c2_count());
+  60 
+  61   // Some inlining tuning
+  62 #ifdef X86
+  63   if (FLAG_IS_DEFAULT(InlineSmallCode)) {
+  64     FLAG_SET_DEFAULT(InlineSmallCode, 2000);
+  65   }
+  66 #endif
+  67 
+  68 #if defined SPARC || defined AARCH64
+  69   if (FLAG_IS_DEFAULT(InlineSmallCode)) {
+  70     FLAG_SET_DEFAULT(InlineSmallCode, 2500);
+  71   }
+  72 #endif
+  73 
+  74   set_increase_threshold_at_ratio();
+  75   set_start_time(os::javaTimeMillis());
+  76 }
+  77 
+  78 // update_rate() is called from select_task() while holding a compile queue lock.
+  79 void AdvancedThresholdPolicy::update_rate(jlong t, Method* m) {
+  80   // Skip update if counters are absent.
+  81   // Can't allocate them since we are holding compile queue lock.
+  82   if (m-&gt;method_counters() == NULL)  return;
+  83 
+  84   if (is_old(m)) {
+  85     // We don't remove old methods from the queue,
+  86     // so we can just zero the rate.
+  87     m-&gt;set_rate(0);
+  88     return;
+  89   }
+  90 
+  91   // We don't update the rate if we've just came out of a safepoint.
+  92   // delta_s is the time since last safepoint in milliseconds.
+  93   jlong delta_s = t - SafepointSynchronize::end_of_last_safepoint();
+  94   jlong delta_t = t - (m-&gt;prev_time() != 0 ? m-&gt;prev_time() : start_time()); // milliseconds since the last measurement
+  95   // How many events were there since the last time?
+  96   int event_count = m-&gt;invocation_count() + m-&gt;backedge_count();
+  97   int delta_e = event_count - m-&gt;prev_event_count();
+  98 
+  99   // We should be running for at least 1ms.
+ 100   if (delta_s &gt;= TieredRateUpdateMinTime) {
+ 101     // And we must've taken the previous point at least 1ms before.
+ 102     if (delta_t &gt;= TieredRateUpdateMinTime &amp;&amp; delta_e &gt; 0) {
+ 103       m-&gt;set_prev_time(t);
+ 104       m-&gt;set_prev_event_count(event_count);
+ 105       m-&gt;set_rate((float)delta_e / (float)delta_t); // Rate is events per millisecond
+ 106     } else {
+ 107       if (delta_t &gt; TieredRateUpdateMaxTime &amp;&amp; delta_e == 0) {
+ 108         // If nothing happened for 25ms, zero the rate. Don't modify prev values.
+ 109         m-&gt;set_rate(0);
+ 110       }
+ 111     }
+ 112   }
+ 113 }
+ 114 
+ 115 // Check if this method has been stale from a given number of milliseconds.
+ 116 // See select_task().
+ 117 bool AdvancedThresholdPolicy::is_stale(jlong t, jlong timeout, Method* m) {
+ 118   jlong delta_s = t - SafepointSynchronize::end_of_last_safepoint();
+ 119   jlong delta_t = t - m-&gt;prev_time();
+ 120   if (delta_t &gt; timeout &amp;&amp; delta_s &gt; timeout) {
+ 121     int event_count = m-&gt;invocation_count() + m-&gt;backedge_count();
+ 122     int delta_e = event_count - m-&gt;prev_event_count();
+ 123     // Return true if there were no events.
+ 124     return delta_e == 0;
+ 125   }
+ 126   return false;
+ 127 }
+ 128 
+ 129 // We don't remove old methods from the compile queue even if they have
+ 130 // very low activity. See select_task().
+ 131 bool AdvancedThresholdPolicy::is_old(Method* method) {
+ 132   return method-&gt;invocation_count() &gt; 50000 || method-&gt;backedge_count() &gt; 500000;
+ 133 }
+ 134 
+ 135 double AdvancedThresholdPolicy::weight(Method* method) {
+ 136   return (double)(method-&gt;rate() + 1) *
+ 137     (method-&gt;invocation_count() + 1) * (method-&gt;backedge_count() + 1);
+ 138 }
+ 139 
+ 140 // Apply heuristics and return true if x should be compiled before y
+ 141 bool AdvancedThresholdPolicy::compare_methods(Method* x, Method* y) {
+ 142   if (x-&gt;highest_comp_level() &gt; y-&gt;highest_comp_level()) {
+ 143     // recompilation after deopt
+ 144     return true;
+ 145   } else
+ 146     if (x-&gt;highest_comp_level() == y-&gt;highest_comp_level()) {
+ 147       if (weight(x) &gt; weight(y)) {
+ 148         return true;
+ 149       }
+ 150     }
+ 151   return false;
+ 152 }
+ 153 
+ 154 // Is method profiled enough?
+ 155 bool AdvancedThresholdPolicy::is_method_profiled(Method* method) {
+ 156   MethodData* mdo = method-&gt;method_data();
+ 157   if (mdo != NULL) {
+ 158     int i = mdo-&gt;invocation_count_delta();
+ 159     int b = mdo-&gt;backedge_count_delta();
+ 160     return call_predicate_helper&lt;CompLevel_full_profile&gt;(i, b, 1, method);
+ 161   }
+ 162   return false;
+ 163 }
+ 164 
+ 165 // Called with the queue locked and with at least one element
+ 166 CompileTask* AdvancedThresholdPolicy::select_task(CompileQueue* compile_queue) {
+ 167 #if INCLUDE_JVMCI
+<a name="1" id="anc1"></a><span class="changed"> 168   CompileTask *max_blocking_task = NULL;</span>
+ 169 #endif
+ 170   CompileTask *max_task = NULL;
+ 171   Method* max_method = NULL;
+ 172   jlong t = os::javaTimeMillis();
+ 173   // Iterate through the queue and find a method with a maximum rate.
+ 174   for (CompileTask* task = compile_queue-&gt;first(); task != NULL;) {
+ 175     CompileTask* next_task = task-&gt;next();
+ 176     Method* method = task-&gt;method();
+ 177     update_rate(t, method);
+ 178     if (max_task == NULL) {
+ 179       max_task = task;
+ 180       max_method = method;
+ 181     } else {
+ 182       // If a method has been stale for some time, remove it from the queue.
+ 183       if (is_stale(t, TieredCompileTaskTimeout, method) &amp;&amp; !is_old(method)) {
+ 184         if (PrintTieredEvents) {
+ 185           print_event(REMOVE_FROM_QUEUE, method, method, task-&gt;osr_bci(), (CompLevel)task-&gt;comp_level());
+ 186         }
+ 187         task-&gt;log_task_dequeued("stale");
+ 188         compile_queue-&gt;remove_and_mark_stale(task);
+ 189         method-&gt;clear_queued_for_compilation();
+ 190         task = next_task;
+ 191         continue;
+ 192       }
+ 193 
+ 194       // Select a method with a higher rate
+ 195       if (compare_methods(method, max_method)) {
+ 196         max_task = task;
+ 197         max_method = method;
+ 198       }
+ 199     }
+<a name="2" id="anc2"></a><span class="new"> 200 #ifdef INCLUDE_JVMCI</span>
+<span class="new"> 201     if (UseJVMCICompiler &amp;&amp; task-&gt;is_blocking()) {</span>
+<span class="new"> 202       if (max_blocking_task == NULL || compare_methods(method, max_blocking_task-&gt;method())) {</span>
+<span class="new"> 203         max_blocking_task = task;</span>
+<span class="new"> 204       }</span>
+<span class="new"> 205     }</span>
+<span class="new"> 206 #endif</span>
+ 207     task = next_task;
+ 208   }
+ 209 
+ 210 #if INCLUDE_JVMCI
+ 211   if (UseJVMCICompiler) {
+<a name="3" id="anc3"></a><span class="changed"> 212     if (max_blocking_task != NULL) {</span>
+<span class="changed"> 213       // In blocking compilation mode, the CompileBroker will make</span>
+<span class="changed"> 214       // compilations submitted by a JVMCI compiler thread non-blocking. These</span>
+<span class="changed"> 215       // compilations should be scheduled after all blocking compilations</span>
+<span class="changed"> 216       // to service non-compiler related compilations sooner and reduce the</span>
+<span class="changed"> 217       // chance of such compilations timing out.</span>
+<span class="changed"> 218       max_task = max_blocking_task;</span>
+ 219       max_method = max_task-&gt;method();
+ 220     }
+ 221   }
+ 222 #endif
+ 223 
+ 224   if (max_task-&gt;comp_level() == CompLevel_full_profile &amp;&amp; TieredStopAtLevel &gt; CompLevel_full_profile
+ 225       &amp;&amp; is_method_profiled(max_method)) {
+ 226     max_task-&gt;set_comp_level(CompLevel_limited_profile);
+ 227     if (PrintTieredEvents) {
+ 228       print_event(UPDATE_IN_QUEUE, max_method, max_method, max_task-&gt;osr_bci(), (CompLevel)max_task-&gt;comp_level());
+ 229     }
+ 230   }
+ 231 
+ 232   return max_task;
+ 233 }
+ 234 
+ 235 double AdvancedThresholdPolicy::threshold_scale(CompLevel level, int feedback_k) {
+ 236   double queue_size = CompileBroker::queue_size(level);
+ 237   int comp_count = compiler_count(level);
+ 238   double k = queue_size / (feedback_k * comp_count) + 1;
+ 239 
+ 240   // Increase C1 compile threshold when the code cache is filled more
+ 241   // than specified by IncreaseFirstTierCompileThresholdAt percentage.
+ 242   // The main intention is to keep enough free space for C2 compiled code
+ 243   // to achieve peak performance if the code cache is under stress.
+ 244   if ((TieredStopAtLevel == CompLevel_full_optimization) &amp;&amp; (level != CompLevel_full_optimization))  {
+ 245     double current_reverse_free_ratio = CodeCache::reverse_free_ratio(CodeCache::get_code_blob_type(level));
+ 246     if (current_reverse_free_ratio &gt; _increase_threshold_at_ratio) {
+ 247       k *= exp(current_reverse_free_ratio - _increase_threshold_at_ratio);
+ 248     }
+ 249   }
+ 250   return k;
+ 251 }
+ 252 
+ 253 // Call and loop predicates determine whether a transition to a higher
+ 254 // compilation level should be performed (pointers to predicate functions
+ 255 // are passed to common()).
+ 256 // Tier?LoadFeedback is basically a coefficient that determines of
+ 257 // how many methods per compiler thread can be in the queue before
+ 258 // the threshold values double.
+ 259 bool AdvancedThresholdPolicy::loop_predicate(int i, int b, CompLevel cur_level, Method* method) {
+ 260   switch(cur_level) {
+ 261   case CompLevel_none:
+ 262   case CompLevel_limited_profile: {
+ 263     double k = threshold_scale(CompLevel_full_profile, Tier3LoadFeedback);
+ 264     return loop_predicate_helper&lt;CompLevel_none&gt;(i, b, k, method);
+ 265   }
+ 266   case CompLevel_full_profile: {
+ 267     double k = threshold_scale(CompLevel_full_optimization, Tier4LoadFeedback);
+ 268     return loop_predicate_helper&lt;CompLevel_full_profile&gt;(i, b, k, method);
+ 269   }
+ 270   default:
+ 271     return true;
+ 272   }
+ 273 }
+ 274 
+ 275 bool AdvancedThresholdPolicy::call_predicate(int i, int b, CompLevel cur_level, Method* method) {
+ 276   switch(cur_level) {
+ 277   case CompLevel_none:
+ 278   case CompLevel_limited_profile: {
+ 279     double k = threshold_scale(CompLevel_full_profile, Tier3LoadFeedback);
+ 280     return call_predicate_helper&lt;CompLevel_none&gt;(i, b, k, method);
+ 281   }
+ 282   case CompLevel_full_profile: {
+ 283     double k = threshold_scale(CompLevel_full_optimization, Tier4LoadFeedback);
+ 284     return call_predicate_helper&lt;CompLevel_full_profile&gt;(i, b, k, method);
+ 285   }
+ 286   default:
+ 287     return true;
+ 288   }
+ 289 }
+ 290 
+ 291 // If a method is old enough and is still in the interpreter we would want to
+ 292 // start profiling without waiting for the compiled method to arrive.
+ 293 // We also take the load on compilers into the account.
+ 294 bool AdvancedThresholdPolicy::should_create_mdo(Method* method, CompLevel cur_level) {
+ 295   if (cur_level == CompLevel_none &amp;&amp;
+ 296       CompileBroker::queue_size(CompLevel_full_optimization) &lt;=
+ 297       Tier3DelayOn * compiler_count(CompLevel_full_optimization)) {
+ 298     int i = method-&gt;invocation_count();
+ 299     int b = method-&gt;backedge_count();
+ 300     double k = Tier0ProfilingStartPercentage / 100.0;
+ 301     return call_predicate_helper&lt;CompLevel_none&gt;(i, b, k, method) || loop_predicate_helper&lt;CompLevel_none&gt;(i, b, k, method);
+ 302   }
+ 303   return false;
+ 304 }
+ 305 
+ 306 // Inlining control: if we're compiling a profiled method with C1 and the callee
+ 307 // is known to have OSRed in a C2 version, don't inline it.
+ 308 bool AdvancedThresholdPolicy::should_not_inline(ciEnv* env, ciMethod* callee) {
+ 309   CompLevel comp_level = (CompLevel)env-&gt;comp_level();
+ 310   if (comp_level == CompLevel_full_profile ||
+ 311       comp_level == CompLevel_limited_profile) {
+ 312     return callee-&gt;highest_osr_comp_level() == CompLevel_full_optimization;
+ 313   }
+ 314   return false;
+ 315 }
+ 316 
+ 317 // Create MDO if necessary.
+ 318 void AdvancedThresholdPolicy::create_mdo(methodHandle mh, JavaThread* THREAD) {
+ 319   if (mh-&gt;is_native() ||
+ 320       mh-&gt;is_abstract() ||
+ 321       mh-&gt;is_accessor() ||
+ 322       mh-&gt;is_constant_getter()) {
+ 323     return;
+ 324   }
+ 325   if (mh-&gt;method_data() == NULL) {
+ 326     Method::build_interpreter_method_data(mh, CHECK_AND_CLEAR);
+ 327   }
+ 328 }
+ 329 
+ 330 
+ 331 /*
+ 332  * Method states:
+ 333  *   0 - interpreter (CompLevel_none)
+ 334  *   1 - pure C1 (CompLevel_simple)
+ 335  *   2 - C1 with invocation and backedge counting (CompLevel_limited_profile)
+ 336  *   3 - C1 with full profiling (CompLevel_full_profile)
+ 337  *   4 - C2 (CompLevel_full_optimization)
+ 338  *
+ 339  * Common state transition patterns:
+ 340  * a. 0 -&gt; 3 -&gt; 4.
+ 341  *    The most common path. But note that even in this straightforward case
+ 342  *    profiling can start at level 0 and finish at level 3.
+ 343  *
+ 344  * b. 0 -&gt; 2 -&gt; 3 -&gt; 4.
+ 345  *    This case occurs when the load on C2 is deemed too high. So, instead of transitioning
+ 346  *    into state 3 directly and over-profiling while a method is in the C2 queue we transition to
+ 347  *    level 2 and wait until the load on C2 decreases. This path is disabled for OSRs.
+ 348  *
+ 349  * c. 0 -&gt; (3-&gt;2) -&gt; 4.
+ 350  *    In this case we enqueue a method for compilation at level 3, but the C1 queue is long enough
+ 351  *    to enable the profiling to fully occur at level 0. In this case we change the compilation level
+ 352  *    of the method to 2 while the request is still in-queue, because it'll allow it to run much faster
+ 353  *    without full profiling while c2 is compiling.
+ 354  *
+ 355  * d. 0 -&gt; 3 -&gt; 1 or 0 -&gt; 2 -&gt; 1.
+ 356  *    After a method was once compiled with C1 it can be identified as trivial and be compiled to
+ 357  *    level 1. These transition can also occur if a method can't be compiled with C2 but can with C1.
+ 358  *
+ 359  * e. 0 -&gt; 4.
+ 360  *    This can happen if a method fails C1 compilation (it will still be profiled in the interpreter)
+ 361  *    or because of a deopt that didn't require reprofiling (compilation won't happen in this case because
+ 362  *    the compiled version already exists).
+ 363  *
+ 364  * Note that since state 0 can be reached from any other state via deoptimization different loops
+ 365  * are possible.
+ 366  *
+ 367  */
+ 368 
+ 369 // Common transition function. Given a predicate determines if a method should transition to another level.
+ 370 CompLevel AdvancedThresholdPolicy::common(Predicate p, Method* method, CompLevel cur_level, bool disable_feedback) {
+ 371   CompLevel next_level = cur_level;
+ 372   int i = method-&gt;invocation_count();
+ 373   int b = method-&gt;backedge_count();
+ 374 
+ 375   if (is_trivial(method)) {
+ 376     next_level = CompLevel_simple;
+ 377   } else {
+ 378     switch(cur_level) {
+ 379     case CompLevel_none:
+ 380       // If we were at full profile level, would we switch to full opt?
+ 381       if (common(p, method, CompLevel_full_profile, disable_feedback) == CompLevel_full_optimization) {
+ 382         next_level = CompLevel_full_optimization;
+ 383       } else if ((this-&gt;*p)(i, b, cur_level, method)) {
+ 384 #if INCLUDE_JVMCI
+ 385         if (UseJVMCICompiler) {
+ 386           // Since JVMCI takes a while to warm up, its queue inevitably backs up during
+ 387           // early VM execution.
+ 388           next_level = CompLevel_full_profile;
+ 389           break;
+ 390         }
+ 391 #endif
+ 392         // C1-generated fully profiled code is about 30% slower than the limited profile
+ 393         // code that has only invocation and backedge counters. The observation is that
+ 394         // if C2 queue is large enough we can spend too much time in the fully profiled code
+ 395         // while waiting for C2 to pick the method from the queue. To alleviate this problem
+ 396         // we introduce a feedback on the C2 queue size. If the C2 queue is sufficiently long
+ 397         // we choose to compile a limited profiled version and then recompile with full profiling
+ 398         // when the load on C2 goes down.
+ 399         if (!disable_feedback &amp;&amp; CompileBroker::queue_size(CompLevel_full_optimization) &gt;
+ 400             Tier3DelayOn * compiler_count(CompLevel_full_optimization)) {
+ 401           next_level = CompLevel_limited_profile;
+ 402         } else {
+ 403           next_level = CompLevel_full_profile;
+ 404         }
+ 405       }
+ 406       break;
+ 407     case CompLevel_limited_profile:
+ 408       if (is_method_profiled(method)) {
+ 409         // Special case: we got here because this method was fully profiled in the interpreter.
+ 410         next_level = CompLevel_full_optimization;
+ 411       } else {
+ 412         MethodData* mdo = method-&gt;method_data();
+ 413         if (mdo != NULL) {
+ 414           if (mdo-&gt;would_profile()) {
+ 415             if (disable_feedback || (CompileBroker::queue_size(CompLevel_full_optimization) &lt;=
+ 416                                      Tier3DelayOff * compiler_count(CompLevel_full_optimization) &amp;&amp;
+ 417                                      (this-&gt;*p)(i, b, cur_level, method))) {
+ 418               next_level = CompLevel_full_profile;
+ 419             }
+ 420           } else {
+ 421             next_level = CompLevel_full_optimization;
+ 422           }
+ 423         }
+ 424       }
+ 425       break;
+ 426     case CompLevel_full_profile:
+ 427       {
+ 428         MethodData* mdo = method-&gt;method_data();
+ 429         if (mdo != NULL) {
+ 430           if (mdo-&gt;would_profile()) {
+ 431             int mdo_i = mdo-&gt;invocation_count_delta();
+ 432             int mdo_b = mdo-&gt;backedge_count_delta();
+ 433             if ((this-&gt;*p)(mdo_i, mdo_b, cur_level, method)) {
+ 434               next_level = CompLevel_full_optimization;
+ 435             }
+ 436           } else {
+ 437             next_level = CompLevel_full_optimization;
+ 438           }
+ 439         }
+ 440       }
+ 441       break;
+ 442     }
+ 443   }
+ 444   return MIN2(next_level, (CompLevel)TieredStopAtLevel);
+ 445 }
+ 446 
+ 447 // Determine if a method should be compiled with a normal entry point at a different level.
+ 448 CompLevel AdvancedThresholdPolicy::call_event(Method* method, CompLevel cur_level) {
+ 449   CompLevel osr_level = MIN2((CompLevel) method-&gt;highest_osr_comp_level(),
+ 450                              common(&amp;AdvancedThresholdPolicy::loop_predicate, method, cur_level, true));
+ 451   CompLevel next_level = common(&amp;AdvancedThresholdPolicy::call_predicate, method, cur_level);
+ 452 
+ 453   // If OSR method level is greater than the regular method level, the levels should be
+ 454   // equalized by raising the regular method level in order to avoid OSRs during each
+ 455   // invocation of the method.
+ 456   if (osr_level == CompLevel_full_optimization &amp;&amp; cur_level == CompLevel_full_profile) {
+ 457     MethodData* mdo = method-&gt;method_data();
+ 458     guarantee(mdo != NULL, "MDO should not be NULL");
+ 459     if (mdo-&gt;invocation_count() &gt;= 1) {
+ 460       next_level = CompLevel_full_optimization;
+ 461     }
+ 462   } else {
+ 463     next_level = MAX2(osr_level, next_level);
+ 464   }
+ 465   return next_level;
+ 466 }
+ 467 
+ 468 // Determine if we should do an OSR compilation of a given method.
+ 469 CompLevel AdvancedThresholdPolicy::loop_event(Method* method, CompLevel cur_level) {
+ 470   CompLevel next_level = common(&amp;AdvancedThresholdPolicy::loop_predicate, method, cur_level, true);
+ 471   if (cur_level == CompLevel_none) {
+ 472     // If there is a live OSR method that means that we deopted to the interpreter
+ 473     // for the transition.
+ 474     CompLevel osr_level = MIN2((CompLevel)method-&gt;highest_osr_comp_level(), next_level);
+ 475     if (osr_level &gt; CompLevel_none) {
+ 476       return osr_level;
+ 477     }
+ 478   }
+ 479   return next_level;
+ 480 }
+ 481 
+ 482 // Update the rate and submit compile
+ 483 void AdvancedThresholdPolicy::submit_compile(const methodHandle&amp; mh, int bci, CompLevel level, JavaThread* thread) {
+ 484   int hot_count = (bci == InvocationEntryBci) ? mh-&gt;invocation_count() : mh-&gt;backedge_count();
+ 485   update_rate(os::javaTimeMillis(), mh());
+ 486   CompileBroker::compile_method(mh, bci, level, mh, hot_count, "tiered", thread);
+ 487 }
+ 488 
+ 489 // Handle the invocation event.
+ 490 void AdvancedThresholdPolicy::method_invocation_event(const methodHandle&amp; mh, const methodHandle&amp; imh,
+ 491                                                       CompLevel level, nmethod* nm, JavaThread* thread) {
+ 492   if (should_create_mdo(mh(), level)) {
+ 493     create_mdo(mh, thread);
+ 494   }
+ 495   if (is_compilation_enabled() &amp;&amp; !CompileBroker::compilation_is_in_queue(mh)) {
+ 496     CompLevel next_level = call_event(mh(), level);
+ 497     if (next_level != level) {
+ 498       compile(mh, InvocationEntryBci, next_level, thread);
+ 499     }
+ 500   }
+ 501 }
+ 502 
+ 503 // Handle the back branch event. Notice that we can compile the method
+ 504 // with a regular entry from here.
+ 505 void AdvancedThresholdPolicy::method_back_branch_event(const methodHandle&amp; mh, const methodHandle&amp; imh,
+ 506                                                        int bci, CompLevel level, nmethod* nm, JavaThread* thread) {
+ 507   if (should_create_mdo(mh(), level)) {
+ 508     create_mdo(mh, thread);
+ 509   }
+ 510   // Check if MDO should be created for the inlined method
+ 511   if (should_create_mdo(imh(), level)) {
+ 512     create_mdo(imh, thread);
+ 513   }
+ 514 
+ 515   if (is_compilation_enabled()) {
+ 516     CompLevel next_osr_level = loop_event(imh(), level);
+ 517     CompLevel max_osr_level = (CompLevel)imh-&gt;highest_osr_comp_level();
+ 518     // At the very least compile the OSR version
+ 519     if (!CompileBroker::compilation_is_in_queue(imh) &amp;&amp; (next_osr_level != level)) {
+ 520       compile(imh, bci, next_osr_level, thread);
+ 521     }
+ 522 
+ 523     // Use loop event as an opportunity to also check if there's been
+ 524     // enough calls.
+ 525     CompLevel cur_level, next_level;
+ 526     if (mh() != imh()) { // If there is an enclosing method
+ 527       guarantee(nm != NULL, "Should have nmethod here");
+ 528       cur_level = comp_level(mh());
+ 529       next_level = call_event(mh(), cur_level);
+ 530 
+ 531       if (max_osr_level == CompLevel_full_optimization) {
+ 532         // The inlinee OSRed to full opt, we need to modify the enclosing method to avoid deopts
+ 533         bool make_not_entrant = false;
+ 534         if (nm-&gt;is_osr_method()) {
+ 535           // This is an osr method, just make it not entrant and recompile later if needed
+ 536           make_not_entrant = true;
+ 537         } else {
+ 538           if (next_level != CompLevel_full_optimization) {
+ 539             // next_level is not full opt, so we need to recompile the
+ 540             // enclosing method without the inlinee
+ 541             cur_level = CompLevel_none;
+ 542             make_not_entrant = true;
+ 543           }
+ 544         }
+ 545         if (make_not_entrant) {
+ 546           if (PrintTieredEvents) {
+ 547             int osr_bci = nm-&gt;is_osr_method() ? nm-&gt;osr_entry_bci() : InvocationEntryBci;
+ 548             print_event(MAKE_NOT_ENTRANT, mh(), mh(), osr_bci, level);
+ 549           }
+ 550           nm-&gt;make_not_entrant();
+ 551         }
+ 552       }
+ 553       if (!CompileBroker::compilation_is_in_queue(mh)) {
+ 554         // Fix up next_level if necessary to avoid deopts
+ 555         if (next_level == CompLevel_limited_profile &amp;&amp; max_osr_level == CompLevel_full_profile) {
+ 556           next_level = CompLevel_full_profile;
+ 557         }
+ 558         if (cur_level != next_level) {
+ 559           compile(mh, InvocationEntryBci, next_level, thread);
+ 560         }
+ 561       }
+ 562     } else {
+ 563       cur_level = comp_level(imh());
+ 564       next_level = call_event(imh(), cur_level);
+ 565       if (!CompileBroker::compilation_is_in_queue(imh) &amp;&amp; (next_level != cur_level)) {
+ 566         compile(imh, InvocationEntryBci, next_level, thread);
+ 567       }
+ 568     }
+ 569   }
+ 570 }
+ 571 
+ 572 #endif // TIERED
+<a name="4" id="anc4"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="4" type="hidden" /></form></body></html>

@@ -1,0 +1,223 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>hotspot Udiff src/share/vm/compiler/compileBroker.cpp</title>
+
+<style type="text/css" media="screen">
+span.new {
+    color: blue;
+    font-weight: normal;
+}
+</style>
+
+</head>
+<body id="SUNWwebrev">
+<h2>src/share/vm/compiler/compileBroker.cpp</h2>
+        <a class="print" href="javascript:print()">Print this page</a>
+<pre></pre>
+        <pre>
+</pre><hr /><pre>
+<span class="newmarker">@@ -225,10 +225,15 @@</span>
+ }
+ 
+ CompileTaskWrapper::CompileTaskWrapper(CompileTask* task) {
+   CompilerThread* thread = CompilerThread::current();
+   thread-&gt;set_task(task);
+<span class="new">+#if INCLUDE_JVMCI</span>
+<span class="new">+  if (task-&gt;is_blocking() &amp;&amp; CompileBroker::compiler(task-&gt;comp_level())-&gt;is_jvmci()) {</span>
+<span class="new">+    task-&gt;set_jvmci_compiler_thread(thread);</span>
+<span class="new">+  }</span>
+<span class="new">+#endif</span>
+   CompileLog*     log  = thread-&gt;log();
+   if (log != NULL)  task-&gt;log_task_start(log);
+ }
+ 
+ CompileTaskWrapper::~CompileTaskWrapper() {
+</pre><hr /><pre>
+<span class="newmarker">@@ -243,15 +248,17 @@</span>
+     bool free_task = false;
+     {
+       MutexLocker notifier(task-&gt;lock(), thread);
+       task-&gt;mark_complete();
+ #if INCLUDE_JVMCI
+<span class="removed">-      if (CompileBroker::compiler(task-&gt;comp_level())-&gt;is_jvmci() &amp;&amp;</span>
+<span class="removed">-        !task-&gt;has_waiter()) {</span>
+<span class="new">+      if (CompileBroker::compiler(task-&gt;comp_level())-&gt;is_jvmci()) {</span>
+<span class="new">+        if (!task-&gt;has_waiter()) {</span>
+         // The waiting thread timed out and thus did not free the task.
+         free_task = true;
+       }
+<span class="new">+        task-&gt;set_jvmci_compiler_thread(NULL);</span>
+<span class="new">+      }</span>
+ #endif
+       if (!free_task) {
+         // Notify the waiting thread that the compilation has completed
+         // so that it can free the task.
+         task-&gt;lock()-&gt;notify_all();
+</pre><hr /><pre>
+<span class="newmarker">@@ -1330,15 +1337,60 @@</span>
+                        blocking);
+   queue-&gt;add(new_task);
+   return new_task;
+ }
+ 
+<span class="removed">-// 1 second should be long enough to complete most JVMCI compilations</span>
+<span class="removed">-// and not too long to stall a blocking JVMCI compilation that</span>
+<span class="removed">-// is trying to acquire a lock held by the app thread that submitted the</span>
+<span class="removed">-// compilation.</span>
+<span class="removed">-static const long BLOCKING_JVMCI_COMPILATION_TIMEOUT = 1000;</span>
+<span class="new">+#if INCLUDE_JVMCI</span>
+<span class="new">+// The number of milliseconds to wait before checking if the</span>
+<span class="new">+// JVMCI compiler thread is blocked.</span>
+<span class="new">+static const long BLOCKING_JVMCI_COMPILATION_WAIT_TIMESLICE = 500;</span>
+<span class="new">+</span>
+<span class="new">+// The number of successive times the above check is allowed to</span>
+<span class="new">+// see a blocked JVMCI compiler thread before unblocking the</span>
+<span class="new">+// thread waiting for the compilation to finish.</span>
+<span class="new">+static const int BLOCKING_JVMCI_COMPILATION_WAIT_TO_UNBLOCK_ATTEMPTS = 5;</span>
+<span class="new">+</span>
+<span class="new">+/**</span>
+<span class="new">+ * Waits for a JVMCI compiler to complete a given task. This thread</span>
+<span class="new">+ * waits until either the task completes or it sees the JVMCI compiler</span>
+<span class="new">+ * thread is blocked for N consecutive milliseconds where N is</span>
+<span class="new">+ * BLOCKING_JVMCI_COMPILATION_WAIT_TIMESLICE *</span>
+<span class="new">+ * BLOCKING_JVMCI_COMPILATION_WAIT_TO_UNBLOCK_ATTEMPTS.</span>
+<span class="new">+ *</span>
+<span class="new">+ * @return true if this thread needs to free/recycle the task</span>
+<span class="new">+ */</span>
+<span class="new">+bool CompileBroker::wait_for_jvmci_completion(CompileTask* task, JavaThread* thread) {</span>
+<span class="new">+  MutexLocker waiter(task-&gt;lock(), thread);</span>
+<span class="new">+  int consecutively_blocked = 0;</span>
+<span class="new">+  while (task-&gt;lock()-&gt;wait(!Mutex::_no_safepoint_check_flag, BLOCKING_JVMCI_COMPILATION_WAIT_TIMESLICE)) {</span>
+<span class="new">+    CompilerThread* jvmci_compiler_thread = task-&gt;jvmci_compiler_thread();</span>
+<span class="new">+    if (jvmci_compiler_thread != NULL) {</span>
+<span class="new">+      JavaThreadState state;</span>
+<span class="new">+      {</span>
+<span class="new">+        // A JVMCI compiler thread should not disappear at this point</span>
+<span class="new">+        // but let's be extra safe.</span>
+<span class="new">+        MutexLocker mu(Threads_lock, thread);</span>
+<span class="new">+        state = jvmci_compiler_thread-&gt;thread_state();</span>
+<span class="new">+      }</span>
+<span class="new">+      if (state == _thread_blocked) {</span>
+<span class="new">+        if (++consecutively_blocked == BLOCKING_JVMCI_COMPILATION_WAIT_TO_UNBLOCK_ATTEMPTS) {</span>
+<span class="new">+          if (PrintCompilation) {</span>
+<span class="new">+            task-&gt;print(tty, "wait for blocking compilation timed out");</span>
+<span class="new">+          }</span>
+<span class="new">+          break;</span>
+<span class="new">+        }</span>
+<span class="new">+      } else {</span>
+<span class="new">+        consecutively_blocked = 0;</span>
+<span class="new">+      }</span>
+<span class="new">+    } else {</span>
+<span class="new">+      // Still waiting on JVMCI compiler queue</span>
+<span class="new">+    }</span>
+<span class="new">+  }</span>
+<span class="new">+  task-&gt;clear_waiter();</span>
+<span class="new">+  return task-&gt;is_complete();</span>
+<span class="new">+}</span>
+<span class="new">+#endif</span>
+ 
+ /**
+  *  Wait for the compilation task to complete.
+  */
+ void CompileBroker::wait_for_completion(CompileTask* task) {
+</pre><hr /><pre>
+<span class="newmarker">@@ -1354,20 +1406,11 @@</span>
+ 
+   methodHandle method(thread, task-&gt;method());
+   bool free_task;
+ #if INCLUDE_JVMCI
+   if (compiler(task-&gt;comp_level())-&gt;is_jvmci()) {
+<span class="removed">-    MutexLocker waiter(task-&gt;lock(), thread);</span>
+<span class="removed">-    // No need to check if compilation has completed - just</span>
+<span class="removed">-    // rely on the time out. The JVMCI compiler thread will</span>
+<span class="removed">-    // recycle the CompileTask.</span>
+<span class="removed">-    task-&gt;lock()-&gt;wait(!Mutex::_no_safepoint_check_flag, BLOCKING_JVMCI_COMPILATION_TIMEOUT);</span>
+<span class="removed">-    // If the compilation completes while has_waiter is true then</span>
+<span class="removed">-    // this thread is responsible for freeing the task.  Otherwise</span>
+<span class="removed">-    // the compiler thread will free the task.</span>
+<span class="removed">-    task-&gt;clear_waiter();</span>
+<span class="removed">-    free_task = task-&gt;is_complete();</span>
+<span class="new">+    free_task = wait_for_jvmci_completion(task, thread);</span>
+   } else
+ #endif
+   {
+     MutexLocker waiter(task-&gt;lock(), thread);
+     free_task = true;
+</pre></body></html>
+

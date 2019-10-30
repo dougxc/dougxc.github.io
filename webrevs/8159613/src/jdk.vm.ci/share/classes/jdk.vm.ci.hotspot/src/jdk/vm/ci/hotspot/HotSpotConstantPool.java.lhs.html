@@ -1,0 +1,890 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../../../../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2011, 2015, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package jdk.vm.ci.hotspot;
+  24 
+  25 import static jdk.vm.ci.hotspot.CompilerToVM.compilerToVM;
+  26 import static jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.runtime;
+  27 import static jdk.vm.ci.hotspot.HotSpotVMConfig.config;
+  28 import static jdk.vm.ci.hotspot.UnsafeAccess.UNSAFE;
+  29 
+  30 import java.lang.invoke.MethodHandle;
+  31 
+  32 import jdk.vm.ci.common.JVMCIError;
+  33 import jdk.vm.ci.meta.ConstantPool;
+  34 import jdk.vm.ci.meta.JavaConstant;
+  35 import jdk.vm.ci.meta.JavaField;
+  36 import jdk.vm.ci.meta.JavaMethod;
+  37 import jdk.vm.ci.meta.JavaType;
+  38 import jdk.vm.ci.meta.ResolvedJavaMethod;
+  39 import jdk.vm.ci.meta.ResolvedJavaType;
+  40 import jdk.vm.ci.meta.Signature;
+  41 
+  42 /**
+  43  * Implementation of {@link ConstantPool} for HotSpot.
+  44  */
+  45 final class HotSpotConstantPool implements ConstantPool, MetaspaceWrapperObject {
+  46 
+  47     /**
+  48      * Subset of JVM bytecode opcodes used by {@link HotSpotConstantPool}.
+  49      */
+  50     public static class Bytecodes {
+  51         public static final int LDC = 18; // 0x12
+  52         public static final int LDC_W = 19; // 0x13
+  53         public static final int LDC2_W = 20; // 0x14
+  54         public static final int GETSTATIC = 178; // 0xB2
+  55         public static final int PUTSTATIC = 179; // 0xB3
+  56         public static final int GETFIELD = 180; // 0xB4
+  57         public static final int PUTFIELD = 181; // 0xB5
+  58         public static final int INVOKEVIRTUAL = 182; // 0xB6
+  59         public static final int INVOKESPECIAL = 183; // 0xB7
+  60         public static final int INVOKESTATIC = 184; // 0xB8
+  61         public static final int INVOKEINTERFACE = 185; // 0xB9
+  62         public static final int INVOKEDYNAMIC = 186; // 0xBA
+  63         public static final int NEW = 187; // 0xBB
+  64         public static final int NEWARRAY = 188; // 0xBC
+  65         public static final int ANEWARRAY = 189; // 0xBD
+  66         public static final int CHECKCAST = 192; // 0xC0
+  67         public static final int INSTANCEOF = 193; // 0xC1
+  68         public static final int MULTIANEWARRAY = 197; // 0xC5
+  69 
+  70         static boolean isInvoke(int opcode) {
+  71             switch (opcode) {
+  72                 case INVOKEVIRTUAL:
+  73                 case INVOKESPECIAL:
+  74                 case INVOKESTATIC:
+  75                 case INVOKEINTERFACE:
+  76                 case INVOKEDYNAMIC:
+  77                     return true;
+  78                 default:
+  79                     return false;
+  80             }
+  81         }
+  82 
+  83         /**
+  84          * See: {@code Rewriter::maybe_rewrite_invokehandle}.
+  85          */
+  86         static boolean isInvokeHandleAlias(int opcode) {
+  87             switch (opcode) {
+  88                 case INVOKEVIRTUAL:
+  89                 case INVOKESPECIAL:
+  90                     return true;
+  91                 default:
+  92                     return false;
+  93             }
+  94         }
+  95     }
+  96 
+  97     /**
+  98      * Enum of all {@code JVM_CONSTANT} constants used in the VM. This includes the public and
+  99      * internal ones.
+ 100      */
+ 101     private enum JVM_CONSTANT {
+ 102         // @formatter:off
+ 103         Utf8(config().jvmConstantUtf8),
+ 104         Integer(config().jvmConstantInteger),
+ 105         Long(config().jvmConstantLong),
+ 106         Float(config().jvmConstantFloat),
+ 107         Double(config().jvmConstantDouble),
+ 108         Class(config().jvmConstantClass),
+ 109         UnresolvedClass(config().jvmConstantUnresolvedClass),
+ 110         UnresolvedClassInError(config().jvmConstantUnresolvedClassInError),
+ 111         String(config().jvmConstantString),
+ 112         Fieldref(config().jvmConstantFieldref),
+ 113         MethodRef(config().jvmConstantMethodref),
+ 114         InterfaceMethodref(config().jvmConstantInterfaceMethodref),
+ 115         NameAndType(config().jvmConstantNameAndType),
+ 116         MethodHandle(config().jvmConstantMethodHandle),
+ 117         MethodHandleInError(config().jvmConstantMethodHandleInError),
+ 118         MethodType(config().jvmConstantMethodType),
+ 119         MethodTypeInError(config().jvmConstantMethodTypeInError),
+ 120         InvokeDynamic(config().jvmConstantInvokeDynamic);
+ 121         // @formatter:on
+ 122 
+ 123         private final int tag;
+ 124 
+ 125         private static final int ExternalMax = config().jvmConstantExternalMax;
+ 126         private static final int InternalMin = config().jvmConstantInternalMin;
+ 127         private static final int InternalMax = config().jvmConstantInternalMax;
+ 128 
+ 129         JVM_CONSTANT(int tag) {
+ 130             this.tag = tag;
+ 131         }
+ 132 
+ 133         /**
+ 134          * Maps JVM_CONSTANT tags to {@link JVM_CONSTANT} values. Using a separate class for lazy
+ 135          * initialization.
+ 136          */
+ 137         static class TagValueMap {
+ 138             private static final JVM_CONSTANT[] table = new JVM_CONSTANT[ExternalMax + 1 + (InternalMax - InternalMin) + 1];
+ 139 
+ 140             static {
+ 141                 assert InternalMin &gt; ExternalMax;
+ 142                 for (JVM_CONSTANT e : values()) {
+ 143                     table[indexOf(e.tag)] = e;
+ 144                 }
+ 145             }
+ 146 
+ 147             private static int indexOf(int tag) {
+ 148                 if (tag &gt;= InternalMin) {
+ 149                     return tag - InternalMin + ExternalMax + 1;
+ 150                 } else {
+ 151                     assert tag &lt;= ExternalMax;
+ 152                 }
+ 153                 return tag;
+ 154             }
+ 155 
+ 156             static JVM_CONSTANT get(int tag) {
+ 157                 JVM_CONSTANT res = table[indexOf(tag)];
+ 158                 if (res != null) {
+ 159                     return res;
+ 160                 }
+ 161                 throw new JVMCIError("Unknown JVM_CONSTANT tag %s", tag);
+ 162             }
+ 163         }
+ 164 
+ 165         public static JVM_CONSTANT getEnum(int tag) {
+ 166             return TagValueMap.get(tag);
+ 167         }
+ 168     }
+ 169 
+ 170     private static class LookupTypeCacheElement {
+ 171         int lastCpi = Integer.MIN_VALUE;
+ 172         JavaType javaType;
+ 173 
+ 174         LookupTypeCacheElement(int lastCpi, JavaType javaType) {
+ 175             super();
+ 176             this.lastCpi = lastCpi;
+ 177             this.javaType = javaType;
+ 178         }
+ 179     }
+ 180 
+ 181     /**
+ 182      * Reference to the C++ ConstantPool object.
+ 183      */
+ 184     private final long metaspaceConstantPool;
+ 185     private volatile LookupTypeCacheElement lastLookupType;
+ 186 
+ 187     /**
+ 188      * Gets the JVMCI mirror from a HotSpot constant pool.The VM is responsible for ensuring that
+ 189      * the ConstantPool is kept alive for the duration of this call and the
+ 190      * {@link HotSpotJVMCIMetaAccessContext} keeps it alive after that.
+ 191      *
+ 192      * Called from the VM.
+ 193      *
+ 194      * @param metaspaceConstantPool a metaspace ConstantPool object
+ 195      * @return the {@link HotSpotConstantPool} corresponding to {@code metaspaceConstantPool}
+ 196      */
+ 197     @SuppressWarnings("unused")
+ 198     private static HotSpotConstantPool fromMetaspace(long metaspaceConstantPool) {
+ 199         HotSpotConstantPool cp = new HotSpotConstantPool(metaspaceConstantPool);
+ 200         runtime().metaAccessContext.add(cp);
+ 201         return cp;
+ 202     }
+ 203 
+ 204     private HotSpotConstantPool(long metaspaceConstantPool) {
+ 205         this.metaspaceConstantPool = metaspaceConstantPool;
+ 206     }
+ 207 
+ 208     /**
+ 209      * Gets the holder for this constant pool as {@link HotSpotResolvedObjectTypeImpl}.
+ 210      *
+ 211      * @return holder for this constant pool
+ 212      */
+ 213     private HotSpotResolvedObjectType getHolder() {
+ 214         return compilerToVM().getResolvedJavaType(this, config().constantPoolHolderOffset, false);
+ 215     }
+ 216 
+ 217     /**
+ 218      * Converts a raw index from the bytecodes to a constant pool index by adding a
+ 219      * {@link HotSpotVMConfig#constantPoolCpCacheIndexTag constant}.
+ 220      *
+ 221      * @param rawIndex index from the bytecode
+ 222      * @param opcode bytecode to convert the index for
+ 223      * @return constant pool index
+ 224      */
+ 225     private static int rawIndexToConstantPoolIndex(int rawIndex, int opcode) {
+ 226         int index;
+ 227         if (opcode == Bytecodes.INVOKEDYNAMIC) {
+ 228             index = rawIndex;
+ 229             // See: ConstantPool::is_invokedynamic_index
+ 230             assert index &lt; 0 : "not an invokedynamic constant pool index " + index;
+ 231         } else {
+ 232             assert opcode == Bytecodes.GETFIELD || opcode == Bytecodes.PUTFIELD || opcode == Bytecodes.GETSTATIC || opcode == Bytecodes.PUTSTATIC || opcode == Bytecodes.INVOKEINTERFACE ||
+ 233                             opcode == Bytecodes.INVOKEVIRTUAL || opcode == Bytecodes.INVOKESPECIAL || opcode == Bytecodes.INVOKESTATIC : "unexpected invoke opcode " + opcode;
+ 234             index = rawIndex + config().constantPoolCpCacheIndexTag;
+ 235         }
+ 236         return index;
+ 237     }
+ 238 
+ 239     /**
+ 240      * Decode a constant pool cache index to a constant pool index.
+ 241      *
+ 242      * See {@code ConstantPool::decode_cpcache_index}.
+ 243      *
+ 244      * @param index constant pool cache index
+ 245      * @return decoded index
+ 246      */
+ 247     private static int decodeConstantPoolCacheIndex(int index) {
+ 248         if (isInvokedynamicIndex(index)) {
+ 249             return decodeInvokedynamicIndex(index);
+ 250         } else {
+ 251             return index - config().constantPoolCpCacheIndexTag;
+ 252         }
+ 253     }
+ 254 
+ 255     /**
+ 256      * See {@code ConstantPool::is_invokedynamic_index}.
+ 257      */
+ 258     private static boolean isInvokedynamicIndex(int index) {
+ 259         return index &lt; 0;
+ 260     }
+ 261 
+ 262     /**
+ 263      * See {@code ConstantPool::decode_invokedynamic_index}.
+ 264      */
+ 265     private static int decodeInvokedynamicIndex(int i) {
+ 266         assert isInvokedynamicIndex(i) : i;
+ 267         return ~i;
+ 268     }
+ 269 
+ 270     long getMetaspaceConstantPool() {
+ 271         return metaspaceConstantPool;
+ 272     }
+ 273 
+ 274     public long getMetaspacePointer() {
+ 275         return getMetaspaceConstantPool();
+ 276     }
+ 277 
+ 278     /**
+ 279      * Gets the constant pool tag at index {@code index}.
+ 280      *
+ 281      * @param index constant pool index
+ 282      * @return constant pool tag
+ 283      */
+ 284     private JVM_CONSTANT getTagAt(int index) {
+ 285         assertBounds(index);
+ 286         HotSpotVMConfig config = config();
+ 287         final long metaspaceConstantPoolTags = UNSAFE.getAddress(getMetaspaceConstantPool() + config.constantPoolTagsOffset);
+ 288         final int tag = UNSAFE.getByteVolatile(null, metaspaceConstantPoolTags + config.arrayU1DataOffset + index);
+ 289         if (tag == 0) {
+ 290             return null;
+ 291         }
+ 292         return JVM_CONSTANT.getEnum(tag);
+ 293     }
+ 294 
+ 295     /**
+ 296      * Gets the constant pool entry at index {@code index}.
+ 297      *
+ 298      * @param index constant pool index
+ 299      * @return constant pool entry
+ 300      */
+ 301     private long getEntryAt(int index) {
+ 302         assertBounds(index);
+<a name="1" id="anc1"></a><span class="changed"> 303         return UNSAFE.getAddress(getMetaspaceConstantPool() + config().constantPoolSize + index * runtime().getHostJVMCIBackend().getTarget().wordSize);</span>
+
+ 304     }
+ 305 
+ 306     /**
+ 307      * Gets the integer constant pool entry at index {@code index}.
+ 308      *
+ 309      * @param index constant pool index
+ 310      * @return integer constant pool entry at index
+ 311      */
+ 312     private int getIntAt(int index) {
+ 313         assertTag(index, JVM_CONSTANT.Integer);
+<a name="2" id="anc2"></a><span class="changed"> 314         return UNSAFE.getInt(getMetaspaceConstantPool() + config().constantPoolSize + index * runtime().getHostJVMCIBackend().getTarget().wordSize);</span>
+
+ 315     }
+ 316 
+ 317     /**
+ 318      * Gets the long constant pool entry at index {@code index}.
+ 319      *
+ 320      * @param index constant pool index
+ 321      * @return long constant pool entry
+ 322      */
+ 323     private long getLongAt(int index) {
+ 324         assertTag(index, JVM_CONSTANT.Long);
+<a name="3" id="anc3"></a><span class="changed"> 325         return UNSAFE.getLong(getMetaspaceConstantPool() + config().constantPoolSize + index * runtime().getHostJVMCIBackend().getTarget().wordSize);</span>
+
+ 326     }
+ 327 
+ 328     /**
+ 329      * Gets the float constant pool entry at index {@code index}.
+ 330      *
+ 331      * @param index constant pool index
+ 332      * @return float constant pool entry
+ 333      */
+ 334     private float getFloatAt(int index) {
+ 335         assertTag(index, JVM_CONSTANT.Float);
+<a name="4" id="anc4"></a><span class="changed"> 336         return UNSAFE.getFloat(getMetaspaceConstantPool() + config().constantPoolSize + index * runtime().getHostJVMCIBackend().getTarget().wordSize);</span>
+
+ 337     }
+ 338 
+ 339     /**
+ 340      * Gets the double constant pool entry at index {@code index}.
+ 341      *
+ 342      * @param index constant pool index
+ 343      * @return float constant pool entry
+ 344      */
+ 345     private double getDoubleAt(int index) {
+ 346         assertTag(index, JVM_CONSTANT.Double);
+<a name="5" id="anc5"></a><span class="changed"> 347         return UNSAFE.getDouble(getMetaspaceConstantPool() + config().constantPoolSize + index * runtime().getHostJVMCIBackend().getTarget().wordSize);</span>
+
+ 348     }
+ 349 
+ 350     /**
+ 351      * Gets the {@code JVM_CONSTANT_NameAndType} constant pool entry at index {@code index}.
+ 352      *
+ 353      * @param index constant pool index
+ 354      * @return {@code JVM_CONSTANT_NameAndType} constant pool entry
+ 355      */
+ 356     private int getNameAndTypeAt(int index) {
+ 357         assertTag(index, JVM_CONSTANT.NameAndType);
+<a name="6" id="anc6"></a><span class="changed"> 358         return UNSAFE.getInt(getMetaspaceConstantPool() + config().constantPoolSize + index * runtime().getHostJVMCIBackend().getTarget().wordSize);</span>
+
+ 359     }
+ 360 
+ 361     /**
+ 362      * Gets the {@code JVM_CONSTANT_NameAndType} reference index constant pool entry at index
+ 363      * {@code index}.
+ 364      *
+ 365      * @param index constant pool index
+ 366      * @return {@code JVM_CONSTANT_NameAndType} reference constant pool entry
+ 367      */
+ 368     private int getNameAndTypeRefIndexAt(int index) {
+ 369         return compilerToVM().lookupNameAndTypeRefIndexInPool(this, index);
+ 370     }
+ 371 
+ 372     /**
+ 373      * Gets the name of a {@code JVM_CONSTANT_NameAndType} constant pool entry referenced by another
+ 374      * entry denoted by {@code which}.
+ 375      *
+ 376      * @param which constant pool index or constant pool cache index
+ 377      * @return name as {@link String}
+ 378      */
+ 379     private String getNameOf(int which) {
+ 380         return compilerToVM().lookupNameInPool(this, which);
+ 381     }
+ 382 
+ 383     /**
+ 384      * Gets the name reference index of a {@code JVM_CONSTANT_NameAndType} constant pool entry at
+ 385      * index {@code index}.
+ 386      *
+ 387      * @param index constant pool index
+ 388      * @return name reference index
+ 389      */
+ 390     private int getNameRefIndexAt(int index) {
+ 391         final int refIndex = getNameAndTypeAt(index);
+ 392         // name ref index is in the low 16-bits.
+ 393         return refIndex &amp; 0xFFFF;
+ 394     }
+ 395 
+ 396     /**
+ 397      * Gets the signature of a {@code JVM_CONSTANT_NameAndType} constant pool entry referenced by
+ 398      * another entry denoted by {@code which}.
+ 399      *
+ 400      * @param which constant pool index or constant pool cache index
+ 401      * @return signature as {@link String}
+ 402      */
+ 403     private String getSignatureOf(int which) {
+ 404         return compilerToVM().lookupSignatureInPool(this, which);
+ 405     }
+ 406 
+ 407     /**
+ 408      * Gets the signature reference index of a {@code JVM_CONSTANT_NameAndType} constant pool entry
+ 409      * at index {@code index}.
+ 410      *
+ 411      * @param index constant pool index
+ 412      * @return signature reference index
+ 413      */
+ 414     private int getSignatureRefIndexAt(int index) {
+ 415         final int refIndex = getNameAndTypeAt(index);
+ 416         // signature ref index is in the high 16-bits.
+ 417         return refIndex &gt;&gt;&gt; 16;
+ 418     }
+ 419 
+ 420     /**
+ 421      * Gets the klass reference index constant pool entry at index {@code index}.
+ 422      *
+ 423      * @param index constant pool index
+ 424      * @return klass reference index
+ 425      */
+ 426     private int getKlassRefIndexAt(int index) {
+ 427         return compilerToVM().lookupKlassRefIndexInPool(this, index);
+ 428     }
+ 429 
+ 430     /**
+ 431      * Gets the uncached klass reference index constant pool entry at index {@code index}. See:
+ 432      * {@code ConstantPool::uncached_klass_ref_index_at}.
+ 433      *
+ 434      * @param index constant pool index
+ 435      * @return klass reference index
+ 436      */
+ 437     private int getUncachedKlassRefIndexAt(int index) {
+ 438         assertTagIsFieldOrMethod(index);
+<a name="7" id="anc7"></a><span class="changed"> 439         final int refIndex = UNSAFE.getInt(getMetaspaceConstantPool() + config().constantPoolSize + index * runtime().getHostJVMCIBackend().getTarget().wordSize);</span>
+
+ 440         // klass ref index is in the low 16-bits.
+ 441         return refIndex &amp; 0xFFFF;
+ 442     }
+ 443 
+ 444     /**
+ 445      * Asserts that the constant pool index {@code index} is in the bounds of the constant pool.
+ 446      *
+ 447      * @param index constant pool index
+ 448      */
+ 449     private void assertBounds(int index) {
+ 450         assert 0 &lt;= index &amp;&amp; index &lt; length() : "index " + index + " not between 0 and " + length();
+ 451     }
+ 452 
+ 453     /**
+ 454      * Asserts that the constant pool tag at index {@code index} is equal to {@code tag}.
+ 455      *
+ 456      * @param index constant pool index
+ 457      * @param tag expected tag
+ 458      */
+ 459     private void assertTag(int index, JVM_CONSTANT tag) {
+ 460         final JVM_CONSTANT tagAt = getTagAt(index);
+ 461         assert tagAt == tag : "constant pool tag at index " + index + " is " + tagAt + " but expected " + tag;
+ 462     }
+ 463 
+ 464     /**
+ 465      * Asserts that the constant pool tag at index {@code index} is a {@link JVM_CONSTANT#Fieldref},
+ 466      * or a {@link JVM_CONSTANT#MethodRef}, or a {@link JVM_CONSTANT#InterfaceMethodref}.
+ 467      *
+ 468      * @param index constant pool index
+ 469      */
+ 470     private void assertTagIsFieldOrMethod(int index) {
+ 471         final JVM_CONSTANT tagAt = getTagAt(index);
+ 472         assert tagAt == JVM_CONSTANT.Fieldref || tagAt == JVM_CONSTANT.MethodRef || tagAt == JVM_CONSTANT.InterfaceMethodref : tagAt;
+ 473     }
+ 474 
+ 475     @Override
+ 476     public int length() {
+ 477         return UNSAFE.getInt(getMetaspaceConstantPool() + config().constantPoolLengthOffset);
+ 478     }
+ 479 
+ 480     @Override
+ 481     public Object lookupConstant(int cpi) {
+ 482         assert cpi != 0;
+ 483         final JVM_CONSTANT tag = getTagAt(cpi);
+ 484         switch (tag) {
+ 485             case Integer:
+ 486                 return JavaConstant.forInt(getIntAt(cpi));
+ 487             case Long:
+ 488                 return JavaConstant.forLong(getLongAt(cpi));
+ 489             case Float:
+ 490                 return JavaConstant.forFloat(getFloatAt(cpi));
+ 491             case Double:
+ 492                 return JavaConstant.forDouble(getDoubleAt(cpi));
+ 493             case Class:
+ 494             case UnresolvedClass:
+ 495             case UnresolvedClassInError:
+ 496                 final int opcode = -1;  // opcode is not used
+ 497                 return lookupType(cpi, opcode);
+ 498             case String:
+ 499                 /*
+ 500                  * Normally, we would expect a String here, but anonymous classes can have
+ 501                  * "pseudo strings" (arbitrary live objects) patched into a String entry. Such
+ 502                  * entries do not have a symbol in the constant pool slot.
+ 503                  */
+ 504                 Object string = compilerToVM().resolvePossiblyCachedConstantInPool(this, cpi);
+ 505                 return HotSpotObjectConstantImpl.forObject(string);
+ 506             case MethodHandle:
+ 507             case MethodHandleInError:
+ 508             case MethodType:
+ 509             case MethodTypeInError:
+ 510                 Object obj = compilerToVM().resolveConstantInPool(this, cpi);
+ 511                 return HotSpotObjectConstantImpl.forObject(obj);
+ 512             default:
+ 513                 throw new JVMCIError("Unknown constant pool tag %s", tag);
+ 514         }
+ 515     }
+ 516 
+ 517     @Override
+ 518     public String lookupUtf8(int cpi) {
+ 519         assertTag(cpi, JVM_CONSTANT.Utf8);
+ 520         return compilerToVM().getSymbol(getEntryAt(cpi));
+ 521     }
+ 522 
+ 523     @Override
+ 524     public Signature lookupSignature(int cpi) {
+ 525         return new HotSpotSignature(runtime(), lookupUtf8(cpi));
+ 526     }
+ 527 
+ 528     @Override
+ 529     public JavaConstant lookupAppendix(int cpi, int opcode) {
+ 530         assert Bytecodes.isInvoke(opcode);
+ 531         final int index = rawIndexToConstantPoolIndex(cpi, opcode);
+ 532         Object appendix = compilerToVM().lookupAppendixInPool(this, index);
+ 533         if (appendix == null) {
+ 534             return null;
+ 535         } else {
+ 536             return HotSpotObjectConstantImpl.forObject(appendix);
+ 537         }
+ 538     }
+ 539 
+ 540     /**
+ 541      * Gets a {@link JavaType} corresponding a given resolved or unresolved type.
+ 542      *
+ 543      * @param type either a ResolvedJavaType or a String naming a unresolved type.
+ 544      */
+ 545     private static JavaType getJavaType(final Object type) {
+ 546         if (type instanceof String) {
+ 547             String name = (String) type;
+ 548             return HotSpotUnresolvedJavaType.create(runtime(), "L" + name + ";");
+ 549         } else {
+ 550             return (JavaType) type;
+ 551         }
+ 552     }
+ 553 
+ 554     @Override
+ 555     public JavaMethod lookupMethod(int cpi, int opcode) {
+ 556         final int index = rawIndexToConstantPoolIndex(cpi, opcode);
+ 557         final HotSpotResolvedJavaMethod method = compilerToVM().lookupMethodInPool(this, index, (byte) opcode);
+ 558         if (method != null) {
+ 559             return method;
+ 560         } else {
+ 561             // Get the method's name and signature.
+ 562             String name = getNameOf(index);
+ 563             HotSpotSignature signature = new HotSpotSignature(runtime(), getSignatureOf(index));
+ 564             if (opcode == Bytecodes.INVOKEDYNAMIC) {
+ 565                 HotSpotResolvedObjectType holder = HotSpotResolvedObjectTypeImpl.fromObjectClass(MethodHandle.class);
+ 566                 return new HotSpotMethodUnresolved(name, signature, holder);
+ 567             } else {
+ 568                 final int klassIndex = getKlassRefIndexAt(index);
+ 569                 final Object type = compilerToVM().lookupKlassInPool(this, klassIndex);
+ 570                 JavaType holder = getJavaType(type);
+ 571                 return new HotSpotMethodUnresolved(name, signature, holder);
+ 572             }
+ 573         }
+ 574     }
+ 575 
+ 576     @Override
+ 577     public JavaType lookupType(int cpi, int opcode) {
+ 578         final LookupTypeCacheElement elem = this.lastLookupType;
+ 579         if (elem != null &amp;&amp; elem.lastCpi == cpi) {
+ 580             return elem.javaType;
+ 581         } else {
+ 582             final Object type = compilerToVM().lookupKlassInPool(this, cpi);
+ 583             JavaType result = getJavaType(type);
+ 584             if (result instanceof ResolvedJavaType) {
+ 585                 this.lastLookupType = new LookupTypeCacheElement(cpi, result);
+ 586             }
+ 587             return result;
+ 588         }
+ 589     }
+ 590 
+ 591     @Override
+ 592     public JavaField lookupField(int cpi, ResolvedJavaMethod method, int opcode) {
+ 593         final int index = rawIndexToConstantPoolIndex(cpi, opcode);
+ 594         final int nameAndTypeIndex = getNameAndTypeRefIndexAt(index);
+ 595         final int nameIndex = getNameRefIndexAt(nameAndTypeIndex);
+ 596         String name = lookupUtf8(nameIndex);
+ 597         final int typeIndex = getSignatureRefIndexAt(nameAndTypeIndex);
+ 598         String typeName = lookupUtf8(typeIndex);
+ 599         JavaType type = runtime().lookupType(typeName, getHolder(), false);
+ 600 
+ 601         final int holderIndex = getKlassRefIndexAt(index);
+ 602         JavaType holder = lookupType(holderIndex, opcode);
+ 603 
+ 604         if (holder instanceof HotSpotResolvedObjectTypeImpl) {
+ 605             long[] info = new long[2];
+ 606             HotSpotResolvedObjectTypeImpl resolvedHolder;
+ 607             try {
+ 608                 resolvedHolder = compilerToVM().resolveFieldInPool(this, index, (HotSpotResolvedJavaMethodImpl) method, (byte) opcode, info);
+ 609             } catch (Throwable t) {
+ 610                 /*
+ 611                  * If there was an exception resolving the field we give up and return an unresolved
+ 612                  * field.
+ 613                  */
+ 614                 return new HotSpotUnresolvedField(holder, name, type);
+ 615             }
+ 616             final int flags = (int) info[0];
+ 617             final long offset = info[1];
+ 618             HotSpotResolvedJavaField result = resolvedHolder.createField(name, type, offset, flags);
+ 619             return result;
+ 620         } else {
+ 621             return new HotSpotUnresolvedField(holder, name, type);
+ 622         }
+ 623     }
+ 624 
+ 625     @Override
+ 626     @SuppressWarnings("fallthrough")
+ 627     public void loadReferencedType(int cpi, int opcode) {
+ 628         int index;
+ 629         switch (opcode) {
+ 630             case Bytecodes.CHECKCAST:
+ 631             case Bytecodes.INSTANCEOF:
+ 632             case Bytecodes.NEW:
+ 633             case Bytecodes.ANEWARRAY:
+ 634             case Bytecodes.MULTIANEWARRAY:
+ 635             case Bytecodes.LDC:
+ 636             case Bytecodes.LDC_W:
+ 637             case Bytecodes.LDC2_W:
+ 638                 index = cpi;
+ 639                 break;
+ 640             case Bytecodes.INVOKEDYNAMIC: {
+ 641                 // invokedynamic instructions point to a constant pool cache entry.
+ 642                 index = decodeConstantPoolCacheIndex(cpi) + config().constantPoolCpCacheIndexTag;
+ 643                 index = compilerToVM().constantPoolRemapInstructionOperandFromCache(this, index);
+ 644                 break;
+ 645             }
+ 646             case Bytecodes.GETSTATIC:
+ 647             case Bytecodes.PUTSTATIC:
+ 648             case Bytecodes.GETFIELD:
+ 649             case Bytecodes.PUTFIELD:
+ 650             case Bytecodes.INVOKEVIRTUAL:
+ 651             case Bytecodes.INVOKESPECIAL:
+ 652             case Bytecodes.INVOKESTATIC:
+ 653             case Bytecodes.INVOKEINTERFACE: {
+ 654                 // invoke and field instructions point to a constant pool cache entry.
+ 655                 index = rawIndexToConstantPoolIndex(cpi, opcode);
+ 656                 index = compilerToVM().constantPoolRemapInstructionOperandFromCache(this, index);
+ 657                 break;
+ 658             }
+ 659             default:
+ 660                 throw JVMCIError.shouldNotReachHere("Unexpected opcode " + opcode);
+ 661         }
+ 662 
+ 663         final JVM_CONSTANT tag = getTagAt(index);
+ 664         if (tag == null) {
+ 665             assert getTagAt(index - 1) == JVM_CONSTANT.Double || getTagAt(index - 1) == JVM_CONSTANT.Long;
+ 666             return;
+ 667         }
+ 668         switch (tag) {
+ 669             case MethodRef:
+ 670             case Fieldref:
+ 671             case InterfaceMethodref:
+ 672                 index = getUncachedKlassRefIndexAt(index);
+ 673                 // Read the tag only once because it could change between multiple reads.
+ 674                 final JVM_CONSTANT klassTag = getTagAt(index);
+ 675                 assert klassTag == JVM_CONSTANT.Class || klassTag == JVM_CONSTANT.UnresolvedClass || klassTag == JVM_CONSTANT.UnresolvedClassInError : klassTag;
+ 676                 // fall through
+ 677             case Class:
+ 678             case UnresolvedClass:
+ 679             case UnresolvedClassInError:
+ 680                 final HotSpotResolvedObjectTypeImpl type = compilerToVM().resolveTypeInPool(this, index);
+ 681                 Class&lt;?&gt; klass = type.mirror();
+ 682                 if (!klass.isPrimitive() &amp;&amp; !klass.isArray()) {
+ 683                     UNSAFE.ensureClassInitialized(klass);
+ 684                 }
+<a name="8" id="anc8"></a><span class="changed"> 685                 switch (tag) {</span>
+<span class="changed"> 686                     case MethodRef:</span>
+ 687                         if (Bytecodes.isInvokeHandleAlias(opcode)) {
+ 688                             final int methodRefCacheIndex = rawIndexToConstantPoolIndex(cpi, opcode);
+ 689                             if (isInvokeHandle(methodRefCacheIndex, type)) {
+ 690                                 compilerToVM().resolveInvokeHandleInPool(this, methodRefCacheIndex);
+ 691                             }
+ 692                         }
+ 693                 }
+<a name="9" id="anc9"></a>
+ 694                 break;
+ 695             case InvokeDynamic:
+ 696                 if (isInvokedynamicIndex(cpi)) {
+ 697                     compilerToVM().resolveInvokeDynamicInPool(this, cpi);
+ 698                 }
+ 699                 break;
+ 700             default:
+ 701                 // nothing
+ 702                 break;
+ 703         }
+ 704     }
+ 705 
+ 706     private boolean isInvokeHandle(int methodRefCacheIndex, HotSpotResolvedObjectTypeImpl klass) {
+ 707         assertTag(compilerToVM().constantPoolRemapInstructionOperandFromCache(this, methodRefCacheIndex), JVM_CONSTANT.MethodRef);
+ 708         return ResolvedJavaMethod.isSignaturePolymorphic(klass, getNameOf(methodRefCacheIndex), runtime().getHostJVMCIBackend().getMetaAccess());
+ 709     }
+ 710 
+ 711     @Override
+ 712     public String toString() {
+ 713         HotSpotResolvedObjectType holder = getHolder();
+ 714         return "HotSpotConstantPool&lt;" + holder.toJavaName() + "&gt;";
+ 715     }
+ 716 }
+<a name="10" id="anc10"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="10" type="hidden" /></form></body></html>

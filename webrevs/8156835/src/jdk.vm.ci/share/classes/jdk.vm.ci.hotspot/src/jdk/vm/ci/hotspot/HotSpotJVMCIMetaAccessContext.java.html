@@ -1,0 +1,331 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>New src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIMetaAccessContext.java</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 2015, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package jdk.vm.ci.hotspot;
+  24 
+  25 import java.lang.ref.Reference;
+  26 import java.lang.ref.ReferenceQueue;
+  27 import java.lang.ref.WeakReference;
+  28 import java.util.Arrays;
+  29 import java.util.Iterator;
+  30 import java.util.Map;
+  31 import java.util.WeakHashMap;
+  32 
+  33 import jdk.vm.ci.meta.JavaKind;
+  34 import jdk.vm.ci.meta.ResolvedJavaType;
+  35 
+  36 /**
+  37  * This class manages the set of metadata roots that must be scanned during garbage collection.
+  38  * Because of class redefinition Method* and ConstantPool* can be freed if they don't appear to be
+  39  * in use so they must be tracked when there are live references to them from Java.
+  40  *
+  41  * The general theory of operation is that all {@link MetaspaceWrapperObject}s are created by
+  42  * calling into the VM which calls back out to actually create the wrapper instance. During the call
+  43  * the VM keeps the metadata reference alive through the use of metadata handles. Once the call
+  44  * completes the wrapper object is registered here and will be scanned during metadata scanning. The
+  45  * weakness of the reference to the wrapper object allows them to be reclaimed when they are no
+  46  * longer used.
+  47  *
+  48  */
+  49 public class HotSpotJVMCIMetaAccessContext {
+  50 
+  51     /**
+  52      * The set of currently live contexts used for tracking of live metadata. Examined from the VM
+  53      * during garbage collection.
+  54      */
+  55     private static WeakReference&lt;?&gt;[] allContexts = new WeakReference&lt;?&gt;[0];
+  56 
+  57     /**
+  58      * This is a chunked list of metadata roots. It can be read from VM native code so it's been
+  59      * marked volatile to ensure the order of updates are respected.
+  60      */
+  61     private volatile Object[] metadataRoots;
+  62 
+  63     private ChunkedList&lt;WeakReference&lt;MetaspaceWrapperObject&gt;&gt; list = new ChunkedList&lt;&gt;();
+  64 
+  65     /**
+  66      * The number of weak references freed since the last time the list was shrunk.
+  67      */
+  68     private int freed;
+  69 
+  70     /**
+  71      * The {@link ReferenceQueue} tracking the weak references created by this context.
+  72      */
+  73     private final ReferenceQueue&lt;MetaspaceWrapperObject&gt; queue = new ReferenceQueue&lt;&gt;();
+  74 
+  75     static synchronized void add(HotSpotJVMCIMetaAccessContext context) {
+  76         for (int i = 0; i &lt; allContexts.length; i++) {
+  77             if (allContexts[i] == null || allContexts[i].get() == null) {
+  78                 allContexts[i] = new WeakReference&lt;&gt;(context);
+  79                 return;
+  80             }
+  81         }
+  82         int index = allContexts.length;
+  83         allContexts = Arrays.copyOf(allContexts, index + 2);
+  84         allContexts[index] = new WeakReference&lt;&gt;(context);
+  85     }
+  86 
+  87     HotSpotJVMCIMetaAccessContext() {
+  88         add(this);
+  89     }
+  90 
+  91     /**
+  92      * Periodically trim the list of tracked metadata. A new list is created to replace the old to
+  93      * avoid concurrent scanning issues.
+  94      */
+  95     private void clean() {
+  96         Reference&lt;?&gt; ref = queue.poll();
+  97         if (ref == null) {
+  98             return;
+  99         }
+ 100         while (ref != null) {
+ 101             freed++;
+ 102             ref = queue.poll();
+ 103         }
+ 104         if (freed &gt; list.size() / 2) {
+ 105             ChunkedList&lt;WeakReference&lt;MetaspaceWrapperObject&gt;&gt; newList = new ChunkedList&lt;&gt;();
+ 106             for (WeakReference&lt;MetaspaceWrapperObject&gt; element : list) {
+ 107                 /*
+ 108                  * The referent could become null anywhere in here but it doesn't matter. It will
+ 109                  * get cleaned up next time.
+ 110                  */
+ 111                 if (element != null &amp;&amp; element.get() != null) {
+ 112                     newList.add(element);
+ 113                 }
+ 114             }
+ 115             list = newList;
+ 116             metadataRoots = list.getHead();
+ 117             freed = 0;
+ 118         }
+ 119     }
+ 120 
+ 121     /**
+ 122      * Add a {@link MetaspaceWrapperObject} to tracked by the GC. It's assumed that the caller is
+ 123      * responsible for keeping the reference alive for the duration of the call. Once registration
+ 124      * is complete then the VM will ensure it's kept alive.
+ 125      *
+ 126      * @param metaspaceObject
+ 127      */
+ 128 
+ 129     public synchronized void add(MetaspaceWrapperObject metaspaceObject) {
+ 130         clean();
+ 131         list.add(new WeakReference&lt;&gt;(metaspaceObject, queue));
+ 132         if (list.getHead() != metadataRoots) {
+ 133             /*
+ 134              * The list enlarged so update the head.
+ 135              */
+ 136             metadataRoots = list.getHead();
+ 137         }
+ 138     }
+ 139 
+ 140     protected ResolvedJavaType createClass(Class&lt;?&gt; javaClass) {
+ 141         if (javaClass.isPrimitive()) {
+ 142             JavaKind kind = JavaKind.fromJavaClass(javaClass);
+ 143             return new HotSpotResolvedPrimitiveType(kind);
+ 144         } else {
+ 145             return new HotSpotResolvedObjectTypeImpl(javaClass, this);
+ 146         }
+ 147     }
+ 148 
+ 149     private final Map&lt;Class&lt;?&gt;, WeakReference&lt;ResolvedJavaType&gt;&gt; typeMap = new WeakHashMap&lt;&gt;();
+ 150 
+ 151     /**
+ 152      * Gets the JVMCI mirror for a {@link Class} object.
+ 153      *
+ 154      * @return the {@link ResolvedJavaType} corresponding to {@code javaClass}
+ 155      */
+ 156     public synchronized ResolvedJavaType fromClass(Class&lt;?&gt; javaClass) {
+ 157         WeakReference&lt;ResolvedJavaType&gt; typeRef = typeMap.get(javaClass);
+ 158         ResolvedJavaType type = typeRef != null ? typeRef.get() : null;
+ 159         if (type == null) {
+ 160             type = createClass(javaClass);
+ 161             typeMap.put(javaClass, new WeakReference&lt;&gt;(type));
+ 162         }
+ 163         return type;
+ 164     }
+ 165 
+ 166     /**
+ 167      * A very simple append only chunked list implementation.
+ 168      */
+ 169     static class ChunkedList&lt;T&gt; implements Iterable&lt;T&gt; {
+ 170         private static final int CHUNK_SIZE = 32;
+ 171 
+ 172         private static final int NEXT_CHUNK_INDEX = CHUNK_SIZE - 1;
+ 173 
+ 174         private Object[] head;
+ 175         private int index;
+ 176         private int size;
+ 177 
+ 178         ChunkedList() {
+ 179             head = new Object[CHUNK_SIZE];
+ 180             index = 0;
+ 181         }
+ 182 
+ 183         void add(T element) {
+ 184             if (index == NEXT_CHUNK_INDEX) {
+ 185                 Object[] newHead = new Object[CHUNK_SIZE];
+ 186                 newHead[index] = head;
+ 187                 head = newHead;
+ 188                 index = 0;
+ 189             }
+ 190             head[index++] = element;
+ 191             size++;
+ 192         }
+ 193 
+ 194         Object[] getHead() {
+ 195             return head;
+ 196         }
+ 197 
+ 198         public Iterator&lt;T&gt; iterator() {
+ 199             return new ChunkIterator&lt;&gt;();
+ 200         }
+ 201 
+ 202         int size() {
+ 203             return size;
+ 204         }
+ 205 
+ 206         class ChunkIterator&lt;V&gt; implements Iterator&lt;V&gt; {
+ 207 
+ 208             ChunkIterator() {
+ 209                 currentChunk = head;
+ 210                 currentIndex = -1;
+ 211                 findNext();
+ 212             }
+ 213 
+ 214             Object[] currentChunk;
+ 215             int currentIndex;
+ 216             V next;
+ 217 
+ 218             @SuppressWarnings("unchecked")
+ 219             V findNext() {
+ 220                 V result;
+ 221                 do {
+ 222                     currentIndex++;
+ 223                     if (currentIndex == NEXT_CHUNK_INDEX) {
+ 224                         currentChunk = (Object[]) currentChunk[currentIndex];
+ 225                         currentIndex = 0;
+ 226                         if (currentChunk == null) {
+ 227                             return null;
+ 228                         }
+ 229                     }
+ 230                     result = (V) currentChunk[currentIndex];
+ 231                 } while (result == null);
+ 232                 return result;
+ 233             }
+ 234 
+ 235             public boolean hasNext() {
+ 236                 return next != null;
+ 237             }
+ 238 
+ 239             public V next() {
+ 240                 V result = next;
+ 241                 next = findNext();
+ 242                 return result;
+ 243             }
+ 244 
+ 245         }
+ 246 
+ 247     }
+ 248 }
+</pre></body></html>

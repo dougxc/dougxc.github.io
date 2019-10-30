@@ -1,0 +1,930 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../../../../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre>rev <a href="https://bugs.openjdk.java.net/browse/JDK-12259">12259</a> : <a href="https://bugs.openjdk.java.net/browse/JDK-8168915">8168915</a>: [JVMCI] use MethodParameters attribute instead of depending on -g option for sanity checks</pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 2011, 2016, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  */
+  23 package jdk.vm.ci.hotspot;
+  24 
+  25 import static jdk.vm.ci.hotspot.CompilerToVM.compilerToVM;
+  26 import static jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.runtime;
+  27 import static jdk.vm.ci.hotspot.HotSpotModifiers.BRIDGE;
+  28 import static jdk.vm.ci.hotspot.HotSpotModifiers.SYNTHETIC;
+  29 import static jdk.vm.ci.hotspot.HotSpotModifiers.VARARGS;
+  30 import static jdk.vm.ci.hotspot.HotSpotModifiers.jvmMethodModifiers;
+  31 import static jdk.vm.ci.hotspot.HotSpotVMConfig.config;
+  32 import static jdk.vm.ci.hotspot.UnsafeAccess.UNSAFE;
+  33 
+  34 import java.lang.annotation.Annotation;
+  35 import java.lang.reflect.Executable;
+<a name="1" id="anc1"></a>
+  36 import java.lang.reflect.Modifier;
+  37 import java.lang.reflect.Type;
+<a name="2" id="anc2"></a>
+  38 import java.util.HashMap;
+  39 import java.util.Map;
+  40 
+  41 import jdk.vm.ci.common.JVMCIError;
+  42 import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.Option;
+  43 import jdk.vm.ci.meta.Constant;
+  44 import jdk.vm.ci.meta.ConstantPool;
+  45 import jdk.vm.ci.meta.DefaultProfilingInfo;
+  46 import jdk.vm.ci.meta.ExceptionHandler;
+  47 import jdk.vm.ci.meta.JavaMethod;
+  48 import jdk.vm.ci.meta.JavaType;
+  49 import jdk.vm.ci.meta.LineNumberTable;
+  50 import jdk.vm.ci.meta.Local;
+  51 import jdk.vm.ci.meta.LocalVariableTable;
+  52 import jdk.vm.ci.meta.ProfilingInfo;
+  53 import jdk.vm.ci.meta.ResolvedJavaMethod;
+  54 import jdk.vm.ci.meta.ResolvedJavaType;
+  55 import jdk.vm.ci.meta.Signature;
+  56 import jdk.vm.ci.meta.SpeculationLog;
+  57 import jdk.vm.ci.meta.TriState;
+  58 
+  59 /**
+  60  * Implementation of {@link JavaMethod} for resolved HotSpot methods.
+  61  */
+  62 final class HotSpotResolvedJavaMethodImpl extends HotSpotMethod implements HotSpotResolvedJavaMethod, MetaspaceWrapperObject {
+  63 
+  64     /**
+  65      * Reference to metaspace Method object.
+  66      */
+  67     private final long metaspaceMethod;
+  68 
+  69     private final HotSpotResolvedObjectTypeImpl holder;
+  70     private final HotSpotConstantPool constantPool;
+  71     private final HotSpotSignature signature;
+  72     private HotSpotMethodData methodData;
+  73     private byte[] code;
+  74     private Executable toJavaCache;
+  75 
+  76     /**
+  77      * Gets the holder of a HotSpot metaspace method native object.
+  78      *
+  79      * @param metaspaceMethod a metaspace Method object
+  80      * @return the {@link ResolvedJavaType} corresponding to the holder of the
+  81      *         {@code metaspaceMethod}
+  82      */
+  83     private static HotSpotResolvedObjectTypeImpl getHolder(long metaspaceMethod) {
+  84         HotSpotVMConfig config = config();
+  85         final long metaspaceConstMethod = UNSAFE.getAddress(metaspaceMethod + config.methodConstMethodOffset);
+  86         final long metaspaceConstantPool = UNSAFE.getAddress(metaspaceConstMethod + config.constMethodConstantsOffset);
+  87         return compilerToVM().getResolvedJavaType(null, metaspaceConstantPool + config.constantPoolHolderOffset, false);
+  88     }
+  89 
+  90     /**
+  91      * Gets the JVMCI mirror from a HotSpot method. The VM is responsible for ensuring that the
+  92      * Method* is kept alive for the duration of this call and the
+  93      * {@link HotSpotJVMCIMetaAccessContext} keeps it alive after that.
+  94      *
+  95      * Called from the VM.
+  96      *
+  97      * @param metaspaceMethod a metaspace Method object
+  98      * @return the {@link ResolvedJavaMethod} corresponding to {@code metaspaceMethod}
+  99      */
+ 100     @SuppressWarnings("unused")
+ 101     private static HotSpotResolvedJavaMethod fromMetaspace(long metaspaceMethod) {
+ 102         HotSpotResolvedObjectTypeImpl holder = getHolder(metaspaceMethod);
+ 103         return holder.createMethod(metaspaceMethod);
+ 104     }
+ 105 
+ 106     HotSpotResolvedJavaMethodImpl(HotSpotResolvedObjectTypeImpl holder, long metaspaceMethod) {
+ 107         // It would be too much work to get the method name here so we fill it in later.
+ 108         super(null);
+ 109         this.metaspaceMethod = metaspaceMethod;
+ 110         this.holder = holder;
+ 111 
+ 112         HotSpotVMConfig config = config();
+ 113         final long constMethod = getConstMethod();
+ 114 
+ 115         /*
+ 116          * Get the constant pool from the metaspace method. Some methods (e.g. intrinsics for
+ 117          * signature-polymorphic method handle methods) have their own constant pool instead of the
+ 118          * one from their holder.
+ 119          */
+ 120         final long metaspaceConstantPool = UNSAFE.getAddress(constMethod + config.constMethodConstantsOffset);
+ 121         if (metaspaceConstantPool == holder.getConstantPool().getMetaspaceConstantPool()) {
+ 122             this.constantPool = holder.getConstantPool();
+ 123         } else {
+ 124             this.constantPool = compilerToVM().getConstantPool(this);
+ 125         }
+ 126 
+ 127         final int nameIndex = UNSAFE.getChar(constMethod + config.constMethodNameIndexOffset);
+ 128         this.name = constantPool.lookupUtf8(nameIndex);
+ 129 
+ 130         final int signatureIndex = UNSAFE.getChar(constMethod + config.constMethodSignatureIndexOffset);
+ 131         this.signature = (HotSpotSignature) constantPool.lookupSignature(signatureIndex);
+ 132     }
+ 133 
+ 134     /**
+ 135      * Returns a pointer to this method's constant method data structure (
+ 136      * {@code Method::_constMethod}). This pointer isn't wrapped since it should be safe to use it
+ 137      * within the context of this HotSpotResolvedJavaMethodImpl since the Method* and ConstMethod*
+ 138      * are kept alive as a pair.
+ 139      *
+ 140      * @return pointer to this method's ConstMethod
+ 141      */
+ 142     private long getConstMethod() {
+ 143         assert metaspaceMethod != 0;
+ 144         return UNSAFE.getAddress(metaspaceMethod + config().methodConstMethodOffset);
+ 145     }
+ 146 
+ 147     @Override
+ 148     public boolean equals(Object obj) {
+ 149         if (this == obj) {
+ 150             return true;
+ 151         }
+ 152         if (obj instanceof HotSpotResolvedJavaMethodImpl) {
+ 153             HotSpotResolvedJavaMethodImpl that = (HotSpotResolvedJavaMethodImpl) obj;
+ 154             return that.metaspaceMethod == metaspaceMethod;
+ 155         }
+ 156         return false;
+ 157     }
+ 158 
+ 159     @Override
+ 160     public int hashCode() {
+ 161         return (int) metaspaceMethod;
+ 162     }
+ 163 
+ 164     /**
+ 165      * Returns this method's flags ({@code Method::_flags}).
+ 166      *
+ 167      * @return flags of this method
+ 168      */
+ 169     private int getFlags() {
+ 170         return UNSAFE.getShort(metaspaceMethod + config().methodFlagsOffset);
+ 171     }
+ 172 
+ 173     /**
+ 174      * Returns this method's constant method flags ({@code ConstMethod::_flags}).
+ 175      *
+ 176      * @return flags of this method's ConstMethod
+ 177      */
+ 178     private int getConstMethodFlags() {
+ 179         return UNSAFE.getChar(getConstMethod() + config().constMethodFlagsOffset);
+ 180     }
+ 181 
+ 182     @Override
+ 183     public HotSpotResolvedObjectTypeImpl getDeclaringClass() {
+ 184         return holder;
+ 185     }
+ 186 
+ 187     /**
+ 188      * Gets the address of the C++ Method object for this method.
+ 189      */
+ 190     public Constant getMetaspaceMethodConstant() {
+ 191         return HotSpotMetaspaceConstantImpl.forMetaspaceObject(this, false);
+ 192     }
+ 193 
+ 194     public long getMetaspacePointer() {
+ 195         return metaspaceMethod;
+ 196     }
+ 197 
+ 198     @Override
+ 199     public Constant getEncoding() {
+ 200         return getMetaspaceMethodConstant();
+ 201     }
+ 202 
+ 203     /**
+ 204      * Gets the complete set of modifiers for this method which includes the JVM specification
+ 205      * modifiers as well as the HotSpot internal modifiers.
+ 206      */
+ 207     public int getAllModifiers() {
+ 208         return UNSAFE.getInt(metaspaceMethod + config().methodAccessFlagsOffset);
+ 209     }
+ 210 
+ 211     @Override
+ 212     public int getModifiers() {
+ 213         return getAllModifiers() &amp; jvmMethodModifiers();
+ 214     }
+ 215 
+ 216     @Override
+ 217     public boolean canBeStaticallyBound() {
+ 218         return (isFinal() || isPrivate() || isStatic() || holder.isLeaf()) &amp;&amp; isConcrete();
+ 219     }
+ 220 
+ 221     @Override
+ 222     public byte[] getCode() {
+ 223         if (getCodeSize() == 0) {
+ 224             return null;
+ 225         }
+ 226         if (code == null &amp;&amp; holder.isLinked()) {
+ 227             code = compilerToVM().getBytecode(this);
+ 228             assert code.length == getCodeSize() : "expected: " + getCodeSize() + ", actual: " + code.length;
+ 229         }
+ 230         return code;
+ 231     }
+ 232 
+ 233     @Override
+ 234     public int getCodeSize() {
+ 235         return UNSAFE.getChar(getConstMethod() + config().constMethodCodeSizeOffset);
+ 236     }
+ 237 
+ 238     @Override
+ 239     public ExceptionHandler[] getExceptionHandlers() {
+ 240         final boolean hasExceptionTable = (getConstMethodFlags() &amp; config().constMethodHasExceptionTable) != 0;
+ 241         if (!hasExceptionTable) {
+ 242             return new ExceptionHandler[0];
+ 243         }
+ 244 
+ 245         HotSpotVMConfig config = config();
+ 246         final int exceptionTableLength = compilerToVM().getExceptionTableLength(this);
+ 247         ExceptionHandler[] handlers = new ExceptionHandler[exceptionTableLength];
+ 248         long exceptionTableElement = compilerToVM().getExceptionTableStart(this);
+ 249 
+ 250         for (int i = 0; i &lt; exceptionTableLength; i++) {
+ 251             final int startPc = UNSAFE.getChar(exceptionTableElement + config.exceptionTableElementStartPcOffset);
+ 252             final int endPc = UNSAFE.getChar(exceptionTableElement + config.exceptionTableElementEndPcOffset);
+ 253             final int handlerPc = UNSAFE.getChar(exceptionTableElement + config.exceptionTableElementHandlerPcOffset);
+ 254             int catchTypeIndex = UNSAFE.getChar(exceptionTableElement + config.exceptionTableElementCatchTypeIndexOffset);
+ 255 
+ 256             JavaType catchType;
+ 257             if (catchTypeIndex == 0) {
+ 258                 catchType = null;
+ 259             } else {
+ 260                 final int opcode = -1;  // opcode is not used
+ 261                 catchType = constantPool.lookupType(catchTypeIndex, opcode);
+ 262 
+ 263                 // Check for Throwable which catches everything.
+ 264                 if (catchType instanceof HotSpotResolvedObjectTypeImpl) {
+ 265                     HotSpotResolvedObjectTypeImpl resolvedType = (HotSpotResolvedObjectTypeImpl) catchType;
+ 266                     if (resolvedType.mirror() == Throwable.class) {
+ 267                         catchTypeIndex = 0;
+ 268                         catchType = null;
+ 269                     }
+ 270                 }
+ 271             }
+ 272             handlers[i] = new ExceptionHandler(startPc, endPc, handlerPc, catchTypeIndex, catchType);
+ 273 
+ 274             // Go to the next ExceptionTableElement
+ 275             exceptionTableElement += config.exceptionTableElementSize;
+ 276         }
+ 277 
+ 278         return handlers;
+ 279     }
+ 280 
+ 281     /**
+ 282      * Returns true if this method has a {@code CallerSensitive} annotation.
+ 283      *
+ 284      * @return true if CallerSensitive annotation present, false otherwise
+ 285      */
+ 286     public boolean isCallerSensitive() {
+ 287         return (getFlags() &amp; config().methodFlagsCallerSensitive) != 0;
+ 288     }
+ 289 
+ 290     /**
+ 291      * Returns true if this method has a {@code ForceInline} annotation.
+ 292      *
+ 293      * @return true if ForceInline annotation present, false otherwise
+ 294      */
+ 295     public boolean isForceInline() {
+ 296         return (getFlags() &amp; config().methodFlagsForceInline) != 0;
+ 297     }
+ 298 
+ 299     /**
+ 300      * Returns true if this method has a {@code DontInline} annotation.
+ 301      *
+ 302      * @return true if DontInline annotation present, false otherwise
+ 303      */
+ 304     public boolean isDontInline() {
+ 305         return (getFlags() &amp; config().methodFlagsDontInline) != 0;
+ 306     }
+ 307 
+ 308     /**
+ 309      * Returns true if this method has a {@code ReservedStackAccess} annotation.
+ 310      *
+ 311      * @return true if ReservedStackAccess annotation present, false otherwise
+ 312      */
+ 313     public boolean hasReservedStackAccess() {
+ 314         return (getFlags() &amp; config().methodFlagsReservedStackAccess) != 0;
+ 315     }
+ 316 
+ 317     /**
+ 318      * Manually adds a DontInline annotation to this method.
+ 319      */
+ 320     public void setNotInlineable() {
+ 321         compilerToVM().doNotInlineOrCompile(this);
+ 322     }
+ 323 
+ 324     /**
+ 325      * Returns true if this method is one of the special methods that is ignored by security stack
+ 326      * walks.
+ 327      *
+ 328      * @return true if special method ignored by security stack walks, false otherwise
+ 329      */
+ 330     public boolean ignoredBySecurityStackWalk() {
+ 331         return compilerToVM().methodIsIgnoredBySecurityStackWalk(this);
+ 332     }
+ 333 
+ 334     @Override
+ 335     public boolean isClassInitializer() {
+ 336         return "&lt;clinit&gt;".equals(name) &amp;&amp; isStatic();
+ 337     }
+ 338 
+ 339     @Override
+ 340     public boolean isConstructor() {
+ 341         return "&lt;init&gt;".equals(name) &amp;&amp; !isStatic();
+ 342     }
+ 343 
+ 344     @Override
+ 345     public int getMaxLocals() {
+ 346         if (isAbstract() || isNative()) {
+ 347             return 0;
+ 348         }
+ 349         HotSpotVMConfig config = config();
+ 350         return UNSAFE.getChar(getConstMethod() + config.methodMaxLocalsOffset);
+ 351     }
+ 352 
+ 353     @Override
+ 354     public int getMaxStackSize() {
+ 355         if (isAbstract() || isNative()) {
+ 356             return 0;
+ 357         }
+ 358         HotSpotVMConfig config = config();
+ 359         return config.extraStackEntries + UNSAFE.getChar(getConstMethod() + config.constMethodMaxStackOffset);
+ 360     }
+ 361 
+ 362     @Override
+ 363     public StackTraceElement asStackTraceElement(int bci) {
+ 364         if (bci &lt; 0 || bci &gt;= getCodeSize()) {
+ 365             // HotSpot code can only construct stack trace elements for valid bcis
+ 366             StackTraceElement ste = compilerToVM().getStackTraceElement(this, 0);
+ 367             return new StackTraceElement(ste.getClassName(), ste.getMethodName(), ste.getFileName(), -1);
+ 368         }
+ 369         return compilerToVM().getStackTraceElement(this, bci);
+ 370     }
+ 371 
+ 372     public ResolvedJavaMethod uniqueConcreteMethod(HotSpotResolvedObjectType receiver) {
+ 373         if (receiver.isInterface()) {
+ 374             // Cannot trust interfaces. Because of:
+ 375             // interface I { void foo(); }
+ 376             // class A { public void foo() {} }
+ 377             // class B extends A implements I { }
+ 378             // class C extends B { public void foo() { } }
+ 379             // class D extends B { }
+ 380             // Would lead to identify C.foo() as the unique concrete method for I.foo() without
+ 381             // seeing A.foo().
+ 382             return null;
+ 383         }
+ 384         if (this.isDefault()) {
+ 385             // CHA for default methods doesn't work and may crash the VM
+ 386             return null;
+ 387         }
+ 388         return compilerToVM().findUniqueConcreteMethod(((HotSpotResolvedObjectTypeImpl) receiver), this);
+ 389     }
+ 390 
+ 391     @Override
+ 392     public HotSpotSignature getSignature() {
+ 393         return signature;
+ 394     }
+ 395 
+ 396     /**
+ 397      * Gets the value of {@code Method::_code}.
+ 398      *
+ 399      * @return the value of {@code Method::_code}
+ 400      */
+ 401     private long getCompiledCode() {
+ 402         HotSpotVMConfig config = config();
+ 403         return UNSAFE.getAddress(metaspaceMethod + config.methodCodeOffset);
+ 404     }
+ 405 
+ 406     /**
+ 407      * Returns whether this method has compiled code.
+ 408      *
+ 409      * @return true if this method has compiled code, false otherwise
+ 410      */
+ 411     public boolean hasCompiledCode() {
+ 412         return getCompiledCode() != 0L;
+ 413     }
+ 414 
+ 415     /**
+ 416      * @param level
+ 417      * @return true if the currently installed code was generated at {@code level}.
+ 418      */
+ 419     public boolean hasCompiledCodeAtLevel(int level) {
+ 420         long compiledCode = getCompiledCode();
+ 421         if (compiledCode != 0) {
+ 422             return UNSAFE.getInt(compiledCode + config().nmethodCompLevelOffset) == level;
+ 423         }
+ 424         return false;
+ 425     }
+ 426 
+ 427     @Override
+ 428     public ProfilingInfo getProfilingInfo(boolean includeNormal, boolean includeOSR) {
+ 429         ProfilingInfo info;
+ 430 
+ 431         if (methodData == null) {
+ 432             long metaspaceMethodData = UNSAFE.getAddress(metaspaceMethod + config().methodDataOffset);
+ 433             if (metaspaceMethodData != 0) {
+ 434                 methodData = new HotSpotMethodData(metaspaceMethodData, this);
+ 435                 String methodDataFilter = Option.TraceMethodDataFilter.getString();
+ 436                 if (methodDataFilter != null &amp;&amp; this.format("%H.%n").contains(methodDataFilter)) {
+ 437                     System.out.println(methodData.toString());
+ 438                 }
+ 439             }
+ 440         }
+ 441 
+ 442         if (methodData == null || (!methodData.hasNormalData() &amp;&amp; !methodData.hasExtraData())) {
+ 443             // Be optimistic and return false for exceptionSeen. A methodDataOop is allocated in
+ 444             // case of a deoptimization.
+ 445             info = DefaultProfilingInfo.get(TriState.FALSE);
+ 446         } else {
+ 447             info = new HotSpotProfilingInfo(methodData, this, includeNormal, includeOSR);
+ 448         }
+ 449         return info;
+ 450     }
+ 451 
+ 452     @Override
+ 453     public void reprofile() {
+ 454         compilerToVM().reprofile(this);
+ 455     }
+ 456 
+ 457     @Override
+ 458     public ConstantPool getConstantPool() {
+ 459         return constantPool;
+ 460     }
+ 461 
+ 462     @Override
+<a name="3" id="anc3"></a>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 463     public Annotation[][] getParameterAnnotations() {
+ 464         Executable javaMethod = toJava();
+ 465         return javaMethod == null ? null : javaMethod.getParameterAnnotations();
+ 466     }
+ 467 
+ 468     @Override
+ 469     public Annotation[] getAnnotations() {
+ 470         Executable javaMethod = toJava();
+ 471         if (javaMethod != null) {
+ 472             return javaMethod.getAnnotations();
+ 473         }
+ 474         return new Annotation[0];
+ 475     }
+ 476 
+ 477     @Override
+ 478     public Annotation[] getDeclaredAnnotations() {
+ 479         Executable javaMethod = toJava();
+ 480         if (javaMethod != null) {
+ 481             return javaMethod.getDeclaredAnnotations();
+ 482         }
+ 483         return new Annotation[0];
+ 484     }
+ 485 
+ 486     @Override
+ 487     public &lt;T extends Annotation&gt; T getAnnotation(Class&lt;T&gt; annotationClass) {
+ 488         Executable javaMethod = toJava();
+ 489         return javaMethod == null ? null : javaMethod.getAnnotation(annotationClass);
+ 490     }
+ 491 
+ 492     public boolean isBridge() {
+ 493         return (BRIDGE &amp; getModifiers()) != 0;
+ 494     }
+ 495 
+ 496     @Override
+ 497     public boolean isSynthetic() {
+ 498         return (SYNTHETIC &amp; getModifiers()) != 0;
+ 499     }
+ 500 
+ 501     public boolean isVarArgs() {
+ 502         return (VARARGS &amp; getModifiers()) != 0;
+ 503     }
+ 504 
+ 505     public boolean isDefault() {
+ 506         if (isConstructor()) {
+ 507             return false;
+ 508         }
+ 509         // Copied from java.lang.Method.isDefault()
+ 510         int mask = Modifier.ABSTRACT | Modifier.PUBLIC | Modifier.STATIC;
+ 511         return ((getModifiers() &amp; mask) == Modifier.PUBLIC) &amp;&amp; getDeclaringClass().isInterface();
+ 512     }
+ 513 
+ 514     @Override
+ 515     public Type[] getGenericParameterTypes() {
+ 516         Executable javaMethod = toJava();
+ 517         return javaMethod == null ? null : javaMethod.getGenericParameterTypes();
+ 518     }
+ 519 
+ 520     public Class&lt;?&gt;[] signatureToTypes() {
+ 521         Signature sig = getSignature();
+ 522         int count = sig.getParameterCount(false);
+ 523         Class&lt;?&gt;[] result = new Class&lt;?&gt;[count];
+ 524         for (int i = 0; i &lt; result.length; ++i) {
+ 525             JavaType parameterType = sig.getParameterType(i, holder);
+ 526             HotSpotResolvedJavaType resolvedParameterType = (HotSpotResolvedJavaType) parameterType.resolve(holder);
+ 527             result[i] = resolvedParameterType.mirror();
+ 528         }
+ 529         return result;
+ 530     }
+ 531 
+<a name="4" id="anc4"></a>
+
+
+
+
+
+
+
+
+ 532     private Executable toJava() {
+ 533         if (toJavaCache != null) {
+ 534             return toJavaCache;
+ 535         }
+ 536         try {
+ 537             Class&lt;?&gt;[] parameterTypes = signatureToTypes();
+<a name="5" id="anc5"></a><span class="changed"> 538             Executable result = isConstructor() ? holder.mirror().getDeclaredConstructor(parameterTypes) : holder.mirror().getDeclaredMethod(name, parameterTypes);</span>
+
+
+
+
+
+
+
+
+
+ 539             toJavaCache = result;
+ 540             return result;
+ 541         } catch (NoSuchMethodException | NoClassDefFoundError e) {
+ 542             return null;
+ 543         }
+ 544     }
+ 545 
+ 546     @Override
+ 547     public boolean canBeInlined() {
+ 548         if (isDontInline()) {
+ 549             return false;
+ 550         }
+ 551         return compilerToVM().canInlineMethod(this);
+ 552     }
+ 553 
+ 554     @Override
+ 555     public boolean shouldBeInlined() {
+ 556         if (isForceInline()) {
+ 557             return true;
+ 558         }
+ 559         return compilerToVM().shouldInlineMethod(this);
+ 560     }
+ 561 
+ 562     @Override
+ 563     public LineNumberTable getLineNumberTable() {
+ 564         final boolean hasLineNumberTable = (getConstMethodFlags() &amp; config().constMethodHasLineNumberTable) != 0;
+ 565         if (!hasLineNumberTable) {
+ 566             return null;
+ 567         }
+ 568 
+ 569         long[] values = compilerToVM().getLineNumberTable(this);
+ 570         if (values == null || values.length == 0) {
+ 571             // Empty table so treat is as non-existent
+ 572             return null;
+ 573         }
+ 574         assert values.length % 2 == 0;
+ 575         int[] bci = new int[values.length / 2];
+ 576         int[] line = new int[values.length / 2];
+ 577 
+ 578         for (int i = 0; i &lt; values.length / 2; i++) {
+ 579             bci[i] = (int) values[i * 2];
+ 580             line[i] = (int) values[i * 2 + 1];
+ 581         }
+ 582 
+ 583         return new LineNumberTable(line, bci);
+ 584     }
+ 585 
+ 586     @Override
+ 587     public LocalVariableTable getLocalVariableTable() {
+ 588         final boolean hasLocalVariableTable = (getConstMethodFlags() &amp; config().constMethodHasLocalVariableTable) != 0;
+ 589         if (!hasLocalVariableTable) {
+ 590             return null;
+ 591         }
+ 592 
+ 593         HotSpotVMConfig config = config();
+ 594         long localVariableTableElement = compilerToVM().getLocalVariableTableStart(this);
+ 595         final int localVariableTableLength = compilerToVM().getLocalVariableTableLength(this);
+ 596         Local[] locals = new Local[localVariableTableLength];
+ 597 
+ 598         for (int i = 0; i &lt; localVariableTableLength; i++) {
+ 599             final int startBci = UNSAFE.getChar(localVariableTableElement + config.localVariableTableElementStartBciOffset);
+ 600             final int endBci = startBci + UNSAFE.getChar(localVariableTableElement + config.localVariableTableElementLengthOffset);
+ 601             final int nameCpIndex = UNSAFE.getChar(localVariableTableElement + config.localVariableTableElementNameCpIndexOffset);
+ 602             final int typeCpIndex = UNSAFE.getChar(localVariableTableElement + config.localVariableTableElementDescriptorCpIndexOffset);
+ 603             final int slot = UNSAFE.getChar(localVariableTableElement + config.localVariableTableElementSlotOffset);
+ 604 
+ 605             String localName = getConstantPool().lookupUtf8(nameCpIndex);
+ 606             String localType = getConstantPool().lookupUtf8(typeCpIndex);
+ 607 
+ 608             locals[i] = new Local(localName, runtime().lookupType(localType, holder, false), startBci, endBci, slot);
+ 609 
+ 610             // Go to the next LocalVariableTableElement
+ 611             localVariableTableElement += config.localVariableTableElementSize;
+ 612         }
+ 613 
+ 614         return new LocalVariableTable(locals);
+ 615     }
+ 616 
+ 617     /**
+ 618      * Returns the offset of this method into the v-table. The method must have a v-table entry as
+ 619      * indicated by {@link #isInVirtualMethodTable(ResolvedJavaType)}, otherwise an exception is
+ 620      * thrown.
+ 621      *
+ 622      * @return the offset of this method into the v-table
+ 623      */
+ 624     public int vtableEntryOffset(ResolvedJavaType resolved) {
+ 625         if (!isInVirtualMethodTable(resolved)) {
+ 626             throw new JVMCIError("%s does not have a vtable entry in type %s", this, resolved);
+ 627         }
+ 628         HotSpotVMConfig config = config();
+ 629         final int vtableIndex = getVtableIndex((HotSpotResolvedObjectTypeImpl) resolved);
+ 630         return config.klassVtableStartOffset + vtableIndex * config.vtableEntrySize + config.vtableEntryMethodOffset;
+ 631     }
+ 632 
+ 633     @Override
+ 634     public boolean isInVirtualMethodTable(ResolvedJavaType resolved) {
+ 635         if (resolved instanceof HotSpotResolvedObjectTypeImpl) {
+ 636             HotSpotResolvedObjectTypeImpl hotspotResolved = (HotSpotResolvedObjectTypeImpl) resolved;
+ 637             int vtableIndex = getVtableIndex(hotspotResolved);
+ 638             return vtableIndex &gt;= 0 &amp;&amp; vtableIndex &lt; hotspotResolved.getVtableLength();
+ 639         }
+ 640         return false;
+ 641     }
+ 642 
+ 643     private int getVtableIndex(HotSpotResolvedObjectTypeImpl resolved) {
+ 644         if (!holder.isLinked()) {
+ 645             return config().invalidVtableIndex;
+ 646         }
+ 647         if (holder.isInterface()) {
+ 648             if (resolved.isInterface()) {
+ 649                 return config().invalidVtableIndex;
+ 650             }
+ 651             return getVtableIndexForInterfaceMethod(resolved);
+ 652         }
+ 653         return getVtableIndex();
+ 654     }
+ 655 
+ 656     /**
+ 657      * Returns this method's virtual table index.
+ 658      *
+ 659      * @return virtual table index
+ 660      */
+ 661     private int getVtableIndex() {
+ 662         assert !holder.isInterface();
+ 663         HotSpotVMConfig config = config();
+ 664         int result = UNSAFE.getInt(metaspaceMethod + config.methodVtableIndexOffset);
+ 665         assert result &gt;= config.nonvirtualVtableIndex : "must be linked";
+ 666         return result;
+ 667     }
+ 668 
+ 669     private int getVtableIndexForInterfaceMethod(ResolvedJavaType resolved) {
+ 670         HotSpotResolvedObjectTypeImpl hotspotType = (HotSpotResolvedObjectTypeImpl) resolved;
+ 671         return compilerToVM().getVtableIndexForInterfaceMethod(hotspotType, this);
+ 672     }
+ 673 
+ 674     /**
+ 675      * The {@link SpeculationLog} for methods compiled by JVMCI hang off this per-declaring-type
+ 676      * {@link ClassValue}. The raw Method* value is safe to use as a key in the map as a) it is
+ 677      * never moves and b) we never read from it.
+ 678      * &lt;p&gt;
+ 679      * One implication is that we will preserve {@link SpeculationLog}s for methods that have been
+ 680      * redefined via class redefinition. It's tempting to periodically flush such logs but we cannot
+ 681      * read the JVM_ACC_IS_OBSOLETE bit (or anything else) via the raw pointer as obsoleted methods
+ 682      * are subject to clean up and deletion (see InstanceKlass::purge_previous_versions_internal).
+ 683      */
+ 684     private static final ClassValue&lt;Map&lt;Long, SpeculationLog&gt;&gt; SpeculationLogs = new ClassValue&lt;Map&lt;Long, SpeculationLog&gt;&gt;() {
+ 685         @Override
+ 686         protected Map&lt;Long, SpeculationLog&gt; computeValue(java.lang.Class&lt;?&gt; type) {
+ 687             return new HashMap&lt;&gt;(4);
+ 688         }
+ 689     };
+ 690 
+ 691     public SpeculationLog getSpeculationLog() {
+ 692         Map&lt;Long, SpeculationLog&gt; map = SpeculationLogs.get(holder.mirror());
+ 693         synchronized (map) {
+ 694             SpeculationLog log = map.get(this.metaspaceMethod);
+ 695             if (log == null) {
+ 696                 log = new HotSpotSpeculationLog();
+ 697                 map.put(metaspaceMethod, log);
+ 698             }
+ 699             return log;
+ 700         }
+ 701     }
+ 702 
+ 703     public int intrinsicId() {
+ 704         HotSpotVMConfig config = config();
+ 705         return UNSAFE.getChar(metaspaceMethod + config.methodIntrinsicIdOffset);
+ 706     }
+ 707 
+ 708     public boolean isIntrinsicCandidate() {
+ 709         return (getFlags() &amp; config().methodFlagsIntrinsicCandidate) != 0;
+ 710     }
+ 711 
+ 712     /**
+ 713      * Allocates a compile id for this method by asking the VM for one.
+ 714      *
+ 715      * @param entryBCI entry bci
+ 716      * @return compile id
+ 717      */
+ 718     public int allocateCompileId(int entryBCI) {
+ 719         return compilerToVM().allocateCompileId(this, entryBCI);
+ 720     }
+ 721 
+ 722     public boolean hasCodeAtLevel(int entryBCI, int level) {
+ 723         if (entryBCI == config().invocationEntryBci) {
+ 724             return hasCompiledCodeAtLevel(level);
+ 725         }
+ 726         return compilerToVM().hasCompiledCodeForOSR(this, entryBCI, level);
+ 727     }
+ 728 }
+<a name="6" id="anc6"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="6" type="hidden" /></form></body></html>

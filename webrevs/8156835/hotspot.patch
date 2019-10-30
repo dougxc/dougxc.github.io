@@ -1,0 +1,3668 @@
+--- old/.mx.jvmci/mx_jvmci.py	2016-05-18 23:01:43.000000000 +0200
++++ new/.mx.jvmci/mx_jvmci.py	2016-05-18 23:01:43.000000000 +0200
+@@ -144,42 +144,6 @@
+     assert vm in _jdkJvmVariants
+     return True
+ 
+-class JvmciJDKDeployedDist(object):
+-    def __init__(self, name, compilers=False):
+-        self._name = name
+-        self._compilers = compilers
+-
+-    def dist(self):
+-        return mx.distribution(self._name)
+-
+-    def deploy(self, jdkDir):
+-        mx.nyi('deploy', self)
+-
+-    def post_parse_cmd_line(self):
+-        self.set_archiveparticipant()
+-
+-    def set_archiveparticipant(self):
+-        dist = self.dist()
+-        dist.set_archiveparticipant(JVMCIArchiveParticipant(dist))
+-
+-class ExtJDKDeployedDist(JvmciJDKDeployedDist):
+-    def __init__(self, name):
+-        JvmciJDKDeployedDist.__init__(self, name)
+-
+-"""
+-The monolithic JVMCI distribution is deployed through use of -Xbootclasspath/p
+-so that it's not necessary to run JDK make after editing JVMCI sources.
+-The latter causes all JDK Java sources to be rebuilt since JVMCI is
+-(currently) in java.base.
+-"""
+-_monolithicJvmci = JvmciJDKDeployedDist('JVMCI')
+-
+-"""
+-List of distributions that are deployed on the boot class path.
+-Note: In jvmci-8, they were deployed directly into the JDK directory.
+-"""
+-jdkDeployedDists = [_monolithicJvmci]
+-
+ def _makehelp():
+     return subprocess.check_output([mx.gmake_cmd(), 'help'], cwd=_jdkSourceRoot)
+ 
+@@ -217,7 +181,10 @@
+ 
+         # The OpenJDK build creates an empty cacerts file so copy one from
+         # the default JDK (which is assumed to be an OracleJDK)
+-        srcCerts = join(mx.get_jdk(tag='default').home, 'jre', 'lib', 'security', 'cacerts')
++        srcCerts = join(mx.get_jdk(tag='default').home, 'lib', 'security', 'cacerts')
++        if not exists(srcCerts):
++            # Might be building with JDK8 which has cacerts under jre/
++            srcCerts = join(mx.get_jdk(tag='default').home, 'jre', 'lib', 'security', 'cacerts')
+         dstCerts = join(jdkImageDir, 'lib', 'security', 'cacerts')
+         shutil.copyfile(srcCerts, dstCerts)
+ 
+@@ -673,24 +640,6 @@
+ 
+     run_vm(['-javaagent:' + joljar, '-cp', os.pathsep.join([mx.classpath(), joljar]), "org.openjdk.jol.MainObjectInternals"] + candidates)
+ 
+-class JVMCIArchiveParticipant:
+-    def __init__(self, dist):
+-        self.dist = dist
+-
+-    def __opened__(self, arc, srcArc, services):
+-        self.services = services
+-        self.jvmciServices = services
+-        self.arc = arc
+-
+-    def __add__(self, arcname, contents):
+-        return False
+-
+-    def __addsrc__(self, arcname, contents):
+-        return False
+-
+-    def __closing__(self):
+-        pass
+-
+ def _get_openjdk_os():
+     # See: common/autoconf/platform.m4
+     os = mx.get_os()
+@@ -744,10 +693,6 @@
+     name = '{}_{}_{}'.format(os, arch, buildname)
+     return join(_get_jdk_build_dir(debugLevel=debugLevel), 'hotspot', name)
+ 
+-def add_bootclasspath_prepend(dep):
+-    assert isinstance(dep, mx.ClasspathDependency)
+-    _jvmci_bootclasspath_prepends.append(dep)
+-
+ class JVMCI9JDKConfig(mx.JDKConfig):
+     def __init__(self, debugLevel):
+         self.debugLevel = debugLevel
+@@ -771,20 +716,6 @@
+             cp = os.pathsep.join([e for e in cp.split(os.pathsep) if e not in excluded])
+             args[cpIndex] = cp
+ 
+-        jvmciModeArgs = _jvmciModes[_vm.jvmciMode]
+-        if jvmciModeArgs:
+-            bcpDeps = [jdkDist.dist() for jdkDist in jdkDeployedDists]
+-            if bcpDeps:
+-                args = ['-Xbootclasspath/p:' + os.pathsep.join([d.classpath_repr() for d in bcpDeps])] + args
+-
+-        # Set the default JVMCI compiler
+-        for jdkDist in reversed(jdkDeployedDists):
+-            assert isinstance(jdkDist, JvmciJDKDeployedDist), jdkDist
+-            if jdkDist._compilers:
+-                jvmciCompiler = jdkDist._compilers[-1]
+-                args = ['-Djvmci.compiler=' + jvmciCompiler] + args
+-                break
+-
+         if '-version' in args:
+             ignoredArgs = args[args.index('-version') + 1:]
+             if  len(ignoredArgs) > 0:
+@@ -877,41 +808,3 @@
+             mx.warn('Ignoring "--jvmci-mode" option as "--jdk" tag is not "' + _JVMCI_JDK_TAG + '"')
+ 
+     _vm.update(jvmVariant, debugLevel, jvmciMode)
+-
+-    for jdkDist in jdkDeployedDists:
+-        jdkDist.post_parse_cmd_line()
+-
+-def _update_JDK9_STUBS_library():
+-    """
+-    Sets the "path" and "sha1" attributes of the "JDK9_STUBS" library.
+-    """
+-    jdk9InternalLib = _suite.suiteDict['libraries']['JDK9_STUBS']
+-    jarInputDir = join(_suite.get_output_root(), 'jdk9-stubs')
+-    jarPath = join(_suite.get_output_root(), 'jdk9-stubs.jar')
+-
+-    stubs = [
+-        ('jdk.internal.misc', 'VM', """package jdk.internal.misc;
+-public class VM {
+-    public static String getSavedProperty(String key) {
+-        throw new InternalError("should not reach here");
+-    }
+-}
+-""")
+-    ]
+-
+-    if not exists(jarPath):
+-        sourceFiles = []
+-        for (package, className, source) in stubs:
+-            sourceFile = join(jarInputDir, package.replace('.', os.sep), className + '.java')
+-            mx.ensure_dir_exists(os.path.dirname(sourceFile))
+-            with open(sourceFile, 'w') as fp:
+-                fp.write(source)
+-            sourceFiles.append(sourceFile)
+-        jdk = mx.get_jdk(tag='default')
+-        mx.run([jdk.javac, '-d', jarInputDir] + sourceFiles)
+-        mx.run([jdk.jar, 'cf', jarPath, '.'], cwd=jarInputDir)
+-
+-    jdk9InternalLib['path'] = jarPath
+-    jdk9InternalLib['sha1'] = mx.sha1OfFile(jarPath)
+-
+-_update_JDK9_STUBS_library()
+--- old/.mx.jvmci/suite.py	2016-05-18 23:01:44.000000000 +0200
++++ new/.mx.jvmci/suite.py	2016-05-18 23:01:44.000000000 +0200
+@@ -1,5 +1,5 @@
+ suite = {
+-  "mxversion" : "5.6.16",
++  "mxversion" : "5.23.1",
+   "name" : "jvmci",
+   "url" : "http://openjdk.java.net/projects/graal",
+   "developer" : {
+@@ -36,13 +36,6 @@
+       "urls" : ["http://central.maven.org/maven2/org/testng/testng/6.9.10/testng-6.9.10.jar"],
+       "sha1" : "6feb3e964aeb7097aff30c372aac3ec0f8d87ede",
+     },
+-
+-    # Stubs for classes introduced in JDK9 that allow compilation with a JDK8 javac and Eclipse.
+-    # The "path" and "sha1" attributes are added when mx_jvmci is loaded
+-    # (see mx_jvmci._update_JDK9_STUBS_library()).
+-    "JDK9_STUBS" : {
+-        "license" : "GPLv2-CPE",
+-     },
+   },
+ 
+   "projects" : {
+@@ -52,7 +45,7 @@
+     "jdk.vm.ci.services" : {
+       "subDir" : "src/jdk.vm.ci/share/classes",
+       "sourceDirs" : ["src"],
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "API,JVMCI",
+     },
+ 
+@@ -62,7 +55,7 @@
+       "subDir" : "src/jdk.vm.ci/share/classes",
+       "sourceDirs" : ["src"],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "API,JVMCI",
+     },
+ 
+@@ -70,7 +63,7 @@
+       "subDir" : "src/jdk.vm.ci/share/classes",
+       "sourceDirs" : ["src"],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "API,JVMCI",
+     },
+ 
+@@ -79,7 +72,7 @@
+       "sourceDirs" : ["src"],
+       "dependencies" : ["jdk.vm.ci.meta"],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "API,JVMCI",
+     },
+ 
+@@ -94,7 +87,7 @@
+         "jdk.vm.ci.hotspot",
+       ],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "API,JVMCI",
+     },
+ 
+@@ -106,7 +99,7 @@
+         "jdk.vm.ci.services",
+       ],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "API,JVMCI",
+     },
+ 
+@@ -119,18 +112,10 @@
+         "jdk.vm.ci.runtime",
+       ],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "API,JVMCI",
+     },
+ 
+-    "jdk.vm.ci.inittimer" : {
+-      "subDir" : "src/jdk.vm.ci/share/classes",
+-      "sourceDirs" : ["src"],
+-      "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
+-      "workingSets" : "JVMCI",
+-    },
+-
+     # ------------- JVMCI:HotSpot -------------
+ 
+     "jdk.vm.ci.aarch64" : {
+@@ -138,7 +123,7 @@
+       "sourceDirs" : ["src"],
+       "dependencies" : ["jdk.vm.ci.code"],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "JVMCI,AArch64",
+     },
+ 
+@@ -147,7 +132,7 @@
+       "sourceDirs" : ["src"],
+       "dependencies" : ["jdk.vm.ci.code"],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "JVMCI,AMD64",
+     },
+ 
+@@ -156,7 +141,7 @@
+       "sourceDirs" : ["src"],
+       "dependencies" : ["jdk.vm.ci.code"],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "JVMCI,SPARC",
+     },
+ 
+@@ -166,13 +151,15 @@
+       "dependencies" : [
+         "jdk.vm.ci.hotspotvmconfig",
+         "jdk.vm.ci.common",
+-        "jdk.vm.ci.inittimer",
+         "jdk.vm.ci.runtime",
+         "jdk.vm.ci.services",
+-        "JDK9_STUBS",
++      ],
++      "imports" : [
++        "jdk.internal.misc",
++        "jdk.internal.org.objectweb.asm",
+       ],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "JVMCI",
+     },
+ 
+@@ -184,7 +171,7 @@
+         "jdk.vm.ci.hotspot",
+       ],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "API,JVMCI",
+     },
+ 
+@@ -192,7 +179,7 @@
+       "subDir" : "src/jdk.vm.ci/share/classes",
+       "sourceDirs" : ["src"],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "JVMCI,HotSpot",
+     },
+ 
+@@ -204,7 +191,7 @@
+         "jdk.vm.ci.hotspot",
+       ],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "JVMCI,HotSpot,AArch64",
+     },
+ 
+@@ -216,7 +203,7 @@
+         "jdk.vm.ci.hotspot",
+       ],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "JVMCI,HotSpot,AMD64",
+     },
+ 
+@@ -228,7 +215,7 @@
+         "jdk.vm.ci.hotspot",
+       ],
+       "checkstyle" : "jdk.vm.ci.services",
+-      "javaCompliance" : "1.8",
++      "javaCompliance" : "9",
+       "workingSets" : "JVMCI,HotSpot,SPARC",
+     },
+ 
+@@ -250,7 +237,6 @@
+     "JVMCI_API" : {
+       "subDir" : "src/jdk.vm.ci/share/classes",
+       "dependencies" : [
+-        "jdk.vm.ci.inittimer",
+         "jdk.vm.ci.runtime",
+         "jdk.vm.ci.common",
+         "jdk.vm.ci.aarch64",
+@@ -293,31 +279,5 @@
+       ],
+       "exclude" : ["mx:JUNIT"],
+     },
+-
+-    # This exists to have a monolithic jvmci.jar file which simplifies
+-    # using the -Xoverride option in JDK9.
+-    "JVMCI" : {
+-      "subDir" : "src/jdk.vm.ci/share/classes",
+-      "overlaps" : [
+-        "JVMCI_API",
+-        "JVMCI_SERVICES",
+-        "JVMCI_HOTSPOT",
+-        "JVMCI_HOTSPOTVMCONFIG",
+-      ],
+-      "dependencies" : [
+-        "jdk.vm.ci.services",
+-        "jdk.vm.ci.inittimer",
+-        "jdk.vm.ci.runtime",
+-        "jdk.vm.ci.common",
+-        "jdk.vm.ci.aarch64",
+-        "jdk.vm.ci.amd64",
+-        "jdk.vm.ci.sparc",
+-        "jdk.vm.ci.hotspotvmconfig",
+-        "jdk.vm.ci.hotspot.aarch64",
+-        "jdk.vm.ci.hotspot.amd64",
+-        "jdk.vm.ci.hotspot.sparc",
+-      ],
+-      "exclude" : ["JDK9_STUBS"]
+-    },
+   },
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.aarch64/src/jdk/vm/ci/aarch64/AArch64Kind.java	2016-05-18 23:01:45.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.aarch64/src/jdk/vm/ci/aarch64/AArch64Kind.java	2016-05-18 23:01:44.000000000 +0200
+@@ -45,12 +45,7 @@
+     V128_DWORD(16, DWORD),
+     V128_QWORD(16, QWORD),
+     V128_SINGLE(16, SINGLE),
+-    V128_DOUBLE(16, DOUBLE),
+-
+-    MASK8(1),
+-    MASK16(2),
+-    MASK32(4),
+-    MASK64(8);
++    V128_DOUBLE(16, DOUBLE);
+ 
+     private final int size;
+     private final int vectorLength;
+@@ -121,18 +116,6 @@
+         }
+     }
+ 
+-    public boolean isMask() {
+-        switch (this) {
+-            case MASK8:
+-            case MASK16:
+-            case MASK32:
+-            case MASK64:
+-                return true;
+-            default:
+-                return false;
+-        }
+-    }
+-
+     public char getTypeChar() {
+         switch (this) {
+             case BYTE:
+@@ -159,11 +142,6 @@
+             case V128_SINGLE:
+             case V128_DOUBLE:
+                 return 'v';
+-            case MASK8:
+-            case MASK16:
+-            case MASK32:
+-            case MASK64:
+-                return 'k';
+             default:
+                 return '-';
+         }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/BytecodeFrame.java	2016-05-18 23:01:45.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/BytecodeFrame.java	2016-05-18 23:01:45.000000000 +0200
+@@ -98,6 +98,11 @@
+      */
+     public final boolean rethrowException;
+ 
++    /**
++     * Specifies if this object represents a frame state in the middle of executing a call. If
++     * true, the arguments to the call have been popped from the stack and the return value (for a
++     * non-void call) has not yet been pushed.
++     */
+     public final boolean duringCall;
+ 
+     /**
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/CompilationRequestResult.java	2016-05-18 23:01:46.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/CompilationRequestResult.java	2016-05-18 23:01:45.000000000 +0200
+@@ -23,49 +23,15 @@
+ package jdk.vm.ci.code;
+ 
+ /**
+- * Simple class to provide information about the result of a compile request.
++ * Provides information about the result of a {@link CompilationRequest}.
+  */
+-public final class CompilationRequestResult {
++public interface CompilationRequestResult {
+ 
+     /**
+-     * A user readable description of the failure.
++     * Determines if the compilation was successful.
++     *
++     * @return a non-null object whose {@link Object#toString()} describes the failure or null if
++     *         compilation was successful
+      */
+-    private final String failureMessage;
+-
+-    /**
+-     * Whether this is a transient failure where retrying would help.
+-     */
+-    private final boolean retry;
+-
+-    /**
+-     * Number of bytecodes inlined into the compilation, exclusive of the bytecodes in the root
+-     * method.
+-     */
+-    private final int inlinedBytecodes;
+-
+-    private CompilationRequestResult(String failureMessage, boolean retry, int inlinedBytecodes) {
+-        this.failureMessage = failureMessage;
+-        this.retry = retry;
+-        this.inlinedBytecodes = inlinedBytecodes;
+-    }
+-
+-    public static CompilationRequestResult success(int inlinedBytecodes) {
+-        return new CompilationRequestResult(null, true, inlinedBytecodes);
+-    }
+-
+-    public static CompilationRequestResult failure(String failureMessage, boolean retry) {
+-        return new CompilationRequestResult(failureMessage, retry, 0);
+-    }
+-
+-    public String getFailureMessage() {
+-        return failureMessage;
+-    }
+-
+-    public boolean getRetry() {
+-        return retry;
+-    }
+-
+-    public int getInlinedBytecodes() {
+-        return inlinedBytecodes;
+-    }
++    Object getFailure();
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/CompiledCode.java	2016-05-18 23:01:46.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/CompiledCode.java	2016-05-18 23:01:46.000000000 +0200
+@@ -23,7 +23,9 @@
+ package jdk.vm.ci.code;
+ 
+ /**
+- * The output from compiling a method.
++ * Marker type for an object containing the output of a compiler in a form suitable for installing
++ * into a managed code heap. Since the details of a code heap are specific to each runtime, this
++ * interface does not specify any methods.
+  */
+ public interface CompiledCode {
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/ReferenceMap.java	2016-05-18 23:01:47.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/ReferenceMap.java	2016-05-18 23:01:47.000000000 +0200
+@@ -22,5 +22,10 @@
+  */
+ package jdk.vm.ci.code;
+ 
++/**
++ * Marker type for an object containing information about where the object references are in machine
++ * state (e.g., registers or stack locations). This is typically associated with an execution point
++ * in compiled code.
++ */
+ public abstract class ReferenceMap {
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/Register.java	2016-05-18 23:01:47.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/Register.java	2016-05-18 23:01:47.000000000 +0200
+@@ -37,16 +37,8 @@
+     public static final Register None = new Register(-1, -1, "noreg", SPECIAL);
+ 
+     /**
+-     * Frame pointer of the current method. All spill slots and outgoing stack-based arguments are
+-     * addressed relative to this register.
+-     */
+-    public static final Register Frame = new Register(-2, -2, "framereg", SPECIAL);
+-
+-    public static final Register CallerFrame = new Register(-3, -3, "callerframereg", SPECIAL);
+-
+-    /**
+      * The identifier for this register that is unique across all the registers in a
+-     * {@link Architecture}. A valid register has {@code number > 0}.
++     * {@link Architecture}. A valid register has {@code number >= 0}.
+      */
+     public final int number;
+ 
+@@ -165,38 +157,6 @@
+         return number >= 0;
+     }
+ 
+-    /**
+-     * Gets the maximum register {@linkplain #number number} in a given set of registers.
+-     *
+-     * @param registers the set of registers to process
+-     * @return the maximum register number for any register in {@code registers}
+-     */
+-    public static int maxRegisterNumber(Register[] registers) {
+-        int max = Integer.MIN_VALUE;
+-        for (Register r : registers) {
+-            if (r.number > max) {
+-                max = r.number;
+-            }
+-        }
+-        return max;
+-    }
+-
+-    /**
+-     * Gets the maximum register {@linkplain #encoding encoding} in a given set of registers.
+-     *
+-     * @param registers the set of registers to process
+-     * @return the maximum register encoding for any register in {@code registers}
+-     */
+-    public static int maxRegisterEncoding(Register[] registers) {
+-        int max = Integer.MIN_VALUE;
+-        for (Register r : registers) {
+-            if (r.encoding > max) {
+-                max = r.encoding;
+-            }
+-        }
+-        return max;
+-    }
+-
+     @Override
+     public String toString() {
+         return name;
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/RegisterConfig.java	2016-05-18 23:01:48.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/RegisterConfig.java	2016-05-18 23:01:48.000000000 +0200
+@@ -47,7 +47,8 @@
+     }
+ 
+     /**
+-     * Gets the register to which {@link Register#Frame} and {@link Register#CallerFrame} are bound.
++     * Gets the register used as the frame pointer. Spill slots and outgoing stack-based arguments
++     * are addressed relative to this register.
+      */
+     Register getFrameRegister();
+ 
+@@ -107,14 +108,6 @@
+     RegisterAttributes[] getAttributesMap();
+ 
+     /**
+-     * Gets the register corresponding to a runtime-defined role.
+-     *
+-     * @param id the identifier of a runtime-defined register role
+-     * @return the register playing the role specified by {@code id}
+-     */
+-    Register getRegisterForRole(int id);
+-
+-    /**
+      * Determines if all {@link #getAllocatableRegisters() allocatable} registers are
+      * {@link #getCallerSaveRegisters() caller saved}.
+      */
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/ValueUtil.java	2016-05-18 23:01:48.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/ValueUtil.java	2016-05-18 23:01:48.000000000 +0200
+@@ -22,9 +22,6 @@
+  */
+ package jdk.vm.ci.code;
+ 
+-import java.util.ArrayList;
+-import java.util.List;
+-
+ import jdk.vm.ci.meta.AllocatableValue;
+ import jdk.vm.ci.meta.JavaConstant;
+ import jdk.vm.ci.meta.JavaValue;
+@@ -111,73 +108,4 @@
+             return asRegister(value);
+         }
+     }
+-
+-    public static boolean sameRegister(Value v1, Value v2) {
+-        return isRegister(v1) && isRegister(v2) && asRegister(v1).equals(asRegister(v2));
+-    }
+-
+-    public static boolean sameRegister(Value v1, Value v2, Value v3) {
+-        return sameRegister(v1, v2) && sameRegister(v1, v3);
+-    }
+-
+-    /**
+-     * Checks if all the provided values are different physical registers. The parameters can be
+-     * either {@link Register registers}, {@link Value values} or arrays of them. All values that
+-     * are not {@link RegisterValue registers} are ignored.
+-     */
+-    public static boolean differentRegisters(Object... values) {
+-        List<Register> registers = collectRegisters(values, new ArrayList<Register>());
+-        for (int i = 1; i < registers.size(); i++) {
+-            Register r1 = registers.get(i);
+-            for (int j = 0; j < i; j++) {
+-                Register r2 = registers.get(j);
+-                if (r1.equals(r2)) {
+-                    return false;
+-                }
+-            }
+-        }
+-        return true;
+-    }
+-
+-    private static List<Register> collectRegisters(Object[] values, List<Register> registers) {
+-        for (Object o : values) {
+-            if (o instanceof Register) {
+-                registers.add((Register) o);
+-            } else if (o instanceof Value) {
+-                if (isRegister((Value) o)) {
+-                    registers.add(asRegister((Value) o));
+-                }
+-            } else if (o instanceof Object[]) {
+-                collectRegisters((Object[]) o, registers);
+-            } else {
+-                throw new IllegalArgumentException("Not a Register or Value: " + o);
+-            }
+-        }
+-        return registers;
+-    }
+-
+-    /**
+-     * Subtract sets of registers (x - y).
+-     *
+-     * @param x a set of register to subtract from.
+-     * @param y a set of registers to subtract.
+-     * @return resulting set of registers (x - y).
+-     */
+-    public static Value[] subtractRegisters(Value[] x, Value[] y) {
+-        ArrayList<Value> result = new ArrayList<>(x.length);
+-        for (Value i : x) {
+-            boolean append = true;
+-            for (Value j : y) {
+-                if (ValueUtil.sameRegister(i, j)) {
+-                    append = false;
+-                    break;
+-                }
+-            }
+-            if (append) {
+-                result.add(i);
+-            }
+-        }
+-        Value[] resultArray = new Value[result.size()];
+-        return result.toArray(resultArray);
+-    }
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/site/ConstantReference.java	2016-05-18 23:01:49.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/site/ConstantReference.java	2016-05-18 23:01:49.000000000 +0200
+@@ -26,6 +26,10 @@
+ 
+ import jdk.vm.ci.meta.VMConstant;
+ 
++/**
++ * Represents an embedded {@link VMConstant} in the code or data section that needs to be
++ * {@link DataPatch patched} by the VM (e.g. an embedded pointer to a Java object).
++ */
+ public final class ConstantReference extends Reference {
+ 
+     private final VMConstant constant;
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/site/DataPatch.java	2016-05-18 23:01:49.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/site/DataPatch.java	2016-05-18 23:01:49.000000000 +0200
+@@ -24,12 +24,12 @@
+ 
+ import java.util.Objects;
+ 
+-import jdk.vm.ci.meta.JavaConstant;
++import jdk.vm.ci.meta.VMConstant;
+ 
+ /**
+  * Represents a code site that references some data. The associated data can be either a
+  * {@link DataSectionReference reference} to the data section, or it may be an inlined
+- * {@link JavaConstant} that needs to be patched.
++ * {@link VMConstant} that needs to be patched.
+  */
+ public final class DataPatch extends Site {
+ 
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/site/DataSectionReference.java	2016-05-18 23:01:50.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/site/DataSectionReference.java	2016-05-18 23:01:50.000000000 +0200
+@@ -22,6 +22,10 @@
+  */
+ package jdk.vm.ci.code.site;
+ 
++/**
++ * Represents a pointer to some location in the data section that should be {@link DataPatch
++ * patched} into the code.
++ */
+ public final class DataSectionReference extends Reference {
+ 
+     private boolean initialized;
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/site/InfopointReason.java	2016-05-18 23:01:50.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/site/InfopointReason.java	2016-05-18 23:01:50.000000000 +0200
+@@ -30,7 +30,6 @@
+     SAFEPOINT,
+     CALL,
+     IMPLICIT_EXCEPTION,
+-    METASPACE_ACCESS,
+     METHOD_START,
+     METHOD_END,
+     BYTECODE_POSITION;
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/site/Mark.java	2016-05-18 23:01:51.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/site/Mark.java	2016-05-18 23:01:51.000000000 +0200
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2016, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2009, 2016, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -25,13 +25,23 @@
+ import java.util.Objects;
+ 
+ /**
+- * Represents a mark in the machine code that can be used by the runtime for its own purposes. A
+- * mark can reference other marks.
++ * Associates arbitrary information with a position in machine code. For example, HotSpot specific
++ * code in a compiler backend may use this to denote the position of a safepoint, exception handler
++ * entry point, verified entry point etc.
+  */
+ public final class Mark extends Site {
+ 
++    /**
++     * An object denoting extra semantic information about the machine code position of this mark.
++     */
+     public final Object id;
+ 
++    /**
++     * Creates a mark that associates {@code id} with the machine code position {@code pcOffset}.
++     *
++     * @param pcOffset
++     * @param id
++     */
+     public Mark(int pcOffset, Object id) {
+         super(pcOffset);
+         this.id = id;
+@@ -40,7 +50,7 @@
+     @Override
+     public String toString() {
+         if (id == null) {
+-            return String.format("%d[<mar>]", pcOffset);
++            return String.format("%d[<mark>]", pcOffset);
+         } else if (id instanceof Integer) {
+             return String.format("%d[<mark with id %s>]", pcOffset, Integer.toHexString((Integer) id));
+         } else {
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/stack/InspectedFrame.java	2016-05-18 23:01:52.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/stack/InspectedFrame.java	2016-05-18 23:01:51.000000000 +0200
+@@ -24,16 +24,19 @@
+ 
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+ 
++/**
++ * Access to the object variables in a stack frame.
++ */
+ public interface InspectedFrame {
+ 
+     /**
+-     * Returns the value of the local at the given index. Currently only works for object values.
+-     * This value is a copy iff {@link #isVirtual(int)} is true.
++     * Returns the value of the object local at {@code index}. This value is a copy iff
++     * {@link #isVirtual(int)} is true.
+      */
+     Object getLocal(int index);
+ 
+     /**
+-     * Returns whether the local at the given index is a virtual object, and therefore the object
++     * Returns whether the local at {@code index} is a virtual object, and therefore the object
+      * returned by {@link #getLocal(int)} is a copy.
+      */
+     boolean isVirtual(int index);
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.common/src/jdk/vm/ci/common/JVMCIError.java	2016-05-18 23:01:52.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.common/src/jdk/vm/ci/common/JVMCIError.java	2016-05-18 23:01:52.000000000 +0200
+@@ -31,7 +31,6 @@
+ public class JVMCIError extends Error {
+ 
+     private static final long serialVersionUID = 531632331813456233L;
+-    private final ArrayList<String> context = new ArrayList<>();
+ 
+     public static RuntimeException unimplemented() {
+         throw new JVMCIError("unimplemented");
+@@ -101,27 +100,6 @@
+         super(cause);
+     }
+ 
+-    /**
+-     * This constructor creates a {@link JVMCIError} and adds all the
+-     * {@linkplain #addContext(String) context} of another {@link JVMCIError}.
+-     *
+-     * @param e the original {@link JVMCIError}
+-     */
+-    public JVMCIError(JVMCIError e) {
+-        super(e);
+-        context.addAll(e.context);
+-    }
+-
+-    @Override
+-    public String toString() {
+-        StringBuilder str = new StringBuilder();
+-        str.append(super.toString());
+-        for (String s : context) {
+-            str.append("\n\tat ").append(s);
+-        }
+-        return str.toString();
+-    }
+-
+     private static String format(String msg, Object... args) {
+         if (args != null) {
+             // expand Iterable parameters into a list representation
+@@ -137,13 +115,4 @@
+         }
+         return String.format(Locale.ENGLISH, msg, args);
+     }
+-
+-    public JVMCIError addContext(String newContext) {
+-        this.context.add(newContext);
+-        return this;
+-    }
+-
+-    public JVMCIError addContext(String name, Object obj) {
+-        return addContext(format("%s: %s", name, obj));
+-    }
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot.aarch64/src/jdk/vm/ci/hotspot/aarch64/AArch64HotSpotJVMCIBackendFactory.java	2016-05-18 23:01:53.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot.aarch64/src/jdk/vm/ci/hotspot/aarch64/AArch64HotSpotJVMCIBackendFactory.java	2016-05-18 23:01:53.000000000 +0200
+@@ -22,7 +22,7 @@
+  */
+ package jdk.vm.ci.hotspot.aarch64;
+ 
+-import static jdk.vm.ci.inittimer.InitTimer.timer;
++import static jdk.vm.ci.common.InitTimer.timer;
+ 
+ import java.util.EnumSet;
+ 
+@@ -31,6 +31,7 @@
+ import jdk.vm.ci.code.RegisterConfig;
+ import jdk.vm.ci.code.TargetDescription;
+ import jdk.vm.ci.code.stack.StackIntrospection;
++import jdk.vm.ci.common.InitTimer;
+ import jdk.vm.ci.hotspot.HotSpotCodeCacheProvider;
+ import jdk.vm.ci.hotspot.HotSpotConstantReflectionProvider;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIBackendFactory;
+@@ -38,7 +39,6 @@
+ import jdk.vm.ci.hotspot.HotSpotMetaAccessProvider;
+ import jdk.vm.ci.hotspot.HotSpotStackIntrospection;
+ import jdk.vm.ci.hotspot.HotSpotVMConfig;
+-import jdk.vm.ci.inittimer.InitTimer;
+ import jdk.vm.ci.meta.ConstantReflectionProvider;
+ import jdk.vm.ci.runtime.JVMCIBackend;
+ 
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot.aarch64/src/jdk/vm/ci/hotspot/aarch64/AArch64HotSpotRegisterConfig.java	2016-05-18 23:01:53.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot.aarch64/src/jdk/vm/ci/hotspot/aarch64/AArch64HotSpotRegisterConfig.java	2016-05-18 23:01:53.000000000 +0200
+@@ -196,11 +196,6 @@
+     }
+ 
+     @Override
+-    public Register getRegisterForRole(int index) {
+-        throw new UnsupportedOperationException();
+-    }
+-
+-    @Override
+     public CallingConvention getCallingConvention(Type type, JavaType returnType, JavaType[] parameterTypes, ValueKindFactory<?> valueKindFactory) {
+         HotSpotCallingConventionType hotspotType = (HotSpotCallingConventionType) type;
+         if (type == HotSpotCallingConventionType.NativeCall) {
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot.amd64/src/jdk/vm/ci/hotspot/amd64/AMD64HotSpotJVMCIBackendFactory.java	2016-05-18 23:01:54.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot.amd64/src/jdk/vm/ci/hotspot/amd64/AMD64HotSpotJVMCIBackendFactory.java	2016-05-18 23:01:54.000000000 +0200
+@@ -22,7 +22,7 @@
+  */
+ package jdk.vm.ci.hotspot.amd64;
+ 
+-import static jdk.vm.ci.inittimer.InitTimer.timer;
++import static jdk.vm.ci.common.InitTimer.timer;
+ 
+ import java.util.EnumSet;
+ 
+@@ -31,6 +31,7 @@
+ import jdk.vm.ci.code.RegisterConfig;
+ import jdk.vm.ci.code.TargetDescription;
+ import jdk.vm.ci.code.stack.StackIntrospection;
++import jdk.vm.ci.common.InitTimer;
+ import jdk.vm.ci.hotspot.HotSpotCodeCacheProvider;
+ import jdk.vm.ci.hotspot.HotSpotConstantReflectionProvider;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIBackendFactory;
+@@ -38,7 +39,6 @@
+ import jdk.vm.ci.hotspot.HotSpotMetaAccessProvider;
+ import jdk.vm.ci.hotspot.HotSpotStackIntrospection;
+ import jdk.vm.ci.hotspot.HotSpotVMConfig;
+-import jdk.vm.ci.inittimer.InitTimer;
+ import jdk.vm.ci.meta.ConstantReflectionProvider;
+ import jdk.vm.ci.runtime.JVMCIBackend;
+ 
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot.amd64/src/jdk/vm/ci/hotspot/amd64/AMD64HotSpotRegisterConfig.java	2016-05-18 23:01:54.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot.amd64/src/jdk/vm/ci/hotspot/amd64/AMD64HotSpotRegisterConfig.java	2016-05-18 23:01:54.000000000 +0200
+@@ -193,11 +193,6 @@
+     }
+ 
+     @Override
+-    public Register getRegisterForRole(int index) {
+-        throw new UnsupportedOperationException();
+-    }
+-
+-    @Override
+     public CallingConvention getCallingConvention(Type type, JavaType returnType, JavaType[] parameterTypes, ValueKindFactory<?> valueKindFactory) {
+         HotSpotCallingConventionType hotspotType = (HotSpotCallingConventionType) type;
+         if (type == HotSpotCallingConventionType.NativeCall) {
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot.sparc/src/jdk/vm/ci/hotspot/sparc/SPARCHotSpotJVMCIBackendFactory.java	2016-05-18 23:01:55.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot.sparc/src/jdk/vm/ci/hotspot/sparc/SPARCHotSpotJVMCIBackendFactory.java	2016-05-18 23:01:55.000000000 +0200
+@@ -22,7 +22,7 @@
+  */
+ package jdk.vm.ci.hotspot.sparc;
+ 
+-import static jdk.vm.ci.inittimer.InitTimer.timer;
++import static jdk.vm.ci.common.InitTimer.timer;
+ 
+ import java.util.EnumSet;
+ 
+@@ -30,6 +30,7 @@
+ import jdk.vm.ci.code.RegisterConfig;
+ import jdk.vm.ci.code.TargetDescription;
+ import jdk.vm.ci.code.stack.StackIntrospection;
++import jdk.vm.ci.common.InitTimer;
+ import jdk.vm.ci.hotspot.HotSpotCodeCacheProvider;
+ import jdk.vm.ci.hotspot.HotSpotConstantReflectionProvider;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIBackendFactory;
+@@ -37,7 +38,6 @@
+ import jdk.vm.ci.hotspot.HotSpotMetaAccessProvider;
+ import jdk.vm.ci.hotspot.HotSpotStackIntrospection;
+ import jdk.vm.ci.hotspot.HotSpotVMConfig;
+-import jdk.vm.ci.inittimer.InitTimer;
+ import jdk.vm.ci.runtime.JVMCIBackend;
+ import jdk.vm.ci.sparc.SPARC;
+ import jdk.vm.ci.sparc.SPARC.CPUFeature;
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot.sparc/src/jdk/vm/ci/hotspot/sparc/SPARCHotSpotRegisterConfig.java	2016-05-18 23:01:56.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot.sparc/src/jdk/vm/ci/hotspot/sparc/SPARCHotSpotRegisterConfig.java	2016-05-18 23:01:56.000000000 +0200
+@@ -199,11 +199,6 @@
+     }
+ 
+     @Override
+-    public Register getRegisterForRole(int index) {
+-        throw new UnsupportedOperationException();
+-    }
+-
+-    @Override
+     public CallingConvention getCallingConvention(Type type, JavaType returnType, JavaType[] parameterTypes, ValueKindFactory<?> valueKindFactory) {
+         HotSpotCallingConventionType hotspotType = (HotSpotCallingConventionType) type;
+         if (type == HotSpotCallingConventionType.JavaCall || type == HotSpotCallingConventionType.NativeCall) {
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2016-05-18 23:01:56.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/CompilerToVM.java	2016-05-18 23:01:56.000000000 +0200
+@@ -23,8 +23,8 @@
+ 
+ package jdk.vm.ci.hotspot;
+ 
++import static jdk.vm.ci.common.InitTimer.timer;
+ import static jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.runtime;
+-import static jdk.vm.ci.inittimer.InitTimer.timer;
+ 
+ import java.lang.reflect.Constructor;
+ import java.lang.reflect.Method;
+@@ -33,9 +33,9 @@
+ import jdk.vm.ci.code.InstalledCode;
+ import jdk.vm.ci.code.InvalidInstalledCodeException;
+ import jdk.vm.ci.code.TargetDescription;
++import jdk.vm.ci.common.InitTimer;
+ import jdk.vm.ci.common.JVMCIError;
+ import jdk.vm.ci.hotspotvmconfig.HotSpotVMField;
+-import jdk.vm.ci.inittimer.InitTimer;
+ import jdk.vm.ci.meta.JavaType;
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+ import jdk.vm.ci.meta.ResolvedJavaType;
+@@ -79,7 +79,7 @@
+     native byte[] getBytecode(HotSpotResolvedJavaMethodImpl method);
+ 
+     /**
+-     * Gets the number of entries in {@code method}'s exception handler table or 0 if it has not
++     * Gets the number of entries in {@code method}'s exception handler table or 0 if it has no
+      * exception handler table.
+      */
+     native int getExceptionTableLength(HotSpotResolvedJavaMethodImpl method);
+@@ -315,6 +315,21 @@
+      */
+     native int installCode(TargetDescription target, HotSpotCompiledCode compiledCode, InstalledCode code, HotSpotSpeculationLog speculationLog);
+ 
++    /**
++     * Generates the VM metadata for some compiled code and copies them into {@code metaData}. This
++     * method does not install anything into the code cache.
++     *
++     * @param target the target where this code would be installed
++     * @param compiledCode the result of a compilation
++     * @param metaData the metadata is written to this object
++     * @return the outcome of the installation which will be one of
++     *         {@link HotSpotVMConfig#codeInstallResultOk},
++     *         {@link HotSpotVMConfig#codeInstallResultCacheFull},
++     *         {@link HotSpotVMConfig#codeInstallResultCodeTooLarge},
++     *         {@link HotSpotVMConfig#codeInstallResultDependenciesFailed} or
++     *         {@link HotSpotVMConfig#codeInstallResultDependenciesInvalid}.
++     * @throws JVMCIError if there is something wrong with the compiled code or the metadata
++     */
+     public native int getMetadata(TargetDescription target, HotSpotCompiledCode compiledCode, HotSpotMetaData metaData);
+ 
+     /**
+@@ -475,10 +490,10 @@
+     native HotSpotStackFrameReference getNextStackFrame(HotSpotStackFrameReference frame, ResolvedJavaMethod[] methods, int initialSkip);
+ 
+     /**
+-     * Materializes all virtual objects within {@code stackFrame} updates its locals.
++     * Materializes all virtual objects within {@code stackFrame} and updates its locals.
+      *
+      * @param invalidate if {@code true}, the compiled method for the stack frame will be
+-     *            invalidated.
++     *            invalidated
+      */
+     native void materializeVirtualObjects(HotSpotStackFrameReference stackFrame, boolean invalidate);
+ 
+@@ -495,7 +510,6 @@
+     /**
+      * Determines if debug info should also be emitted at non-safepoint locations.
+      */
+-
+     native boolean shouldDebugNonSafepoints();
+ 
+     /**
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotCompiledNmethod.java	2016-05-18 23:01:57.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotCompiledNmethod.java	2016-05-18 23:01:57.000000000 +0200
+@@ -25,7 +25,6 @@
+ import jdk.vm.ci.code.StackSlot;
+ import jdk.vm.ci.code.site.DataPatch;
+ import jdk.vm.ci.code.site.Site;
+-import jdk.vm.ci.inittimer.SuppressFBWarnings;
+ import jdk.vm.ci.meta.Assumptions.Assumption;
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+ 
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantPool.java	2016-05-18 23:01:57.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantPool.java	2016-05-18 23:01:57.000000000 +0200
+@@ -42,7 +42,7 @@
+ /**
+  * Implementation of {@link ConstantPool} for HotSpot.
+  */
+-final class HotSpotConstantPool implements ConstantPool, HotSpotProxified, MetaspaceWrapperObject {
++final class HotSpotConstantPool implements ConstantPool, MetaspaceWrapperObject {
+ 
+     /**
+      * Subset of JVM bytecode opcodes used by {@link HotSpotConstantPool}.
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantReflectionProvider.java	2016-05-18 23:01:58.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantReflectionProvider.java	2016-05-18 23:01:58.000000000 +0200
+@@ -39,7 +39,7 @@
+ /**
+  * HotSpot implementation of {@link ConstantReflectionProvider}.
+  */
+-public class HotSpotConstantReflectionProvider implements ConstantReflectionProvider, HotSpotProxified {
++public class HotSpotConstantReflectionProvider implements ConstantReflectionProvider {
+ 
+     protected final HotSpotJVMCIRuntimeProvider runtime;
+     protected final HotSpotMethodHandleAccessProvider methodHandleAccess;
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotInstalledCode.java	2016-05-18 23:01:58.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotInstalledCode.java	2016-05-18 23:01:58.000000000 +0200
+@@ -23,9 +23,9 @@
+ package jdk.vm.ci.hotspot;
+ 
+ import static jdk.vm.ci.hotspot.UnsafeAccess.UNSAFE;
+-import jdk.vm.ci.code.InstalledCode;
+-import jdk.vm.ci.inittimer.SuppressFBWarnings;
++
+ import jdk.internal.misc.Unsafe;
++import jdk.vm.ci.code.InstalledCode;
+ 
+ /**
+  * Implementation of {@link InstalledCode} for HotSpot.
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java	2016-05-18 23:01:59.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCICompilerConfig.java	2016-05-18 23:01:59.000000000 +0200
+@@ -25,7 +25,6 @@
+ import java.lang.reflect.Module;
+ 
+ import jdk.vm.ci.code.CompilationRequest;
+-import jdk.vm.ci.code.CompilationRequestResult;
+ import jdk.vm.ci.common.JVMCIError;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.Option;
+ import jdk.vm.ci.runtime.JVMCICompiler;
+@@ -37,7 +36,7 @@
+ 
+     private static class DummyCompilerFactory extends JVMCICompilerFactory implements JVMCICompiler {
+ 
+-        public CompilationRequestResult compileMethod(CompilationRequest request) {
++        public HotSpotCompilationRequestResult compileMethod(CompilationRequest request) {
+             throw new JVMCIError("no JVMCI compiler selected");
+         }
+ 
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIMetaAccessContext.java	2016-05-18 23:01:59.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIMetaAccessContext.java	2016-05-18 23:01:59.000000000 +0200
+@@ -30,7 +30,6 @@
+ import java.util.Map;
+ import java.util.WeakHashMap;
+ 
+-import jdk.vm.ci.meta.JVMCIMetaAccessContext;
+ import jdk.vm.ci.meta.JavaKind;
+ import jdk.vm.ci.meta.ResolvedJavaType;
+ 
+@@ -47,7 +46,7 @@
+  * longer used.
+  *
+  */
+-public class HotSpotJVMCIMetaAccessContext implements JVMCIMetaAccessContext {
++public class HotSpotJVMCIMetaAccessContext {
+ 
+     /**
+      * The set of currently live contexts used for tracking of live metadata. Examined from the VM
+@@ -149,7 +148,11 @@
+ 
+     private final Map<Class<?>, WeakReference<ResolvedJavaType>> typeMap = new WeakHashMap<>();
+ 
+-    @Override
++    /**
++     * Gets the JVMCI mirror for a {@link Class} object.
++     *
++     * @return the {@link ResolvedJavaType} corresponding to {@code javaClass}
++     */
+     public synchronized ResolvedJavaType fromClass(Class<?> javaClass) {
+         WeakReference<ResolvedJavaType> typeRef = typeMap.get(javaClass);
+         ResolvedJavaType type = typeRef != null ? typeRef.get() : null;
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java	2016-05-18 23:02:00.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntime.java	2016-05-18 23:02:00.000000000 +0200
+@@ -22,7 +22,7 @@
+  */
+ package jdk.vm.ci.hotspot;
+ 
+-import static jdk.vm.ci.inittimer.InitTimer.timer;
++import static jdk.vm.ci.common.InitTimer.timer;
+ 
+ import java.io.IOException;
+ import java.io.OutputStream;
+@@ -37,16 +37,15 @@
+ import java.util.Objects;
+ import java.util.TreeMap;
+ 
++import jdk.internal.misc.VM;
+ import jdk.vm.ci.code.Architecture;
+ import jdk.vm.ci.code.CompilationRequestResult;
+ import jdk.vm.ci.code.CompiledCode;
+ import jdk.vm.ci.code.InstalledCode;
++import jdk.vm.ci.common.InitTimer;
+ import jdk.vm.ci.common.JVMCIError;
+ import jdk.vm.ci.hotspot.services.HotSpotJVMCICompilerFactory;
+ import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
+-import jdk.vm.ci.inittimer.InitTimer;
+-import jdk.vm.ci.inittimer.SuppressFBWarnings;
+-import jdk.vm.ci.meta.JVMCIMetaAccessContext;
+ import jdk.vm.ci.meta.JavaKind;
+ import jdk.vm.ci.meta.JavaType;
+ import jdk.vm.ci.meta.ResolvedJavaType;
+@@ -55,9 +54,6 @@
+ import jdk.vm.ci.runtime.JVMCICompiler;
+ import jdk.vm.ci.runtime.services.JVMCICompilerFactory;
+ import jdk.vm.ci.services.Services;
+-import jdk.internal.misc.VM;
+-
+-//JaCoCo Exclude
+ 
+ /**
+  * HotSpot implementation of a JVMCI runtime.
+@@ -69,7 +65,7 @@
+  * {@link #runtime()}. This allows the initialization to funnel back through
+  * {@link JVMCI#initialize()} without deadlocking.
+  */
+-public final class HotSpotJVMCIRuntime implements HotSpotJVMCIRuntimeProvider, HotSpotProxified {
++public final class HotSpotJVMCIRuntime implements HotSpotJVMCIRuntimeProvider {
+ 
+     @SuppressWarnings("try")
+     static class DelayedInit {
+@@ -207,7 +203,7 @@
+     private final JVMCICompilerFactory compilerFactory;
+     private final HotSpotJVMCICompilerFactory hsCompilerFactory;
+     private volatile JVMCICompiler compiler;
+-    protected final JVMCIMetaAccessContext metaAccessContext;
++    protected final HotSpotJVMCIMetaAccessContext metaAccessContext;
+ 
+     /**
+      * Stores the result of {@link HotSpotJVMCICompilerFactory#getCompilationLevelAdjustment} so
+@@ -246,17 +242,7 @@
+ 
+         vmEventListeners = Services.load(HotSpotVMEventListener.class);
+ 
+-        JVMCIMetaAccessContext context = null;
+-        for (HotSpotVMEventListener vmEventListener : vmEventListeners) {
+-            context = vmEventListener.createMetaAccessContext(this);
+-            if (context != null) {
+-                break;
+-            }
+-        }
+-        if (context == null) {
+-            context = new HotSpotJVMCIMetaAccessContext();
+-        }
+-        metaAccessContext = context;
++        metaAccessContext = new HotSpotJVMCIMetaAccessContext();
+ 
+         boolean printFlags = Option.PrintFlags.getBoolean();
+         boolean showFlags = Option.ShowFlags.getBoolean();
+@@ -302,10 +288,6 @@
+         return compilerToVm;
+     }
+ 
+-    public JVMCIMetaAccessContext getMetaAccessContext() {
+-        return metaAccessContext;
+-    }
+-
+     public JVMCICompiler getCompiler() {
+         if (compiler == null) {
+             synchronized (this) {
+@@ -361,10 +343,24 @@
+      * Called from the VM.
+      */
+     @SuppressWarnings({"unused"})
+-    private CompilationRequestResult compileMethod(HotSpotResolvedJavaMethod method, int entryBCI, long jvmciEnv, int id) {
++    private HotSpotCompilationRequestResult compileMethod(HotSpotResolvedJavaMethod method, int entryBCI, long jvmciEnv, int id) {
+         CompilationRequestResult result = getCompiler().compileMethod(new HotSpotCompilationRequest(method, entryBCI, jvmciEnv, id));
+         assert result != null : "compileMethod must always return something";
+-        return result;
++        HotSpotCompilationRequestResult hsResult;
++        if (result instanceof HotSpotCompilationRequestResult) {
++            hsResult = (HotSpotCompilationRequestResult) result;
++        } else {
++            Object failure = result.getFailure();
++            if (failure != null) {
++                boolean retry = false; // Be conservative with unknown compiler
++                hsResult = HotSpotCompilationRequestResult.failure(failure.toString(), retry);
++            } else {
++                int inlinedBytecodes = -1;
++                hsResult = HotSpotCompilationRequestResult.success(inlinedBytecodes);
++            }
++        }
++
++        return hsResult;
+     }
+ 
+     /**
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntimeProvider.java	2016-05-18 23:02:01.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotJVMCIRuntimeProvider.java	2016-05-18 23:02:01.000000000 +0200
+@@ -24,15 +24,12 @@
+ 
+ import java.io.OutputStream;
+ 
++import jdk.internal.misc.Unsafe;
+ import jdk.vm.ci.common.JVMCIError;
+-import jdk.vm.ci.meta.JVMCIMetaAccessContext;
+ import jdk.vm.ci.meta.JavaKind;
+ import jdk.vm.ci.meta.JavaType;
+ import jdk.vm.ci.meta.ResolvedJavaType;
+ import jdk.vm.ci.runtime.JVMCIRuntime;
+-import jdk.internal.misc.Unsafe;
+-
+-//JaCoCo Exclude
+ 
+ /**
+  * Configuration information for the HotSpot JVMCI runtime.
+@@ -70,8 +67,6 @@
+      */
+     ResolvedJavaType fromClass(Class<?> clazz);
+ 
+-    JVMCIMetaAccessContext getMetaAccessContext();
+-
+     /**
+      * The offset from the origin of an array to the first element.
+      *
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMemoryAccessProviderImpl.java	2016-05-18 23:02:01.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMemoryAccessProviderImpl.java	2016-05-18 23:02:01.000000000 +0200
+@@ -33,7 +33,7 @@
+ /**
+  * HotSpot implementation of {@link MemoryAccessProvider}.
+  */
+-class HotSpotMemoryAccessProviderImpl implements HotSpotMemoryAccessProvider, HotSpotProxified {
++class HotSpotMemoryAccessProviderImpl implements HotSpotMemoryAccessProvider {
+ 
+     protected final HotSpotJVMCIRuntimeProvider runtime;
+ 
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMetaAccessProvider.java	2016-05-18 23:02:02.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMetaAccessProvider.java	2016-05-18 23:02:02.000000000 +0200
+@@ -52,7 +52,7 @@
+ /**
+  * HotSpot implementation of {@link MetaAccessProvider}.
+  */
+-public class HotSpotMetaAccessProvider implements MetaAccessProvider, HotSpotProxified {
++public class HotSpotMetaAccessProvider implements MetaAccessProvider {
+ 
+     protected final HotSpotJVMCIRuntimeProvider runtime;
+ 
+@@ -308,7 +308,6 @@
+                 return 0;
+             } else {
+                 if (lookupJavaType.isArray()) {
+-                    // TODO(tw): Add compressed pointer support.
+                     int length = Array.getLength(((HotSpotObjectConstantImpl) constant).object());
+                     ResolvedJavaType elementType = lookupJavaType.getComponentType();
+                     JavaKind elementKind = elementType.getJavaKind();
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMetaData.java	2016-05-18 23:02:03.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMetaData.java	2016-05-18 23:02:02.000000000 +0200
+@@ -22,8 +22,9 @@
+  */
+ package jdk.vm.ci.hotspot;
+ 
+-import jdk.vm.ci.inittimer.SuppressFBWarnings;
+-
++/**
++ * Encapsulates the VM metadata generated by {@link CompilerToVM#getMetadata}.
++ */
+ public class HotSpotMetaData {
+     @SuppressFBWarnings(value = "UWF_UNWRITTEN_FIELD", justification = "field is set by the native part") private byte[] pcDescBytes;
+     @SuppressFBWarnings(value = "UWF_UNWRITTEN_FIELD", justification = "field is set by the native part") private byte[] scopesDescBytes;
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMetaspaceConstantImpl.java	2016-05-18 23:02:03.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMetaspaceConstantImpl.java	2016-05-18 23:02:03.000000000 +0200
+@@ -27,7 +27,7 @@
+ import jdk.vm.ci.meta.Constant;
+ import jdk.vm.ci.meta.VMConstant;
+ 
+-final class HotSpotMetaspaceConstantImpl implements HotSpotMetaspaceConstant, VMConstant, HotSpotProxified {
++final class HotSpotMetaspaceConstantImpl implements HotSpotMetaspaceConstant, VMConstant {
+ 
+     static HotSpotMetaspaceConstantImpl forMetaspaceObject(MetaspaceWrapperObject metaspaceObject, boolean compressed) {
+         return new HotSpotMetaspaceConstantImpl(metaspaceObject, compressed);
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethod.java	2016-05-18 23:02:04.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethod.java	2016-05-18 23:02:03.000000000 +0200
+@@ -32,7 +32,7 @@
+ import jdk.vm.ci.meta.JavaMethod;
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+ 
+-abstract class HotSpotMethod implements JavaMethod, Formattable /* , JavaMethodContex */ {
++abstract class HotSpotMethod implements JavaMethod, Formattable {
+ 
+     public static String applyFormattingFlagsAndWidth(String s, int flags, int width) {
+         if (flags == 0 && width < 0) {
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethodHandleAccessProvider.java	2016-05-18 23:02:04.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMethodHandleAccessProvider.java	2016-05-18 23:02:04.000000000 +0200
+@@ -33,7 +33,7 @@
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+ import jdk.vm.ci.meta.ResolvedJavaType;
+ 
+-public class HotSpotMethodHandleAccessProvider implements MethodHandleAccessProvider, HotSpotProxified {
++public class HotSpotMethodHandleAccessProvider implements MethodHandleAccessProvider {
+ 
+     private final ConstantReflectionProvider constantReflection;
+ 
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotObjectConstantImpl.java	2016-05-18 23:02:05.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotObjectConstantImpl.java	2016-05-18 23:02:05.000000000 +0200
+@@ -28,7 +28,6 @@
+ import java.lang.invoke.ConstantCallSite;
+ import java.lang.invoke.MethodHandle;
+ 
+-import jdk.vm.ci.inittimer.SuppressFBWarnings;
+ import jdk.vm.ci.meta.Assumptions;
+ import jdk.vm.ci.meta.Constant;
+ import jdk.vm.ci.meta.JavaConstant;
+@@ -39,7 +38,7 @@
+  * Represents a constant non-{@code null} object reference, within the compiler and across the
+  * compiler/runtime interface.
+  */
+-final class HotSpotObjectConstantImpl implements HotSpotObjectConstant, HotSpotProxified {
++final class HotSpotObjectConstantImpl implements HotSpotObjectConstant {
+ 
+     static JavaConstant forObject(Object object) {
+         return forObject(object, false);
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotProfilingInfo.java	2016-05-18 23:02:05.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotProfilingInfo.java	2016-05-18 23:02:05.000000000 +0200
+@@ -28,10 +28,7 @@
+ import jdk.vm.ci.meta.ProfilingInfo;
+ import jdk.vm.ci.meta.TriState;
+ 
+-public final class HotSpotProfilingInfo implements ProfilingInfo, HotSpotProxified {
+-
+-    // private static final DebugMetric metricInsufficentSpace =
+-    // Debug.metric("InsufficientSpaceForProfilingData");
++public final class HotSpotProfilingInfo implements ProfilingInfo {
+ 
+     private final HotSpotMethodData methodData;
+     private final HotSpotResolvedJavaMethod method;
+@@ -162,7 +159,6 @@
+ 
+             if (!methodData.isWithin(currentPosition)) {
+                 exceptionPossiblyNotRecorded = true;
+-                // metricInsufficentSpace.increment();
+             }
+         }
+ 
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotReferenceMap.java	2016-05-18 23:02:06.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotReferenceMap.java	2016-05-18 23:02:06.000000000 +0200
+@@ -53,7 +53,7 @@
+         }
+         if (obj instanceof HotSpotReferenceMap) {
+             HotSpotReferenceMap that = (HotSpotReferenceMap) obj;
+-            if (Arrays.equals(objects, that.objects)) {
++            if (sizeInBytes == that.sizeInBytes && maxRegisterSize == that.maxRegisterSize && Arrays.equals(objects, that.objects) && Arrays.equals(derivedBase, that.derivedBase)) {
+                 return true;
+             }
+         }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaFieldImpl.java	2016-05-18 23:02:06.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaFieldImpl.java	2016-05-18 23:02:06.000000000 +0200
+@@ -39,7 +39,7 @@
+ /**
+  * Represents a field in a HotSpot type.
+  */
+-class HotSpotResolvedJavaFieldImpl implements HotSpotResolvedJavaField, HotSpotProxified {
++class HotSpotResolvedJavaFieldImpl implements HotSpotResolvedJavaField {
+ 
+     private final HotSpotResolvedObjectTypeImpl holder;
+     private final String name;
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java	2016-05-18 23:02:07.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedJavaMethodImpl.java	2016-05-18 23:02:07.000000000 +0200
+@@ -46,11 +46,8 @@
+ import jdk.vm.ci.meta.JavaMethod;
+ import jdk.vm.ci.meta.JavaType;
+ import jdk.vm.ci.meta.LineNumberTable;
+-import jdk.vm.ci.meta.LineNumberTableImpl;
+ import jdk.vm.ci.meta.Local;
+-import jdk.vm.ci.meta.LocalImpl;
+ import jdk.vm.ci.meta.LocalVariableTable;
+-import jdk.vm.ci.meta.LocalVariableTableImpl;
+ import jdk.vm.ci.meta.ModifiersProvider;
+ import jdk.vm.ci.meta.ProfilingInfo;
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+@@ -62,7 +59,7 @@
+ /**
+  * Implementation of {@link JavaMethod} for resolved HotSpot methods.
+  */
+-final class HotSpotResolvedJavaMethodImpl extends HotSpotMethod implements HotSpotResolvedJavaMethod, HotSpotProxified, MetaspaceWrapperObject {
++final class HotSpotResolvedJavaMethodImpl extends HotSpotMethod implements HotSpotResolvedJavaMethod, MetaspaceWrapperObject {
+ 
+     /**
+      * Reference to metaspace Method object.
+@@ -571,7 +568,7 @@
+             line[i] = (int) values[i * 2 + 1];
+         }
+ 
+-        return new LineNumberTableImpl(line, bci);
++        return new LineNumberTable(line, bci);
+     }
+ 
+     @Override
+@@ -596,13 +593,13 @@
+             String localName = getConstantPool().lookupUtf8(nameCpIndex);
+             String localType = getConstantPool().lookupUtf8(typeCpIndex);
+ 
+-            locals[i] = new LocalImpl(localName, runtime().lookupType(localType, holder, false), startBci, endBci, slot);
++            locals[i] = new Local(localName, runtime().lookupType(localType, holder, false), startBci, endBci, slot);
+ 
+             // Go to the next LocalVariableTableElement
+             localVariableTableElement += config.localVariableTableElementSize;
+         }
+ 
+-        return new LocalVariableTableImpl(locals);
++        return new LocalVariableTable(locals);
+     }
+ 
+     /**
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectType.java	2016-05-18 23:02:08.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectType.java	2016-05-18 23:02:07.000000000 +0200
+@@ -59,8 +59,6 @@
+ 
+     HotSpotResolvedObjectType findLeastCommonAncestor(ResolvedJavaType otherType);
+ 
+-    HotSpotResolvedObjectType asExactType();
+-
+     default boolean isPrimitive() {
+         return false;
+     }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java	2016-05-18 23:02:08.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java	2016-05-18 23:02:08.000000000 +0200
+@@ -56,7 +56,7 @@
+ /**
+  * Implementation of {@link JavaType} for resolved non-primitive HotSpot classes.
+  */
+-final class HotSpotResolvedObjectTypeImpl extends HotSpotResolvedJavaType implements HotSpotResolvedObjectType, HotSpotProxified, MetaspaceWrapperObject {
++final class HotSpotResolvedObjectTypeImpl extends HotSpotResolvedJavaType implements HotSpotResolvedObjectType, MetaspaceWrapperObject {
+ 
+     /**
+      * The Java class this type represents.
+@@ -127,9 +127,9 @@
+      */
+     long getMetaspaceKlass() {
+         if (HotSpotJVMCIRuntime.getHostWordKind() == JavaKind.Long) {
+-            return UNSAFE.getLong(javaClass, (long) config().klassOffset);
++            return UNSAFE.getLong(javaClass, config().klassOffset);
+         }
+-        return UNSAFE.getInt(javaClass, (long) config().klassOffset) & 0xFFFFFFFFL;
++        return UNSAFE.getInt(javaClass, config().klassOffset) & 0xFFFFFFFFL;
+     }
+ 
+     public long getMetaspacePointer() {
+@@ -319,11 +319,6 @@
+     }
+ 
+     @Override
+-    public HotSpotResolvedObjectType asExactType() {
+-        return isLeaf() ? this : null;
+-    }
+-
+-    @Override
+     public AssumptionResult<Boolean> hasFinalizableSubclass() {
+         assert !isArray();
+         if (!compilerToVM().hasFinalizableSubclass(this)) {
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedPrimitiveType.java	2016-05-18 23:02:09.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedPrimitiveType.java	2016-05-18 23:02:09.000000000 +0200
+@@ -40,7 +40,7 @@
+ /**
+  * Implementation of {@link JavaType} for primitive HotSpot types.
+  */
+-public final class HotSpotResolvedPrimitiveType extends HotSpotResolvedJavaType implements HotSpotProxified {
++public final class HotSpotResolvedPrimitiveType extends HotSpotResolvedJavaType {
+ 
+     private final JavaKind kind;
+ 
+@@ -55,7 +55,7 @@
+      * @param kind the Kind to create the mirror for
+      */
+     public HotSpotResolvedPrimitiveType(JavaKind kind) {
+-        super(String.valueOf(Character.toUpperCase(kind.getTypeChar())));
++        super(String.valueOf(kind.getTypeChar()));
+         this.kind = kind;
+         assert mirror().isPrimitive() : mirror() + " not a primitive type";
+     }
+@@ -84,11 +84,6 @@
+     }
+ 
+     @Override
+-    public ResolvedJavaType asExactType() {
+-        return this;
+-    }
+-
+-    @Override
+     public ResolvedJavaType getSuperclass() {
+         return null;
+     }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java	2016-05-18 23:02:09.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotVMConfig.java	2016-05-18 23:02:09.000000000 +0200
+@@ -22,7 +22,6 @@
+  */
+ package jdk.vm.ci.hotspot;
+ 
+-import static jdk.vm.ci.common.UnsafeUtil.readCString;
+ import static jdk.vm.ci.hotspot.HotSpotJVMCIRuntime.runtime;
+ import static jdk.vm.ci.hotspot.UnsafeAccess.UNSAFE;
+ 
+@@ -31,6 +30,7 @@
+ import java.util.HashMap;
+ import java.util.Iterator;
+ 
++import jdk.internal.misc.Unsafe;
+ import jdk.internal.vm.annotation.Stable;
+ import jdk.vm.ci.common.JVMCIError;
+ import jdk.vm.ci.hotspotvmconfig.HotSpotVMAddress;
+@@ -39,9 +39,6 @@
+ import jdk.vm.ci.hotspotvmconfig.HotSpotVMField;
+ import jdk.vm.ci.hotspotvmconfig.HotSpotVMFlag;
+ import jdk.vm.ci.hotspotvmconfig.HotSpotVMType;
+-import jdk.internal.misc.Unsafe;
+-
+-//JaCoCo Exclude
+ 
+ /**
+  * Used to access native configuration details.
+@@ -110,6 +107,27 @@
+     }
+ 
+     /**
++     * Reads a {@code '\0'} terminated C string from native memory and converts it to a
++     * {@link String}.
++     *
++     * @return a Java string
++     */
++    private static String readCString(Unsafe unsafe, long address) {
++        if (address == 0) {
++            return null;
++        }
++        StringBuilder sb = new StringBuilder();
++        for (int i = 0;; i++) {
++            char c = (char) unsafe.getByte(address + i);
++            if (c == 0) {
++                break;
++            }
++            sb.append(c);
++        }
++        return sb.toString();
++    }
++
++    /**
+      * Initialize fields by reading their values from vmStructs.
+      */
+     private void initialize() {
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/HotSpotVMEventListener.java	2016-05-18 23:02:10.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/services/HotSpotVMEventListener.java	2016-05-18 23:02:10.000000000 +0200
+@@ -25,14 +25,10 @@
+ import jdk.vm.ci.code.CompiledCode;
+ import jdk.vm.ci.code.InstalledCode;
+ import jdk.vm.ci.hotspot.HotSpotCodeCacheProvider;
+-import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
+-import jdk.vm.ci.meta.JVMCIMetaAccessContext;
+-import jdk.vm.ci.meta.ResolvedJavaType;
+ import jdk.vm.ci.services.JVMCIPermission;
+ 
+ /**
+- * Service-provider class for responding to VM events and for creating
+- * {@link JVMCIMetaAccessContext}s.
++ * Service-provider class for responding to VM events.
+  */
+ public abstract class HotSpotVMEventListener {
+ 
+@@ -79,16 +75,4 @@
+      */
+     public void notifyBootstrapFinished() {
+     }
+-
+-    /**
+-     * Create a custom {@link JVMCIMetaAccessContext} to be used for managing the lifetime of loaded
+-     * metadata. It a custom one isn't created then the default implementation will be a single
+-     * context with globally shared instances of {@link ResolvedJavaType} that are never released.
+-     *
+-     * @param runtime the runtime instance that will use the returned context
+-     * @return a custom context or null
+-     */
+-    public JVMCIMetaAccessContext createMetaAccessContext(HotSpotJVMCIRuntime runtime) {
+-        return null;
+-    }
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/JavaConstant.java	2016-05-18 23:02:10.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/JavaConstant.java	2016-05-18 23:02:10.000000000 +0200
+@@ -357,106 +357,4 @@
+                 throw new IllegalArgumentException(kind.toString());
+         }
+     }
+-
+-    /**
+-     * Returns the zero value for a given numeric kind.
+-     */
+-    static JavaConstant zero(JavaKind kind) {
+-        switch (kind) {
+-            case Boolean:
+-                return FALSE;
+-            case Byte:
+-                return forByte((byte) 0);
+-            case Char:
+-                return forChar((char) 0);
+-            case Double:
+-                return DOUBLE_0;
+-            case Float:
+-                return FLOAT_0;
+-            case Int:
+-                return INT_0;
+-            case Long:
+-                return LONG_0;
+-            case Short:
+-                return forShort((short) 0);
+-            default:
+-                throw new IllegalArgumentException(kind.toString());
+-        }
+-    }
+-
+-    /**
+-     * Returns the one value for a given numeric kind.
+-     */
+-    static JavaConstant one(JavaKind kind) {
+-        switch (kind) {
+-            case Boolean:
+-                return TRUE;
+-            case Byte:
+-                return forByte((byte) 1);
+-            case Char:
+-                return forChar((char) 1);
+-            case Double:
+-                return DOUBLE_1;
+-            case Float:
+-                return FLOAT_1;
+-            case Int:
+-                return INT_1;
+-            case Long:
+-                return LONG_1;
+-            case Short:
+-                return forShort((short) 1);
+-            default:
+-                throw new IllegalArgumentException(kind.toString());
+-        }
+-    }
+-
+-    /**
+-     * Adds two numeric constants.
+-     */
+-    static JavaConstant add(JavaConstant x, JavaConstant y) {
+-        assert x.getJavaKind() == y.getJavaKind();
+-        switch (x.getJavaKind()) {
+-            case Byte:
+-                return forByte((byte) (x.asInt() + y.asInt()));
+-            case Char:
+-                return forChar((char) (x.asInt() + y.asInt()));
+-            case Double:
+-                return forDouble(x.asDouble() + y.asDouble());
+-            case Float:
+-                return forFloat(x.asFloat() + y.asFloat());
+-            case Int:
+-                return forInt(x.asInt() + y.asInt());
+-            case Long:
+-                return forLong(x.asLong() + y.asLong());
+-            case Short:
+-                return forShort((short) (x.asInt() + y.asInt()));
+-            default:
+-                throw new IllegalArgumentException(x.getJavaKind().toString());
+-        }
+-    }
+-
+-    /**
+-     * Multiplies two numeric constants.
+-     */
+-    static PrimitiveConstant mul(JavaConstant x, JavaConstant y) {
+-        assert x.getJavaKind() == y.getJavaKind();
+-        switch (x.getJavaKind()) {
+-            case Byte:
+-                return forByte((byte) (x.asInt() * y.asInt()));
+-            case Char:
+-                return forChar((char) (x.asInt() * y.asInt()));
+-            case Double:
+-                return forDouble(x.asDouble() * y.asDouble());
+-            case Float:
+-                return forFloat(x.asFloat() * y.asFloat());
+-            case Int:
+-                return forInt(x.asInt() * y.asInt());
+-            case Long:
+-                return forLong(x.asLong() * y.asLong());
+-            case Short:
+-                return forShort((short) (x.asInt() * y.asInt()));
+-            default:
+-                throw new IllegalArgumentException(x.getJavaKind().toString());
+-        }
+-    }
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/JavaKind.java	2016-05-18 23:02:11.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/JavaKind.java	2016-05-18 23:02:11.000000000 +0200
+@@ -33,34 +33,34 @@
+  */
+ public enum JavaKind {
+     /** The primitive boolean kind, represented as an int on the stack. */
+-    Boolean('z', "boolean", 1, true, java.lang.Boolean.TYPE, java.lang.Boolean.class),
++    Boolean('Z', "boolean", 1, true, java.lang.Boolean.TYPE, java.lang.Boolean.class),
+ 
+     /** The primitive byte kind, represented as an int on the stack. */
+-    Byte('b', "byte", 1, true, java.lang.Byte.TYPE, java.lang.Byte.class),
++    Byte('B', "byte", 1, true, java.lang.Byte.TYPE, java.lang.Byte.class),
+ 
+     /** The primitive short kind, represented as an int on the stack. */
+-    Short('s', "short", 1, true, java.lang.Short.TYPE, java.lang.Short.class),
++    Short('S', "short", 1, true, java.lang.Short.TYPE, java.lang.Short.class),
+ 
+     /** The primitive char kind, represented as an int on the stack. */
+-    Char('c', "char", 1, true, java.lang.Character.TYPE, java.lang.Character.class),
++    Char('C', "char", 1, true, java.lang.Character.TYPE, java.lang.Character.class),
+ 
+     /** The primitive int kind, represented as an int on the stack. */
+-    Int('i', "int", 1, true, java.lang.Integer.TYPE, java.lang.Integer.class),
++    Int('I', "int", 1, true, java.lang.Integer.TYPE, java.lang.Integer.class),
+ 
+     /** The primitive float kind. */
+-    Float('f', "float", 1, false, java.lang.Float.TYPE, java.lang.Float.class),
++    Float('F', "float", 1, false, java.lang.Float.TYPE, java.lang.Float.class),
+ 
+     /** The primitive long kind. */
+-    Long('j', "long", 2, false, java.lang.Long.TYPE, java.lang.Long.class),
++    Long('J', "long", 2, false, java.lang.Long.TYPE, java.lang.Long.class),
+ 
+     /** The primitive double kind. */
+-    Double('d', "double", 2, false, java.lang.Double.TYPE, java.lang.Double.class),
++    Double('D', "double", 2, false, java.lang.Double.TYPE, java.lang.Double.class),
+ 
+     /** The Object kind, also used for arrays. */
+-    Object('a', "Object", 1, false, null, null),
++    Object('A', "Object", 1, false, null, null),
+ 
+-    /** The void float kind. */
+-    Void('v', "void", 0, false, java.lang.Void.TYPE, java.lang.Void.class),
++    /** The void kind. */
++    Void('V', "void", 0, false, java.lang.Void.TYPE, java.lang.Void.class),
+ 
+     /** The non-type. */
+     Illegal('-', "illegal", 0, false, null, null);
+@@ -98,7 +98,11 @@
+     }
+ 
+     /**
+-     * Returns the name of the kind as a single character.
++     * Returns the name of the kind as a single upper case character. For the void and primitive
++     * kinds, this is the <i>FieldType</i> term in
++     * <a href="https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-4.html#jvms-4.3.2-200">
++     * table 4.3-A</a> of the JVM Specification. For {@link #Object}, the character {@code 'A'} is
++     * returned and for {@link #Illegal}, {@code '-'} is returned.
+      */
+     public char getTypeChar() {
+         return typeChar;
+@@ -204,7 +208,7 @@
+     /**
+      * Returns the kind from the character describing a primitive or void.
+      *
+-     * @param ch the character
++     * @param ch the character for a void or primitive kind as returned by {@link #getTypeChar()}
+      * @return the kind
+      */
+     public static JavaKind fromPrimitiveOrVoidTypeChar(char ch) {
+@@ -369,9 +373,9 @@
+     }
+ 
+     /**
+-     * The minimum value that can be represented as a value of this kind.
++     * Gets the minimum value that can be represented as a value of this kind.
+      *
+-     * @return the minimum value
++     * @return the minimum value represented as a {@code long}
+      */
+     public long getMinValue() {
+         switch (this) {
+@@ -387,15 +391,19 @@
+                 return java.lang.Integer.MIN_VALUE;
+             case Long:
+                 return java.lang.Long.MIN_VALUE;
++            case Float:
++                return java.lang.Float.floatToRawIntBits(java.lang.Float.MIN_VALUE);
++            case Double:
++                return java.lang.Double.doubleToRawLongBits(java.lang.Double.MIN_VALUE);
+             default:
+                 throw new IllegalArgumentException("illegal call to minValue on " + this);
+         }
+     }
+ 
+     /**
+-     * The maximum value that can be represented as a value of this kind.
++     * Gets the maximum value that can be represented as a value of this kind.
+      *
+-     * @return the maximum value
++     * @return the maximum value represented as a {@code long}
+      */
+     public long getMaxValue() {
+         switch (this) {
+@@ -411,6 +419,10 @@
+                 return java.lang.Integer.MAX_VALUE;
+             case Long:
+                 return java.lang.Long.MAX_VALUE;
++            case Float:
++                return java.lang.Float.floatToRawIntBits(java.lang.Float.MAX_VALUE);
++            case Double:
++                return java.lang.Double.doubleToRawLongBits(java.lang.Double.MAX_VALUE);
+             default:
+                 throw new IllegalArgumentException("illegal call to maxValue on " + this);
+         }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/JavaType.java	2016-05-18 23:02:12.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/JavaType.java	2016-05-18 23:02:11.000000000 +0200
+@@ -62,6 +62,15 @@
+     }
+ 
+     /**
++     * Checks whether this type is an array class.
++     *
++     * @return {@code true} if this type is an array class
++     */
++    default boolean isArray() {
++        return getComponentType() != null;
++    }
++
++    /**
+      * For array types, gets the type of the components, or {@code null} if this is not an array
+      * type. This method is analogous to {@link Class#getComponentType()}.
+      */
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/LineNumberTable.java	2016-05-18 23:02:12.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/LineNumberTable.java	2016-05-18 23:02:12.000000000 +0200
+@@ -22,11 +22,30 @@
+  */
+ package jdk.vm.ci.meta;
+ 
+-public interface LineNumberTable {
++public class LineNumberTable {
+ 
+-    int[] getLineNumberEntries();
++    private final int[] lineNumbers;
++    private final int[] bci;
+ 
+-    int[] getBciEntries();
++    public LineNumberTable(int[] lineNumbers, int[] bci) {
++        this.lineNumbers = lineNumbers;
++        this.bci = bci;
++    }
+ 
+-    int getLineNumber(int bci);
++    public int[] getLineNumberEntries() {
++        return lineNumbers;
++    }
++
++    public int[] getBciEntries() {
++        return bci;
++    }
++
++    public int getLineNumber(int atBci) {
++        for (int i = 0; i < this.bci.length - 1; i++) {
++            if (this.bci[i] <= atBci && atBci < this.bci[i + 1]) {
++                return lineNumbers[i];
++            }
++        }
++        return lineNumbers[lineNumbers.length - 1];
++    }
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/Local.java	2016-05-18 23:02:13.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/Local.java	2016-05-18 23:02:13.000000000 +0200
+@@ -22,15 +22,58 @@
+  */
+ package jdk.vm.ci.meta;
+ 
+-public interface Local {
++public class Local {
+ 
+-    int getStartBCI();
+-
+-    int getEndBCI();
+-
+-    int getSlot();
+-
+-    String getName();
+-
+-    JavaType getType();
++    private final String name;
++    private final int startBci;
++    private final int endBci;
++    private final int slot;
++    private final JavaType type;
++
++    public Local(String name, JavaType type, int startBci, int endBci, int slot) {
++        this.name = name;
++        this.startBci = startBci;
++        this.endBci = endBci;
++        this.slot = slot;
++        this.type = type;
++    }
++
++    public int getStartBCI() {
++        return startBci;
++    }
++
++    public int getEndBCI() {
++        return endBci;
++    }
++
++    public String getName() {
++        return name;
++    }
++
++    public JavaType getType() {
++        return type;
++    }
++
++    public int getSlot() {
++        return slot;
++    }
++
++    @Override
++    public boolean equals(Object obj) {
++        if (!(obj instanceof Local)) {
++            return false;
++        }
++        Local that = (Local) obj;
++        return this.name.equals(that.name) && this.startBci == that.startBci && this.endBci == that.endBci && this.slot == that.slot && this.type.equals(that.type);
++    }
++
++    @Override
++    public int hashCode() {
++        return super.hashCode();
++    }
++
++    @Override
++    public String toString() {
++        return "LocalImpl<name=" + name + ", type=" + type + ", startBci=" + startBci + ", endBci=" + endBci + ", slot=" + slot + ">";
++    }
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/LocalVariableTable.java	2016-05-18 23:02:13.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/LocalVariableTable.java	2016-05-18 23:02:13.000000000 +0200
+@@ -22,11 +22,42 @@
+  */
+ package jdk.vm.ci.meta;
+ 
+-public interface LocalVariableTable {
++import java.util.ArrayList;
++import java.util.List;
+ 
+-    Local[] getLocals();
++public class LocalVariableTable {
+ 
+-    Local[] getLocalsAt(int bci);
++    private final Local[] locals;
+ 
+-    Local getLocal(int slot, int bci);
++    public LocalVariableTable(Local[] locals) {
++        this.locals = locals;
++    }
++
++    public Local getLocal(int slot, int bci) {
++        Local result = null;
++        for (Local local : locals) {
++            if (local.getSlot() == slot && local.getStartBCI() <= bci && local.getEndBCI() >= bci) {
++                if (result == null) {
++                    result = local;
++                } else {
++                    throw new IllegalStateException("Locals overlap!");
++                }
++            }
++        }
++        return result;
++    }
++
++    public Local[] getLocals() {
++        return locals;
++    }
++
++    public Local[] getLocalsAt(int bci) {
++        List<Local> result = new ArrayList<>();
++        for (Local l : locals) {
++            if (l.getStartBCI() <= bci && bci <= l.getEndBCI()) {
++                result.add(l);
++            }
++        }
++        return result.toArray(new Local[result.size()]);
++    }
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/MemoryAccessProvider.java	2016-05-18 23:02:14.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/MemoryAccessProvider.java	2016-05-18 23:02:14.000000000 +0200
+@@ -35,8 +35,8 @@
+      * @param displacement the displacement within the object in bytes
+      * @return the read value encapsulated in a {@link JavaConstant} object, or {@code null} if the
+      *         value cannot be read.
+-     * @throws IllegalArgumentException if {@code kind} is {@code null}, {@link JavaKind#Void} or
+-     *             not {@linkplain JavaKind#isPrimitive() primitive} kind
++     * @throws IllegalArgumentException if {@code kind} is {@code null}, {@link JavaKind#Void}, not
++     *             {@link JavaKind#Object} or not {@linkplain JavaKind#isPrimitive() primitive} kind
+      */
+     JavaConstant readUnsafeConstant(JavaKind kind, JavaConstant base, long displacement) throws IllegalArgumentException;
+ 
+@@ -59,7 +59,9 @@
+      *
+      * @param base the base address from which the value is read
+      * @param displacement the displacement within the object in bytes
+-     * @return the read value encapsulated in a {@link Constant} object
++     * @return the read value encapsulated in a {@link Constant} object or {@code null} if the
++     *         address computed from {@code base} and {@code displacement} does not denote a
++     *         location holding an {@code Object} value
+      */
+     JavaConstant readObjectConstant(Constant base, long displacement);
+ }
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/MetaUtil.java	2016-05-18 23:02:14.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/MetaUtil.java	2016-05-18 23:02:14.000000000 +0200
+@@ -22,132 +22,14 @@
+  */
+ package jdk.vm.ci.meta;
+ 
+-import java.io.PrintStream;
+ import java.lang.reflect.Field;
+ import java.lang.reflect.Modifier;
+-import java.util.ArrayDeque;
+-import java.util.ArrayList;
+-import java.util.Collections;
+-import java.util.Comparator;
+-import java.util.Deque;
+-import java.util.HashMap;
+-import java.util.HashSet;
+-import java.util.Set;
+ 
+ /**
+  * Miscellaneous collection of utility methods used by {@code jdk.vm.ci.meta} and its clients.
+  */
+ public class MetaUtil {
+ 
+-    private static class ClassInfo {
+-        public long totalSize;
+-        public long instanceCount;
+-
+-        @Override
+-        public String toString() {
+-            return "totalSize=" + totalSize + ", instanceCount=" + instanceCount;
+-        }
+-    }
+-
+-    /**
+-     * Returns the number of bytes occupied by this constant value or constant object and
+-     * recursively all values reachable from this value.
+-     *
+-     * @param constant the constant whose bytes should be measured
+-     * @param printTopN print total size and instance count of the top n classes is desired
+-     * @return the number of bytes occupied by this constant
+-     */
+-    public static long getMemorySizeRecursive(MetaAccessProvider access, ConstantReflectionProvider constantReflection, JavaConstant constant, PrintStream out, int printTopN) {
+-        Set<JavaConstant> marked = new HashSet<>();
+-        Deque<JavaConstant> stack = new ArrayDeque<>();
+-        if (constant.getJavaKind() == JavaKind.Object && constant.isNonNull()) {
+-            marked.add(constant);
+-        }
+-        final HashMap<ResolvedJavaType, ClassInfo> histogram = new HashMap<>();
+-        stack.push(constant);
+-        long sum = 0;
+-        while (!stack.isEmpty()) {
+-            JavaConstant c = stack.pop();
+-            long memorySize = access.getMemorySize(constant);
+-            sum += memorySize;
+-            if (c.getJavaKind() == JavaKind.Object && c.isNonNull()) {
+-                ResolvedJavaType clazz = access.lookupJavaType(c);
+-                if (!histogram.containsKey(clazz)) {
+-                    histogram.put(clazz, new ClassInfo());
+-                }
+-                ClassInfo info = histogram.get(clazz);
+-                info.instanceCount++;
+-                info.totalSize += memorySize;
+-                ResolvedJavaType type = access.lookupJavaType(c);
+-                if (type.isArray()) {
+-                    if (!type.getComponentType().isPrimitive()) {
+-                        int length = constantReflection.readArrayLength(c);
+-                        for (int i = 0; i < length; i++) {
+-                            JavaConstant value = constantReflection.readArrayElement(c, i);
+-                            pushConstant(marked, stack, value);
+-                        }
+-                    }
+-                } else {
+-                    ResolvedJavaField[] instanceFields = type.getInstanceFields(true);
+-                    for (ResolvedJavaField f : instanceFields) {
+-                        if (f.getJavaKind() == JavaKind.Object) {
+-                            JavaConstant value = constantReflection.readFieldValue(f, c);
+-                            pushConstant(marked, stack, value);
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-        ArrayList<ResolvedJavaType> clazzes = new ArrayList<>();
+-        clazzes.addAll(histogram.keySet());
+-        Collections.sort(clazzes, new Comparator<ResolvedJavaType>() {
+-
+-            @Override
+-            public int compare(ResolvedJavaType o1, ResolvedJavaType o2) {
+-                long l1 = histogram.get(o1).totalSize;
+-                long l2 = histogram.get(o2).totalSize;
+-                if (l1 > l2) {
+-                    return -1;
+-                } else if (l1 == l2) {
+-                    return 0;
+-                } else {
+-                    return 1;
+-                }
+-            }
+-        });
+-
+-        int z = 0;
+-        for (ResolvedJavaType c : clazzes) {
+-            if (z > printTopN) {
+-                break;
+-            }
+-            out.println("Class " + c + ", " + histogram.get(c));
+-            ++z;
+-        }
+-
+-        return sum;
+-    }
+-
+-    private static void pushConstant(Set<JavaConstant> marked, Deque<JavaConstant> stack, JavaConstant value) {
+-        if (value.isNonNull()) {
+-            if (!marked.contains(value)) {
+-                marked.add(value);
+-                stack.push(value);
+-            }
+-        }
+-    }
+-
+-    /**
+-     * Calls {@link JavaType#resolve(ResolvedJavaType)} on an array of types.
+-     */
+-    public static ResolvedJavaType[] resolveJavaTypes(JavaType[] types, ResolvedJavaType accessingClass) {
+-        ResolvedJavaType[] result = new ResolvedJavaType[types.length];
+-        for (int i = 0; i < result.length; i++) {
+-            result[i] = types[i].resolve(accessingClass);
+-        }
+-        return result;
+-    }
+-
+     /**
+      * Extends the functionality of {@link Class#getSimpleName()} to include a non-empty string for
+      * anonymous and local classes.
+@@ -184,7 +66,17 @@
+         return name.substring(index + 1);
+     }
+ 
+-    static String internalNameToJava(String name, boolean qualified, boolean classForNameCompatible) {
++    /**
++     * Converts a type name in internal form to an external form.
++     *
++     * @param name the internal name to convert
++     * @param qualified whether the returned name should be qualified with the package name
++     * @param classForNameCompatible specifies if the returned name for array types should be in
++     *            {@link Class#forName(String)} format (e.g., {@code "[Ljava.lang.Object;"},
++     *            {@code "[[I"}) or in Java source code format (e.g., {@code "java.lang.Object[]"},
++     *            {@code "int[][]"} ).
++     */
++    public static String internalNameToJava(String name, boolean qualified, boolean classForNameCompatible) {
+         switch (name.charAt(0)) {
+             case 'L': {
+                 String result = name.substring(1, name.length() - 1).replace('/', '.');
+@@ -207,19 +99,6 @@
+     }
+ 
+     /**
+-     * Turns an class name in internal format into a resolved Java type.
+-     */
+-    public static ResolvedJavaType classForName(String internal, MetaAccessProvider metaAccess, ClassLoader cl) {
+-        JavaKind k = JavaKind.fromTypeString(internal);
+-        try {
+-            String n = internalNameToJava(internal, true, true);
+-            return metaAccess.lookupJavaType(k.isPrimitive() ? k.toJavaClass() : Class.forName(n, true, cl));
+-        } catch (ClassNotFoundException cnfe) {
+-            throw new IllegalArgumentException("could not instantiate class described by " + internal, cnfe);
+-        }
+-    }
+-
+-    /**
+      * Convenient shortcut for calling
+      * {@link #appendLocation(StringBuilder, ResolvedJavaMethod, int)} without having to supply a
+      * {@link StringBuilder} instance and convert the result to a string.
+@@ -337,21 +216,6 @@
+     }
+ 
+     /**
+-     * Prepends the String {@code indentation} to every line in String {@code lines}, including a
+-     * possibly non-empty line following the final newline.
+-     */
+-    public static String indent(String lines, String indentation) {
+-        if (lines.length() == 0) {
+-            return lines;
+-        }
+-        final String newLine = "\n";
+-        if (lines.endsWith(newLine)) {
+-            return indentation + (lines.substring(0, lines.length() - 1)).replace(newLine, newLine + indentation) + newLine;
+-        }
+-        return indentation + lines.replace(newLine, newLine + indentation);
+-    }
+-
+-    /**
+      * Gets a string representation of an object based soley on its class and its
+      * {@linkplain System#identityHashCode(Object) identity hash code}. This avoids and calls to
+      * virtual methods on the object such as {@link Object#hashCode()}.
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/PlatformKind.java	2016-05-18 23:02:15.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/PlatformKind.java	2016-05-18 23:02:15.000000000 +0200
+@@ -42,7 +42,7 @@
+ 
+         @Override
+         public int hashCode() {
+-            return e.ordinal() ^ e.name().hashCode();
++            return e.ordinal();
+         }
+ 
+         @Override
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaType.java	2016-05-18 23:02:16.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/ResolvedJavaType.java	2016-05-18 23:02:15.000000000 +0200
+@@ -62,13 +62,6 @@
+     boolean isInstanceClass();
+ 
+     /**
+-     * Checks whether this type is an array class.
+-     *
+-     * @return {@code true} if this type is an array class
+-     */
+-    boolean isArray();
+-
+-    /**
+      * Checks whether this type is primitive.
+      *
+      * @return {@code true} if this type is primitive
+@@ -137,14 +130,6 @@
+     boolean isInstance(JavaConstant obj);
+ 
+     /**
+-     * Returns this type if it is an exact type otherwise returns null. This type is exact if it is
+-     * void, primitive, final, or an array of a final or primitive type.
+-     *
+-     * @return this type if it is exact; {@code null} otherwise
+-     */
+-    ResolvedJavaType asExactType();
+-
+-    /**
+      * Gets the super class of this type. If this type represents either the {@code Object} class,
+      * an interface, a primitive type, or void, then null is returned. If this object represents an
+      * array class then the type object representing the {@code Object} class is returned.
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/VMConstant.java	2016-05-18 23:02:16.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/VMConstant.java	2016-05-18 23:02:16.000000000 +0200
+@@ -22,5 +22,8 @@
+  */
+ package jdk.vm.ci.meta;
+ 
++/**
++ * Represents a constant that needs to be patched at runtime by the VM.
++ */
+ public interface VMConstant extends Constant {
+ }
+--- old/src/share/vm/jvmci/jvmciCodeInstaller.cpp	2016-05-18 23:02:17.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciCodeInstaller.cpp	2016-05-18 23:02:17.000000000 +0200
+@@ -495,7 +495,7 @@
+     return result;
+   }
+ 
+-  _debug_recorder->pcs_size(); // ehm, create the sentinel record
++  _debug_recorder->pcs_size(); // create the sentinel record
+ 
+   assert(_debug_recorder->pcs_length() >= 2, "must be at least 2");
+ 
+--- old/src/share/vm/jvmci/jvmciCompiler.cpp	2016-05-18 23:02:17.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciCompiler.cpp	2016-05-18 23:02:17.000000000 +0200
+@@ -172,15 +172,15 @@
+   } else {
+     oop result_object = (oop) result.get_jobject();
+     if (result_object != NULL) {
+-      oop failure_message = CompilationRequestResult::failureMessage(result_object);
++      oop failure_message = HotSpotCompilationRequestResult::failureMessage(result_object);
+       if (failure_message != NULL) {
+         const char* failure_reason = java_lang_String::as_utf8_string(failure_message);
+-        env->set_failure(failure_reason, CompilationRequestResult::retry(result_object) != 0);
++        env->set_failure(failure_reason, HotSpotCompilationRequestResult::retry(result_object) != 0);
+       } else {
+         if (env->task()->code() == NULL) {
+           env->set_failure("no nmethod produced", true);
+         } else {
+-          env->task()->set_num_inlined_bytecodes(CompilationRequestResult::inlinedBytecodes(result_object));
++          env->task()->set_num_inlined_bytecodes(HotSpotCompilationRequestResult::inlinedBytecodes(result_object));
+           Atomic::inc(&_methods_compiled);
+         }
+       }
+--- old/src/share/vm/jvmci/jvmciCompilerToVM.cpp	2016-05-18 23:02:18.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciCompilerToVM.cpp	2016-05-18 23:02:18.000000000 +0200
+@@ -781,13 +781,11 @@
+   Handle compiled_code_handle = JNIHandles::resolve(compiled_code);
+   Handle metadata_handle = JNIHandles::resolve(metadata);
+ 
+-  HotSpotOopMap::klass()->initialize(thread);
+-
+   CodeMetadata code_metadata;
+   CodeBlob *cb = NULL;
+   CodeInstaller installer;
+ 
+-  JVMCIEnv::CodeInstallResult result = installer.gather_metadata(target_handle, compiled_code_handle, code_metadata, CHECK_0); //cb, pc_descs, nr_pc_descs, scopes_descs, scopes_size, reloc_buffer);
++  JVMCIEnv::CodeInstallResult result = installer.gather_metadata(target_handle, compiled_code_handle, code_metadata, CHECK_0);
+   if (result != JVMCIEnv::ok) {
+     return result;
+   }
+--- old/src/share/vm/jvmci/jvmciJavaClasses.hpp	2016-05-18 23:02:19.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciJavaClasses.hpp	2016-05-18 23:02:19.000000000 +0200
+@@ -162,10 +162,10 @@
+   start_class(site_Mark)                                                                                                                                       \
+     oop_field(site_Mark, id, "Ljava/lang/Object;")                                                                                                             \
+   end_class                                                                                                                                                    \
+-  start_class(CompilationRequestResult)                                                                                                                        \
+-    oop_field(CompilationRequestResult, failureMessage, "Ljava/lang/String;")                                                                                  \
+-    boolean_field(CompilationRequestResult, retry)                                                                                                             \
+-    int_field(CompilationRequestResult, inlinedBytecodes)                                                                                                      \
++  start_class(HotSpotCompilationRequestResult)                                                                                                                 \
++    oop_field(HotSpotCompilationRequestResult, failureMessage, "Ljava/lang/String;")                                                                           \
++    boolean_field(HotSpotCompilationRequestResult, retry)                                                                                                      \
++    int_field(HotSpotCompilationRequestResult, inlinedBytecodes)                                                                                               \
+   end_class                                                                                                                                                    \
+   start_class(DebugInfo)                                                                                                                                       \
+     oop_field(DebugInfo, bytecodePosition, "Ljdk/vm/ci/code/BytecodePosition;")                                                                                \
+@@ -283,11 +283,6 @@
+     typeArrayOop_field(HotSpotMetaData, oopMaps, "[B")                                                                                                         \
+     objArrayOop_field(HotSpotMetaData, metadata, "[Ljava/lang/String;")                                                                                        \
+   end_class                                                                                                                                                    \
+-  start_class(HotSpotOopMap)                                                                                                                                   \
+-    int_field(HotSpotOopMap, offset)                                                                                                                           \
+-    int_field(HotSpotOopMap, count)                                                                                                                            \
+-    typeArrayOop_field(HotSpotOopMap, data, "[B")                                                                                                              \
+-  end_class                                                                                                                                                    \
+   start_class(HotSpotConstantPool)                                                                                                                             \
+     long_field(HotSpotConstantPool, metaspaceConstantPool)                                                                                                     \
+   end_class                                                                                                                                                    \
+--- old/src/share/vm/jvmci/jvmciRuntime.cpp	2016-05-18 23:02:19.000000000 +0200
++++ new/src/share/vm/jvmci/jvmciRuntime.cpp	2016-05-18 23:02:19.000000000 +0200
+@@ -63,15 +63,15 @@
+   }
+   jchar ch = JavaKind::typeChar(kind);
+   switch(ch) {
+-    case 'z': return T_BOOLEAN;
+-    case 'b': return T_BYTE;
+-    case 's': return T_SHORT;
+-    case 'c': return T_CHAR;
+-    case 'i': return T_INT;
+-    case 'f': return T_FLOAT;
+-    case 'j': return T_LONG;
+-    case 'd': return T_DOUBLE;
+-    case 'a': return T_OBJECT;
++    case 'Z': return T_BOOLEAN;
++    case 'B': return T_BYTE;
++    case 'S': return T_SHORT;
++    case 'C': return T_CHAR;
++    case 'I': return T_INT;
++    case 'F': return T_FLOAT;
++    case 'J': return T_LONG;
++    case 'D': return T_DOUBLE;
++    case 'A': return T_OBJECT;
+     case '-': return T_ILLEGAL;
+     default:
+       JVMCI_ERROR_(T_ILLEGAL, "unexpected Kind: %c", ch);
+@@ -574,14 +574,14 @@
+   } uu;
+   uu.l = value;
+   switch (typeChar) {
+-    case 'z': tty->print(value == 0 ? "false" : "true"); break;
+-    case 'b': tty->print("%d", (jbyte) value); break;
+-    case 'c': tty->print("%c", (jchar) value); break;
+-    case 's': tty->print("%d", (jshort) value); break;
+-    case 'i': tty->print("%d", (jint) value); break;
+-    case 'f': tty->print("%f", uu.f); break;
+-    case 'j': tty->print(JLONG_FORMAT, value); break;
+-    case 'd': tty->print("%lf", uu.d); break;
++    case 'Z': tty->print(value == 0 ? "false" : "true"); break;
++    case 'B': tty->print("%d", (jbyte) value); break;
++    case 'C': tty->print("%c", (jchar) value); break;
++    case 'S': tty->print("%d", (jshort) value); break;
++    case 'I': tty->print("%d", (jint) value); break;
++    case 'F': tty->print("%f", uu.f); break;
++    case 'J': tty->print(JLONG_FORMAT, value); break;
++    case 'D': tty->print("%lf", uu.d); break;
+     default: assert(false, "unknown typeChar"); break;
+   }
+   if (newline) {
+--- old/src/share/vm/jvmci/systemDictionary_jvmci.hpp	2016-05-18 23:02:20.000000000 +0200
++++ new/src/share/vm/jvmci/systemDictionary_jvmci.hpp	2016-05-18 23:02:20.000000000 +0200
+@@ -44,11 +44,11 @@
+   do_klass(HotSpotSentinelConstant_klass,                jdk_vm_ci_hotspot_HotSpotSentinelConstant,             Jvmci) \
+   do_klass(HotSpotStackFrameReference_klass,             jdk_vm_ci_hotspot_HotSpotStackFrameReference,          Jvmci) \
+   do_klass(HotSpotMetaData_klass,                        jdk_vm_ci_hotspot_HotSpotMetaData,                     Jvmci) \
+-  do_klass(HotSpotOopMap_klass,                          jdk_vm_ci_hotspot_HotSpotOopMap,                       Jvmci) \
+   do_klass(HotSpotConstantPool_klass,                    jdk_vm_ci_hotspot_HotSpotConstantPool,                 Jvmci) \
+   do_klass(HotSpotJVMCIMetaAccessContext_klass,          jdk_vm_ci_hotspot_HotSpotJVMCIMetaAccessContext,       Jvmci) \
+   do_klass(HotSpotJVMCIRuntime_klass,                    jdk_vm_ci_hotspot_HotSpotJVMCIRuntime,                 Jvmci) \
+   do_klass(HotSpotSpeculationLog_klass,                  jdk_vm_ci_hotspot_HotSpotSpeculationLog,               Jvmci) \
++  do_klass(HotSpotCompilationRequestResult_klass,        jdk_vm_ci_hotspot_HotSpotCompilationRequestResult,     Jvmci) \
+   do_klass(Assumptions_ConcreteMethod_klass,             jdk_vm_ci_meta_Assumptions_ConcreteMethod,             Jvmci) \
+   do_klass(Assumptions_NoFinalizableSubclass_klass,      jdk_vm_ci_meta_Assumptions_NoFinalizableSubclass,      Jvmci) \
+   do_klass(Assumptions_ConcreteSubtype_klass,            jdk_vm_ci_meta_Assumptions_ConcreteSubtype,            Jvmci) \
+@@ -60,7 +60,6 @@
+   do_klass(DebugInfo_klass,                              jdk_vm_ci_code_DebugInfo,                              Jvmci) \
+   do_klass(RegisterSaveLayout_klass,                     jdk_vm_ci_code_RegisterSaveLayout,                     Jvmci) \
+   do_klass(BytecodeFrame_klass,                          jdk_vm_ci_code_BytecodeFrame,                          Jvmci) \
+-  do_klass(CompilationRequestResult_klass,               jdk_vm_ci_code_CompilationRequestResult,               Jvmci) \
+   do_klass(InstalledCode_klass,                          jdk_vm_ci_code_InstalledCode,                          Jvmci) \
+   do_klass(code_Location_klass,                          jdk_vm_ci_code_Location,                               Jvmci) \
+   do_klass(code_Register_klass,                          jdk_vm_ci_code_Register,                               Jvmci) \
+--- old/src/share/vm/jvmci/vmSymbols_jvmci.hpp	2016-05-18 23:02:21.000000000 +0200
++++ new/src/share/vm/jvmci/vmSymbols_jvmci.hpp	2016-05-18 23:02:21.000000000 +0200
+@@ -45,11 +45,11 @@
+   template(jdk_vm_ci_hotspot_HotSpotSentinelConstant,             "jdk/vm/ci/hotspot/HotSpotSentinelConstant")             \
+   template(jdk_vm_ci_hotspot_HotSpotStackFrameReference,          "jdk/vm/ci/hotspot/HotSpotStackFrameReference")          \
+   template(jdk_vm_ci_hotspot_HotSpotMetaData,                     "jdk/vm/ci/hotspot/HotSpotMetaData")                     \
+-  template(jdk_vm_ci_hotspot_HotSpotOopMap,                       "jdk/vm/ci/hotspot/HotSpotOopMap")                       \
+   template(jdk_vm_ci_hotspot_HotSpotConstantPool,                 "jdk/vm/ci/hotspot/HotSpotConstantPool")                 \
+   template(jdk_vm_ci_hotspot_HotSpotJVMCIMetaAccessContext,       "jdk/vm/ci/hotspot/HotSpotJVMCIMetaAccessContext")       \
+   template(jdk_vm_ci_hotspot_HotSpotJVMCIRuntime,                 "jdk/vm/ci/hotspot/HotSpotJVMCIRuntime")                 \
+   template(jdk_vm_ci_hotspot_HotSpotSpeculationLog,               "jdk/vm/ci/hotspot/HotSpotSpeculationLog")               \
++  template(jdk_vm_ci_hotspot_HotSpotCompilationRequestResult,     "jdk/vm/ci/hotspot/HotSpotCompilationRequestResult")     \
+   template(jdk_vm_ci_meta_JavaConstant,                           "jdk/vm/ci/meta/JavaConstant")                           \
+   template(jdk_vm_ci_meta_PrimitiveConstant,                      "jdk/vm/ci/meta/PrimitiveConstant")                      \
+   template(jdk_vm_ci_meta_RawConstant,                            "jdk/vm/ci/meta/RawConstant")                            \
+@@ -66,7 +66,6 @@
+   template(jdk_vm_ci_code_Architecture,                           "jdk/vm/ci/code/Architecture")                           \
+   template(jdk_vm_ci_code_BytecodeFrame,                          "jdk/vm/ci/code/BytecodeFrame")                          \
+   template(jdk_vm_ci_code_BytecodePosition,                       "jdk/vm/ci/code/BytecodePosition")                       \
+-  template(jdk_vm_ci_code_CompilationRequestResult,               "jdk/vm/ci/code/CompilationRequestResult")               \
+   template(jdk_vm_ci_code_DebugInfo,                              "jdk/vm/ci/code/DebugInfo")                              \
+   template(jdk_vm_ci_code_InstalledCode,                          "jdk/vm/ci/code/InstalledCode")                          \
+   template(jdk_vm_ci_code_Location,                               "jdk/vm/ci/code/Location")                               \
+@@ -91,7 +90,7 @@
+   template(adjustCompilationLevel_name,                           "adjustCompilationLevel")                                \
+   template(adjustCompilationLevel_signature,                      "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;ZI)I") \
+   template(compileMethod_name,                                    "compileMethod")                                         \
+-  template(compileMethod_signature,                               "(Ljdk/vm/ci/hotspot/HotSpotResolvedJavaMethod;IJI)Ljdk/vm/ci/code/CompilationRequestResult;") \
++  template(compileMethod_signature,                               "(Ljdk/vm/ci/hotspot/HotSpotResolvedJavaMethod;IJI)Ljdk/vm/ci/hotspot/HotSpotCompilationRequestResult;") \
+   template(fromMetaspace_name,                                    "fromMetaspace")                                         \
+   template(method_fromMetaspace_signature,                        "(J)Ljdk/vm/ci/hotspot/HotSpotResolvedJavaMethod;")      \
+   template(constantPool_fromMetaspace_signature,                  "(J)Ljdk/vm/ci/hotspot/HotSpotConstantPool;")            \
+--- old/test/compiler/jvmci/common/JVMCIHelpers.java	2016-05-18 23:02:21.000000000 +0200
++++ new/test/compiler/jvmci/common/JVMCIHelpers.java	2016-05-18 23:02:21.000000000 +0200
+@@ -41,12 +41,18 @@
+         // just empty, using default interface methods
+     }
+ 
++    public static class EmptyCompilationRequestResult implements CompilationRequestResult {
++        @Override
++        public Object getFailure() {
++            return "no compiler configured";
++        }
++    }
+     public static class EmptyHotspotCompiler implements JVMCICompiler {
+ 
+         @Override
+         public CompilationRequestResult compileMethod(CompilationRequest request) {
+             // do nothing
+-            return CompilationRequestResult.failure("no compiler configured", true);
++            return new EmptyCompilationRequestResult();
+         }
+     }
+ 
+--- old/test/compiler/jvmci/jdk.vm.ci.hotspot.test/src/jdk/vm/ci/hotspot/test/BoxPrimitiveDataProvider.java	2016-05-18 23:02:22.000000000 +0200
++++ new/test/compiler/jvmci/jdk.vm.ci.hotspot.test/src/jdk/vm/ci/hotspot/test/BoxPrimitiveDataProvider.java	2016-05-18 23:02:22.000000000 +0200
+@@ -37,12 +37,12 @@
+         LinkedList<Object[]> cfgSet = new LinkedList<>();
+         // Boolean testing
+         cfgSet.add(
+-                        new Object[]{JavaConstant.forBoolean(true), CONSTANT_REFLECTION_PROVIDER.forObject((Boolean) true)});
++                        new Object[]{JavaConstant.forBoolean(true), CONSTANT_REFLECTION_PROVIDER.forObject(true)});
+         cfgSet.add(new Object[]{JavaConstant.forBoolean(false),
+-                        CONSTANT_REFLECTION_PROVIDER.forObject((Boolean) false)});
++                        CONSTANT_REFLECTION_PROVIDER.forObject(false)});
+         // Boxed boolean testing (returns null)
+-        cfgSet.add(new Object[]{CONSTANT_REFLECTION_PROVIDER.forObject((Boolean) true), null});
+-        cfgSet.add(new Object[]{CONSTANT_REFLECTION_PROVIDER.forObject((Boolean) false), null});
++        cfgSet.add(new Object[]{CONSTANT_REFLECTION_PROVIDER.forObject(true), null});
++        cfgSet.add(new Object[]{CONSTANT_REFLECTION_PROVIDER.forObject(false), null});
+         for (byte number : new byte[]{-128, 0, 1, 127}) {
+             // Integer primitives testing
+             cfgSet.add(new Object[]{JavaConstant.forByte(number),
+@@ -59,8 +59,8 @@
+             }
+             // Float and Double variables are not cached,
+             // so the tested method returns "null" on them
+-            cfgSet.add(new Object[]{JavaConstant.forFloat((float) number), null});
+-            cfgSet.add(new Object[]{JavaConstant.forDouble((double) number), null});
++            cfgSet.add(new Object[]{JavaConstant.forFloat(number), null});
++            cfgSet.add(new Object[]{JavaConstant.forDouble(number), null});
+             // Boxed primitives testing (return null)
+             cfgSet.add(new Object[]{CONSTANT_REFLECTION_PROVIDER.forObject(Byte.valueOf(number)), null});
+             cfgSet.add(new Object[]{CONSTANT_REFLECTION_PROVIDER.forObject(Short.valueOf(number)), null});
+--- old/test/compiler/jvmci/jdk.vm.ci.hotspot.test/src/jdk/vm/ci/hotspot/test/UnboxPrimitiveDataProvider.java	2016-05-18 23:02:23.000000000 +0200
++++ new/test/compiler/jvmci/jdk.vm.ci.hotspot.test/src/jdk/vm/ci/hotspot/test/UnboxPrimitiveDataProvider.java	2016-05-18 23:02:23.000000000 +0200
+@@ -38,9 +38,9 @@
+         LinkedList<Object[]> cfgSet = new LinkedList<>();
+         // Testing boolean
+         cfgSet.add(new Object[]{CONSTANT_REFLECTION_PROVIDER.forObject(
+-                        (Boolean) true), JavaConstant.forBoolean(true)});
++                        true), JavaConstant.forBoolean(true)});
+         cfgSet.add(new Object[]{JavaConstant.forBoolean(true), null});
+-        cfgSet.add(new Object[]{CONSTANT_REFLECTION_PROVIDER.forObject((Boolean) false),
++        cfgSet.add(new Object[]{CONSTANT_REFLECTION_PROVIDER.forObject(false),
+                         JavaConstant.forBoolean(false)});
+         cfgSet.add(new Object[]{JavaConstant.forBoolean(false), null});
+         for (byte number : new byte[]{-128, 0, 1, 127}) {
+--- old/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/ConstantTest.java	2016-05-18 23:02:23.000000000 +0200
++++ new/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/ConstantTest.java	2016-05-18 23:02:23.000000000 +0200
+@@ -34,12 +34,11 @@
+ // * @compile ConstantTest.java FieldUniverse.java TypeUniverse.java TestMetaAccessProvider.java
+ package jdk.vm.ci.runtime.test;
+ 
+-import jdk.vm.ci.meta.JavaConstant;
+-import jdk.vm.ci.meta.JavaKind;
+-
+ import org.junit.Assert;
+ import org.junit.Test;
+ 
++import jdk.vm.ci.meta.JavaConstant;
++
+ public class ConstantTest extends FieldUniverse {
+ 
+     @Test
+@@ -52,30 +51,4 @@
+     public void testNullIsNull() {
+         Assert.assertTrue(JavaConstant.NULL_POINTER.isNull());
+     }
+-
+-    @Test
+-    public void testOne() {
+-        for (JavaKind kind : JavaKind.values()) {
+-            if (kind.isNumericInteger() || kind.isNumericFloat()) {
+-                Assert.assertTrue(JavaConstant.one(kind).getJavaKind() == kind);
+-            }
+-        }
+-        Assert.assertEquals(1, JavaConstant.one(JavaKind.Int).asInt());
+-        Assert.assertEquals(1L, JavaConstant.one(JavaKind.Long).asLong());
+-        Assert.assertEquals(1, JavaConstant.one(JavaKind.Byte).asInt());
+-        Assert.assertEquals(1, JavaConstant.one(JavaKind.Short).asInt());
+-        Assert.assertEquals(1, JavaConstant.one(JavaKind.Char).asInt());
+-        Assert.assertTrue(1F == JavaConstant.one(JavaKind.Float).asFloat());
+-        Assert.assertTrue(1D == JavaConstant.one(JavaKind.Double).asDouble());
+-    }
+-
+-    @Test(expected = IllegalArgumentException.class)
+-    public void testIllegalOne() {
+-        JavaConstant.one(JavaKind.Illegal);
+-    }
+-
+-    @Test(expected = IllegalArgumentException.class)
+-    public void testVoidOne() {
+-        JavaConstant.one(JavaKind.Void);
+-    }
+ }
+--- old/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaType.java	2016-05-18 23:02:24.000000000 +0200
++++ new/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TestResolvedJavaType.java	2016-05-18 23:02:24.000000000 +0200
+@@ -183,34 +183,6 @@
+         }
+     }
+ 
+-    private static Class<?> asExactClass(Class<?> c) {
+-        if (c.isArray()) {
+-            if (asExactClass(c.getComponentType()) != null) {
+-                return c;
+-            }
+-        } else {
+-            if (c.isPrimitive() || Modifier.isFinal(c.getModifiers())) {
+-                return c;
+-            }
+-        }
+-        return null;
+-    }
+-
+-    @Test
+-    public void asExactTypeTest() {
+-        for (Class<?> c : classes) {
+-            ResolvedJavaType type = metaAccess.lookupJavaType(c);
+-            ResolvedJavaType exactType = type.asExactType();
+-            Class<?> expected = asExactClass(c);
+-            if (expected == null) {
+-                assertTrue("exact(" + c.getName() + ") != null", exactType == null);
+-            } else {
+-                assertNotNull(exactType);
+-                assertTrue(exactType.equals(metaAccess.lookupJavaType(expected)));
+-            }
+-        }
+-    }
+-
+     @Test
+     public void getSuperclassTest() {
+         for (Class<?> c : classes) {
+--- old/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TypeUniverse.java	2016-05-18 23:02:25.000000000 +0200
++++ new/test/compiler/jvmci/jdk.vm.ci.runtime.test/src/jdk/vm/ci/runtime/test/TypeUniverse.java	2016-05-18 23:02:24.000000000 +0200
+@@ -58,8 +58,6 @@
+ 
+ import jdk.internal.misc.Unsafe;
+ 
+-//JaCoCo Exclude
+-
+ /**
+  * Context for type related tests.
+  */
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.inittimer/src/jdk/vm/ci/inittimer/InitTimer.java	2016-05-18 23:02:25.000000000 +0200
++++ /dev/null	2016-05-18 23:02:25.000000000 +0200
+@@ -1,80 +0,0 @@
+-/*
+- * Copyright (c) 2014, 2015, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.inittimer;
+-
+-import java.util.concurrent.atomic.AtomicInteger;
+-
+-/**
+- * A facility for timing a step in the runtime initialization sequence. This is independent from all
+- * other JVMCI code so as to not perturb the initialization sequence. It is enabled by setting the
+- * {@code "jvmci.inittimer"} system property to {@code "true"}.
+- */
+-public final class InitTimer implements AutoCloseable {
+-    final String name;
+-    final long start;
+-
+-    private InitTimer(String name) {
+-        int n = nesting.getAndIncrement();
+-        if (n == 0) {
+-            initializingThread = Thread.currentThread();
+-            System.out.println("INITIALIZING THREAD: " + initializingThread);
+-        } else {
+-            assert Thread.currentThread() == initializingThread : Thread.currentThread() + " != " + initializingThread;
+-        }
+-        this.name = name;
+-        this.start = System.currentTimeMillis();
+-        System.out.println("START: " + SPACES.substring(0, n * 2) + name);
+-    }
+-
+-    @SuppressFBWarnings(value = "ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD", justification = "only the initializing thread accesses this field")
+-    public void close() {
+-        final long end = System.currentTimeMillis();
+-        int n = nesting.decrementAndGet();
+-        System.out.println(" DONE: " + SPACES.substring(0, n * 2) + name + " [" + (end - start) + " ms]");
+-        if (n == 0) {
+-            initializingThread = null;
+-        }
+-    }
+-
+-    public static InitTimer timer(String name) {
+-        return ENABLED ? new InitTimer(name) : null;
+-    }
+-
+-    public static InitTimer timer(String name, Object suffix) {
+-        return ENABLED ? new InitTimer(name + suffix) : null;
+-    }
+-
+-    /**
+-     * Specifies if initialization timing is enabled. Note: This property cannot use
+-     * {@code HotSpotJVMCIRuntime.Option} since that class is not visible from this package.
+-     */
+-    private static final boolean ENABLED = Boolean.getBoolean("jvmci.InitTimer");
+-
+-    public static final AtomicInteger nesting = ENABLED ? new AtomicInteger() : null;
+-    public static final String SPACES = "                                            ";
+-
+-    /**
+-     * Used to assert the invariant that all related initialization happens on the same thread.
+-     */
+-    public static Thread initializingThread;
+-}
+--- /dev/null	2016-05-18 23:02:25.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.common/src/jdk/vm/ci/common/InitTimer.java	2016-05-18 23:02:25.000000000 +0200
+@@ -0,0 +1,80 @@
++/*
++ * Copyright (c) 2014, 2015, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package jdk.vm.ci.common;
++
++import java.util.concurrent.atomic.AtomicInteger;
++
++/**
++ * A facility for timing a step in the runtime initialization sequence. This is independent from all
++ * other JVMCI code so as to not perturb the initialization sequence. It is enabled by setting the
++ * {@code "jvmci.inittimer"} system property to {@code "true"}.
++ */
++public final class InitTimer implements AutoCloseable {
++    final String name;
++    final long start;
++
++    private InitTimer(String name) {
++        int n = nesting.getAndIncrement();
++        if (n == 0) {
++            initializingThread = Thread.currentThread();
++            System.out.println("INITIALIZING THREAD: " + initializingThread);
++        } else {
++            assert Thread.currentThread() == initializingThread : Thread.currentThread() + " != " + initializingThread;
++        }
++        this.name = name;
++        this.start = System.currentTimeMillis();
++        System.out.println("START: " + SPACES.substring(0, n * 2) + name);
++    }
++
++    @SuppressFBWarnings(value = "ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD", justification = "only the initializing thread accesses this field")
++    public void close() {
++        final long end = System.currentTimeMillis();
++        int n = nesting.decrementAndGet();
++        System.out.println(" DONE: " + SPACES.substring(0, n * 2) + name + " [" + (end - start) + " ms]");
++        if (n == 0) {
++            initializingThread = null;
++        }
++    }
++
++    public static InitTimer timer(String name) {
++        return ENABLED ? new InitTimer(name) : null;
++    }
++
++    public static InitTimer timer(String name, Object suffix) {
++        return ENABLED ? new InitTimer(name + suffix) : null;
++    }
++
++    /**
++     * Specifies if initialization timing is enabled. Note: This property cannot use
++     * {@code HotSpotJVMCIRuntime.Option} since that class is not visible from this package.
++     */
++    private static final boolean ENABLED = Boolean.getBoolean("jvmci.InitTimer");
++
++    public static final AtomicInteger nesting = ENABLED ? new AtomicInteger() : null;
++    public static final String SPACES = "                                            ";
++
++    /**
++     * Used to assert the invariant that all related initialization happens on the same thread.
++     */
++    public static Thread initializingThread;
++}
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.inittimer/src/jdk/vm/ci/inittimer/SuppressFBWarnings.java	2016-05-18 23:02:26.000000000 +0200
++++ /dev/null	2016-05-18 23:02:26.000000000 +0200
+@@ -1,40 +0,0 @@
+-/*
+- * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.inittimer;
+-
+-/**
+- * Used to suppress <a href="http://findbugs.sourceforge.net">FindBugs</a> warnings.
+- */
+-public @interface SuppressFBWarnings {
+-    /**
+-     * The set of FindBugs
+-     * <a href="http://findbugs.sourceforge.net/bugDescriptions.html">warnings</a> that are to be
+-     * suppressed in annotated element. The value can be a bug category, kind or pattern.
+-     */
+-    String[] value();
+-
+-    /**
+-     * Reason why the warning is suppressed.
+-     */
+-    String justification();
+-}
+--- /dev/null	2016-05-18 23:02:26.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.common/src/jdk/vm/ci/common/SuppressFBWarnings.java	2016-05-18 23:02:26.000000000 +0200
+@@ -0,0 +1,40 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package jdk.vm.ci.common;
++
++/**
++ * Used to suppress <a href="http://findbugs.sourceforge.net">FindBugs</a> warnings.
++ */
++@interface SuppressFBWarnings {
++    /**
++     * The set of FindBugs
++     * <a href="http://findbugs.sourceforge.net/bugDescriptions.html">warnings</a> that are to be
++     * suppressed in annotated element. The value can be a bug category, kind or pattern.
++     */
++    String[] value();
++
++    /**
++     * Reason why the warning is suppressed.
++     */
++    String justification();
++}
+--- /dev/null	2016-05-18 23:02:27.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotCompilationRequestResult.java	2016-05-18 23:02:26.000000000 +0200
+@@ -0,0 +1,96 @@
++/*
++ * Copyright (c) 2015, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package jdk.vm.ci.hotspot;
++
++import jdk.vm.ci.code.CompilationRequest;
++import jdk.vm.ci.code.CompilationRequestResult;
++
++/**
++ * HotSpot specific information about the result of a {@link CompilationRequest}.
++ */
++public final class HotSpotCompilationRequestResult implements CompilationRequestResult {
++
++    /**
++     * A user readable description of the failure.
++     *
++     * This field is read by the VM.
++     */
++    private final String failureMessage;
++
++    /**
++     * Whether this is a transient failure where retrying would help.
++     *
++     * This field is read by the VM.
++     */
++    private final boolean retry;
++
++    /**
++     * Number of bytecodes inlined into the compilation, exclusive of the bytecodes in the root
++     * method.
++     *
++     * This field is read by the VM.
++     */
++    private final int inlinedBytecodes;
++
++    private HotSpotCompilationRequestResult(String failureMessage, boolean retry, int inlinedBytecodes) {
++        this.failureMessage = failureMessage;
++        this.retry = retry;
++        this.inlinedBytecodes = inlinedBytecodes;
++    }
++
++    public Object getFailure() {
++        return failureMessage;
++    }
++
++    /**
++     * Creates a result representing a successful compilation.
++     *
++     * @param inlinedBytecodes number of bytecodes inlined into the compilation, exclusive of the
++     *            bytecodes in the root method
++     */
++    public static HotSpotCompilationRequestResult success(int inlinedBytecodes) {
++        return new HotSpotCompilationRequestResult(null, true, inlinedBytecodes);
++    }
++
++    /**
++     * Creates a result representing a failed compilation.
++     *
++     * @param failureMessage a description of the failure
++     * @param retry whether this is a transient failure where retrying may succeed
++     */
++    public static HotSpotCompilationRequestResult failure(String failureMessage, boolean retry) {
++        return new HotSpotCompilationRequestResult(failureMessage, retry, 0);
++    }
++
++    public String getFailureMessage() {
++        return failureMessage;
++    }
++
++    public boolean getRetry() {
++        return retry;
++    }
++
++    public int getInlinedBytecodes() {
++        return inlinedBytecodes;
++    }
++}
+--- /dev/null	2016-05-18 23:02:27.000000000 +0200
++++ new/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/SuppressFBWarnings.java	2016-05-18 23:02:27.000000000 +0200
+@@ -0,0 +1,40 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++package jdk.vm.ci.hotspot;
++
++/**
++ * Used to suppress <a href="http://findbugs.sourceforge.net">FindBugs</a> warnings.
++ */
++@interface SuppressFBWarnings {
++    /**
++     * The set of FindBugs
++     * <a href="http://findbugs.sourceforge.net/bugDescriptions.html">warnings</a> that are to be
++     * suppressed in annotated element. The value can be a bug category, kind or pattern.
++     */
++    String[] value();
++
++    /**
++     * Reason why the warning is suppressed.
++     */
++    String justification();
++}
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.code/src/jdk/vm/ci/code/SourceStackTrace.java	2016-05-18 23:02:28.000000000 +0200
++++ /dev/null	2016-05-18 23:02:28.000000000 +0200
+@@ -1,50 +0,0 @@
+-/*
+- * Copyright (c) 2015, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.code;
+-
+-/**
+- * Class representing an exception with a stack trace of the currently processed position in the
+- * compiled Java program instead of the stack trace of the compiler. The exception of the compiler
+- * is saved as the cause of this exception.
+- */
+-public abstract class SourceStackTrace extends BailoutException {
+-    private static final long serialVersionUID = 2144811793442316776L;
+-
+-    public static SourceStackTrace create(Throwable cause, String format, StackTraceElement[] elements) {
+-        return new SourceStackTrace(cause, format) {
+-
+-            private static final long serialVersionUID = 6279381376051787907L;
+-
+-            @Override
+-            public synchronized Throwable fillInStackTrace() {
+-                assert elements != null;
+-                setStackTrace(elements);
+-                return this;
+-            }
+-        };
+-    }
+-
+-    private SourceStackTrace(Throwable cause, String format) {
+-        super(cause, format);
+-    }
+-}
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.common/src/jdk/vm/ci/common/UnsafeUtil.java	2016-05-18 23:02:28.000000000 +0200
++++ /dev/null	2016-05-18 23:02:28.000000000 +0200
+@@ -1,81 +0,0 @@
+-/*
+- * Copyright (c) 2012, 2012, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.common;
+-
+-import jdk.internal.misc.Unsafe;
+-
+-/**
+- * Utilities for operating on raw memory with {@link Unsafe}.
+- */
+-public class UnsafeUtil {
+-
+-    /**
+-     * Copies the contents of a {@link String} to a native memory buffer as a {@code '\0'}
+-     * terminated C string. The native memory buffer is allocated via
+-     * {@link Unsafe#allocateMemory(long)}. The caller is responsible for releasing the buffer when
+-     * it is no longer needed via {@link Unsafe#freeMemory(long)}.
+-     *
+-     * @return the native memory pointer of the C string created from {@code s}
+-     */
+-    public static long createCString(Unsafe unsafe, String s) {
+-        return writeCString(unsafe, s, unsafe.allocateMemory(s.length() + 1));
+-    }
+-
+-    /**
+-     * Reads a {@code '\0'} terminated C string from native memory and converts it to a
+-     * {@link String}.
+-     *
+-     * @return a Java string
+-     */
+-    public static String readCString(Unsafe unsafe, long address) {
+-        if (address == 0) {
+-            return null;
+-        }
+-        StringBuilder sb = new StringBuilder();
+-        for (int i = 0;; i++) {
+-            char c = (char) unsafe.getByte(address + i);
+-            if (c == 0) {
+-                break;
+-            }
+-            sb.append(c);
+-        }
+-        return sb.toString();
+-    }
+-
+-    /**
+-     * Writes the contents of a {@link String} to a native memory buffer as a {@code '\0'}
+-     * terminated C string. The caller is responsible for ensuring the buffer is at least
+-     * {@code s.length() + 1} bytes long. The caller is also responsible for releasing the buffer
+-     * when it is no longer.
+-     *
+-     * @return the value of {@code buf}
+-     */
+-    public static long writeCString(Unsafe unsafe, String s, long buf) {
+-        int size = s.length();
+-        for (int i = 0; i < size; i++) {
+-            unsafe.putByte(buf + i, (byte) s.charAt(i));
+-        }
+-        unsafe.putByte(buf + size, (byte) '\0');
+-        return buf;
+-    }
+-}
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotOopMap.java	2016-05-18 23:02:28.000000000 +0200
++++ /dev/null	2016-05-18 23:02:28.000000000 +0200
+@@ -1,43 +0,0 @@
+-/*
+- * Copyright (c) 2015, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.hotspot;
+-
+-import jdk.vm.ci.inittimer.SuppressFBWarnings;
+-
+-public class HotSpotOopMap {
+-    @SuppressFBWarnings(value = "UWF_UNWRITTEN_FIELD", justification = "field is set by the native part") private int offset;
+-    @SuppressFBWarnings(value = "UWF_UNWRITTEN_FIELD", justification = "field is set by the native part") private int count;
+-    @SuppressFBWarnings(value = "UWF_UNWRITTEN_FIELD", justification = "field is set by the native part") private byte[] data;
+-
+-    public byte[] data() {
+-        return data;
+-    }
+-
+-    public int count() {
+-        return count;
+-    }
+-
+-    public int offset() {
+-        return offset;
+-    }
+-}
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotProxified.java	2016-05-18 23:02:29.000000000 +0200
++++ /dev/null	2016-05-18 23:02:29.000000000 +0200
+@@ -1,29 +0,0 @@
+-/*
+- * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.hotspot;
+-
+-/**
+- * Marker interface for classes whose values are proxied during replay compilation capture.
+- */
+-public interface HotSpotProxified {
+-}
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/JVMCIMetaAccessContext.java	2016-05-18 23:02:29.000000000 +0200
++++ /dev/null	2016-05-18 23:02:29.000000000 +0200
+@@ -1,38 +0,0 @@
+-/*
+- * Copyright (c) 2015, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.meta;
+-
+-/**
+- * A context in which the results looking up the {@link ResolvedJavaType} for a {@link Class} are
+- * cached.
+- */
+-public interface JVMCIMetaAccessContext {
+-
+-    /**
+-     * Gets the JVMCI mirror for a {@link Class} object.
+-     *
+-     * @return the {@link ResolvedJavaType} corresponding to {@code javaClass}
+-     */
+-
+-    ResolvedJavaType fromClass(Class<?> clazz);
+-}
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/LineNumberTableImpl.java	2016-05-18 23:02:29.000000000 +0200
++++ /dev/null	2016-05-18 23:02:29.000000000 +0200
+@@ -1,54 +0,0 @@
+-/*
+- * Copyright (c) 2011, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.meta;
+-
+-public class LineNumberTableImpl implements LineNumberTable {
+-
+-    private final int[] lineNumbers;
+-    private final int[] bci;
+-
+-    public LineNumberTableImpl(int[] lineNumbers, int[] bci) {
+-        this.lineNumbers = lineNumbers;
+-        this.bci = bci;
+-    }
+-
+-    @Override
+-    public int[] getLineNumberEntries() {
+-        return lineNumbers;
+-    }
+-
+-    @Override
+-    public int[] getBciEntries() {
+-        return bci;
+-    }
+-
+-    @Override
+-    public int getLineNumber(@SuppressWarnings("hiding") int bci) {
+-        for (int i = 0; i < this.bci.length - 1; i++) {
+-            if (this.bci[i] <= bci && bci < this.bci[i + 1]) {
+-                return lineNumbers[i];
+-            }
+-        }
+-        return lineNumbers[lineNumbers.length - 1];
+-    }
+-}
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/LocalImpl.java	2016-05-18 23:02:30.000000000 +0200
++++ /dev/null	2016-05-18 23:02:30.000000000 +0200
+@@ -1,84 +0,0 @@
+-/*
+- * Copyright (c) 2011, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.meta;
+-
+-public class LocalImpl implements Local {
+-
+-    private final String name;
+-    private final int startBci;
+-    private final int endBci;
+-    private final int slot;
+-    private final JavaType type;
+-
+-    public LocalImpl(String name, JavaType type, int startBci, int endBci, int slot) {
+-        this.name = name;
+-        this.startBci = startBci;
+-        this.endBci = endBci;
+-        this.slot = slot;
+-        this.type = type;
+-    }
+-
+-    @Override
+-    public int getStartBCI() {
+-        return startBci;
+-    }
+-
+-    @Override
+-    public int getEndBCI() {
+-        return endBci;
+-    }
+-
+-    @Override
+-    public String getName() {
+-        return name;
+-    }
+-
+-    @Override
+-    public JavaType getType() {
+-        return type;
+-    }
+-
+-    @Override
+-    public int getSlot() {
+-        return slot;
+-    }
+-
+-    @Override
+-    public boolean equals(Object obj) {
+-        if (!(obj instanceof LocalImpl)) {
+-            return false;
+-        }
+-        LocalImpl that = (LocalImpl) obj;
+-        return this.name.equals(that.name) && this.startBci == that.startBci && this.endBci == that.endBci && this.slot == that.slot && this.type.equals(that.type);
+-    }
+-
+-    @Override
+-    public int hashCode() {
+-        return super.hashCode();
+-    }
+-
+-    @Override
+-    public String toString() {
+-        return "LocalImpl<name=" + name + ", type=" + type + ", startBci=" + startBci + ", endBci=" + endBci + ", slot=" + slot + ">";
+-    }
+-}
+--- old/src/jdk.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/LocalVariableTableImpl.java	2016-05-18 23:02:30.000000000 +0200
++++ /dev/null	2016-05-18 23:02:30.000000000 +0200
+@@ -1,67 +0,0 @@
+-/*
+- * Copyright (c) 2011, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-package jdk.vm.ci.meta;
+-
+-import java.util.ArrayList;
+-import java.util.List;
+-
+-public class LocalVariableTableImpl implements LocalVariableTable {
+-
+-    private final Local[] locals;
+-
+-    public LocalVariableTableImpl(Local[] locals) {
+-        this.locals = locals;
+-    }
+-
+-    @Override
+-    public Local getLocal(int slot, int bci) {
+-        Local result = null;
+-        for (Local local : locals) {
+-            if (local.getSlot() == slot && local.getStartBCI() <= bci && local.getEndBCI() >= bci) {
+-                if (result == null) {
+-                    result = local;
+-                } else {
+-                    throw new IllegalStateException("Locals overlap!");
+-                }
+-            }
+-        }
+-        return result;
+-    }
+-
+-    @Override
+-    public Local[] getLocals() {
+-        return locals;
+-    }
+-
+-    @Override
+-    public Local[] getLocalsAt(int bci) {
+-        List<Local> result = new ArrayList<>();
+-        for (Local l : locals) {
+-            if (l.getStartBCI() <= bci && bci <= l.getEndBCI()) {
+-                result.add(l);
+-            }
+-        }
+-        return result.toArray(new Local[result.size()]);
+-    }
+-
+-}
+--- old/test/compiler/jvmci/events/JvmciCreateMetaAccessContextTest.java	2016-05-18 23:02:31.000000000 +0200
++++ /dev/null	2016-05-18 23:02:31.000000000 +0200
+@@ -1,113 +0,0 @@
+-/*
+- * Copyright (c) 2015, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-
+-/*
+- * @test
+- * @bug 8136421
+- * @requires (os.simpleArch == "x64" | os.simpleArch == "sparcv9" | os.simpleArch == "aarch64")
+- * @library / /testlibrary
+- * @library ../common/patches
+- * @modules java.base/jdk.internal.misc
+- * @modules jdk.vm.ci/jdk.vm.ci.hotspot
+- *          jdk.vm.ci/jdk.vm.ci.code
+- *          jdk.vm.ci/jdk.vm.ci.meta
+- *          jdk.vm.ci/jdk.vm.ci.runtime
+- * @build jdk.vm.ci/jdk.vm.ci.hotspot.MetaAccessWrapper
+- * @build compiler.jvmci.common.JVMCIHelpers
+- *     compiler.jvmci.events.JvmciCreateMetaAccessContextTest
+- * @run main jdk.test.lib.FileInstaller ../common/services/ ./META-INF/services/
+- * @run main jdk.test.lib.FileInstaller
+- *     ./JvmciCreateMetaAccessContextTest.config
+- *     ./META-INF/services/jdk.vm.ci.hotspot.services.HotSpotVMEventListener
+- * @run main ClassFileInstaller
+- *     compiler.jvmci.common.JVMCIHelpers$EmptyHotspotCompiler
+- *     compiler.jvmci.common.JVMCIHelpers$EmptyCompilerFactory
+- *     compiler.jvmci.events.JvmciCreateMetaAccessContextTest
+- *     jdk.test.lib.Asserts
+- * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
+- *     -Xbootclasspath/a:.
+- *     -Dcompiler.jvmci.events.JvmciCreateMetaAccessContextTest.providenull=true
+- *     compiler.jvmci.events.JvmciCreateMetaAccessContextTest
+- * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
+- *     -Xbootclasspath/a:.
+- *     -Dcompiler.jvmci.events.JvmciCreateMetaAccessContextTest.providenull=false
+- *     compiler.jvmci.events.JvmciCreateMetaAccessContextTest
+- */
+-
+-package compiler.jvmci.events;
+-
+-import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
+-import jdk.vm.ci.hotspot.services.HotSpotVMEventListener;
+-import jdk.vm.ci.hotspot.MetaAccessWrapper;
+-import jdk.vm.ci.meta.JVMCIMetaAccessContext;
+-import jdk.test.lib.Asserts;
+-
+-public class JvmciCreateMetaAccessContextTest
+-        extends HotSpotVMEventListener {
+-    private static final boolean PROVIDE_NULL_CONTEXT = Boolean.getBoolean(
+-            "compiler.jvmci.events.JvmciCreateMetaAccessContextTest"
+-                    + ".providenull");
+-    private static volatile int createMetaAccessContextCount = 0;
+-    private static volatile String errorMessage = "";
+-
+-    public static void main(String args[]) {
+-        if (createMetaAccessContextCount != 0) {
+-            throw new Error("Unexpected createMetaAccessContextevents count"
+-                    + " at test start");
+-        }
+-        JVMCIMetaAccessContext context;
+-        context = HotSpotJVMCIRuntime.runtime().getMetaAccessContext();
+-        Asserts.assertNotNull(context,
+-                "JVMCIMetaAccessContext is null after 1st request");
+-        Asserts.assertEQ(createMetaAccessContextCount, 1,
+-                "Unexpected createMetaAccessContext events count after 1st"
+-                        + " JVMCI runtime request");
+-        context = HotSpotJVMCIRuntime.runtime().getMetaAccessContext();
+-        Asserts.assertNotNull(context,
+-                "JVMCIMetaAccessContext is null after 2nd request");
+-        Asserts.assertEQ(createMetaAccessContextCount, 1,
+-                "Unexpected createMetaAccessContext events count after 2nd"
+-                        + " JVMCI runtime request");
+-        Asserts.assertTrue(errorMessage.isEmpty(), errorMessage);
+-        if (PROVIDE_NULL_CONTEXT) {
+-            Asserts.assertFalse(context instanceof MetaAccessWrapper,
+-                    "Got unexpected context: " + context.getClass());
+-        } else {
+-            Asserts.assertTrue(context instanceof MetaAccessWrapper,
+-                    "Got unexpected context: " + context.getClass());
+-        }
+-    }
+-
+-    @Override
+-    public JVMCIMetaAccessContext createMetaAccessContext(HotSpotJVMCIRuntime
+-            hotSpotJVMCIRuntime) {
+-        createMetaAccessContextCount++;
+-        if (hotSpotJVMCIRuntime == null) {
+-            errorMessage += " HotSpotJVMCIRuntime is null.";
+-        }
+-        if (PROVIDE_NULL_CONTEXT) {
+-            return null;
+-        }
+-        return new MetaAccessWrapper();
+-    }
+-}

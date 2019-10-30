@@ -1,0 +1,418 @@
+--- old/src/hotspot/share/jvmci/jvmciEnv.cpp	2019-01-18 21:34:26.000000000 +0100
++++ new/src/hotspot/share/jvmci/jvmciEnv.cpp	2019-01-18 21:34:26.000000000 +0100
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 1999, 2018, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 1999, 2019, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -62,9 +62,30 @@
+ {
+   // Get Jvmti capabilities under lock to get consistent values.
+   MutexLocker mu(JvmtiThreadState_lock);
+-  _jvmti_can_hotswap_or_post_breakpoint = JvmtiExport::can_hotswap_or_post_breakpoint();
+-  _jvmti_can_access_local_variables     = JvmtiExport::can_access_local_variables();
+-  _jvmti_can_post_on_exceptions         = JvmtiExport::can_post_on_exceptions();
++  _jvmti_can_hotswap_or_post_breakpoint = JvmtiExport::can_hotswap_or_post_breakpoint() ? 1 : 0;
++  _jvmti_can_access_local_variables     = JvmtiExport::can_access_local_variables() ? 1 : 0;
++  _jvmti_can_post_on_exceptions         = JvmtiExport::can_post_on_exceptions() ? 1 : 0;
++  _jvmti_can_pop_frame                  = JvmtiExport::can_pop_frame() ? 1 : 0;
++}
++
++bool JVMCIEnv::jvmti_state_changed() const {
++  if (!jvmti_can_access_local_variables() &&
++      JvmtiExport::can_access_local_variables()) {
++    return true;
++  }
++  if (!jvmti_can_hotswap_or_post_breakpoint() &&
++      JvmtiExport::can_hotswap_or_post_breakpoint()) {
++    return true;
++  }
++  if (!jvmti_can_post_on_exceptions() &&
++      JvmtiExport::can_post_on_exceptions()) {
++    return true;
++  }
++  if (!jvmti_can_pop_frame() &&
++      JvmtiExport::can_pop_frame()) {
++    return true;
++  }
++  return false;
+ }
+ 
+ // ------------------------------------------------------------------
+@@ -412,11 +433,9 @@
+ JVMCIEnv::CodeInstallResult JVMCIEnv::validate_compile_task_dependencies(Dependencies* dependencies, Handle compiled_code,
+                                                                          JVMCIEnv* env, char** failure_detail) {
+   // If JVMTI capabilities were enabled during compile, the compilation is invalidated.
+-  if (env != NULL) {
+-    if (!env->_jvmti_can_hotswap_or_post_breakpoint && JvmtiExport::can_hotswap_or_post_breakpoint()) {
+-      *failure_detail = (char*) "Hotswapping or breakpointing was enabled during compilation";
+-      return JVMCIEnv::dependencies_failed;
+-    }
++  if (env != NULL && env->jvmti_state_changed()) {
++    *failure_detail = (char*) "Jvmti state change during compilation invalidated dependencies";
++    return JVMCIEnv::dependencies_failed;
+   }
+ 
+   // Dependencies must be checked when the system dictionary changes
+--- old/src/hotspot/share/jvmci/jvmciEnv.hpp	2019-01-18 21:34:27.000000000 +0100
++++ new/src/hotspot/share/jvmci/jvmciEnv.hpp	2019-01-18 21:34:27.000000000 +0100
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 1999, 2017, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 1999, 2019, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -102,10 +102,13 @@
+   const char*      _failure_reason;
+   bool             _retryable;
+ 
+-  // Cache JVMTI state
+-  bool  _jvmti_can_hotswap_or_post_breakpoint;
+-  bool  _jvmti_can_access_local_variables;
+-  bool  _jvmti_can_post_on_exceptions;
++  // Cache JVMTI state. Defined as bytes so that reading them from Java
++  // via Unsafe is well defined (the C++ type for bool is implementation
++  // defined and may not be the same as a Java boolean).
++  jbyte  _jvmti_can_hotswap_or_post_breakpoint;
++  jbyte  _jvmti_can_access_local_variables;
++  jbyte  _jvmti_can_post_on_exceptions;
++  jbyte  _jvmti_can_pop_frame;
+ 
+   // Implementation methods for loading and constant pool access.
+   static Klass* get_klass_by_name_impl(Klass* accessing_klass,
+@@ -144,6 +147,12 @@
+ public:
+   CompileTask* task() { return _task; }
+ 
++  bool  jvmti_state_changed() const;
++  bool  jvmti_can_hotswap_or_post_breakpoint() const { return  _jvmti_can_hotswap_or_post_breakpoint != 0; }
++  bool  jvmti_can_access_local_variables() const     { return  _jvmti_can_access_local_variables != 0; }
++  bool  jvmti_can_post_on_exceptions() const         { return  _jvmti_can_post_on_exceptions != 0; }
++  bool  jvmti_can_pop_frame() const                  { return  _jvmti_can_pop_frame != 0; }
++
+   const char* failure_reason() { return _failure_reason; }
+   bool retryable() { return _retryable; }
+ 
+--- old/src/hotspot/share/jvmci/vmStructs_jvmci.cpp	2019-01-18 21:34:28.000000000 +0100
++++ new/src/hotspot/share/jvmci/vmStructs_jvmci.cpp	2019-01-18 21:34:28.000000000 +0100
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -182,13 +182,17 @@
+   nonstatic_field(JavaThread,                  _pending_failed_speculation,                   long)                                  \
+   nonstatic_field(JavaThread,                  _pending_transfer_to_interpreter,              bool)                                  \
+   nonstatic_field(JavaThread,                  _jvmci_counters,                               jlong*)                                \
++  nonstatic_field(JavaThread,                  _should_post_on_exceptions_flag,               int)                                   \
+   nonstatic_field(JavaThread,                  _reserved_stack_activation,                    address)                               \
+                                                                                                                                      \
+   static_field(java_lang_Class,                _klass_offset,                                 int)                                   \
+   static_field(java_lang_Class,                _array_klass_offset,                           int)                                   \
+                                                                                                                                      \
+   nonstatic_field(JVMCIEnv,                    _task,                                         CompileTask*)                          \
+-  nonstatic_field(JVMCIEnv,                    _jvmti_can_hotswap_or_post_breakpoint,         bool)                                  \
++  nonstatic_field(JVMCIEnv,                    _jvmti_can_hotswap_or_post_breakpoint,         jbyte)                                 \
++  nonstatic_field(JVMCIEnv,                    _jvmti_can_access_local_variables,             jbyte)                                 \
++  nonstatic_field(JVMCIEnv,                    _jvmti_can_post_on_exceptions,                 jbyte)                                 \
++  nonstatic_field(JVMCIEnv,                    _jvmti_can_pop_frame,                          jbyte)                                 \
+                                                                                                                                      \
+   nonstatic_field(InvocationCounter,           _counter,                                      unsigned int)                          \
+                                                                                                                                      \
+--- old/src/jdk.internal.vm.compiler/share/classes/org.graalvm.compiler.hotspot/src/org/graalvm/compiler/hotspot/GraalHotSpotVMConfig.java	2019-01-18 21:34:29.000000000 +0100
++++ new/src/jdk.internal.vm.compiler/share/classes/org.graalvm.compiler.hotspot/src/org/graalvm/compiler/hotspot/GraalHotSpotVMConfig.java	2019-01-18 21:34:29.000000000 +0100
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -309,8 +309,11 @@
+     public final int jvmAccWrittenFlags = getConstant("JVM_ACC_WRITTEN_FLAGS", Integer.class);
+     public final int jvmAccSynthetic = getConstant("JVM_ACC_SYNTHETIC", Integer.class);
+ 
++    public final int jvmciCompileStateCanPostOnExceptionsOffset = getFieldOffset("JVMCIEnv::_jvmti_can_post_on_exceptions", Integer.class, "jbyte", Integer.MIN_VALUE);
++
+     public final int threadTlabOffset = getFieldOffset("Thread::_tlab", Integer.class, "ThreadLocalAllocBuffer");
+     public final int javaThreadAnchorOffset = getFieldOffset("JavaThread::_anchor", Integer.class, "JavaFrameAnchor");
++    public final int javaThreadShouldPostOnExceptionsFlagOffset = getFieldOffset("JavaThread::_should_post_on_exceptions_flag", Integer.class, "int", Integer.MIN_VALUE);
+     public final int threadObjectOffset = getFieldOffset("JavaThread::_threadObj", Integer.class, "oop");
+     public final int osThreadOffset = getFieldOffset("JavaThread::_osthread", Integer.class, "OSThread*");
+     public final int threadIsMethodHandleReturnOffset = getFieldOffset("JavaThread::_is_method_handle_return", Integer.class, "int");
+--- old/src/jdk.internal.vm.compiler/share/classes/org.graalvm.compiler.hotspot/src/org/graalvm/compiler/hotspot/meta/HotSpotGraphBuilderPlugins.java	2019-01-18 21:34:30.000000000 +0100
++++ new/src/jdk.internal.vm.compiler/share/classes/org.graalvm.compiler.hotspot/src/org/graalvm/compiler/hotspot/meta/HotSpotGraphBuilderPlugins.java	2019-01-18 21:34:30.000000000 +0100
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -124,7 +124,7 @@
+         Plugins plugins = new Plugins(invocationPlugins);
+         NodeIntrinsificationProvider nodeIntrinsificationProvider = new NodeIntrinsificationProvider(metaAccess, snippetReflection, foreignCalls, wordTypes);
+         HotSpotWordOperationPlugin wordOperationPlugin = new HotSpotWordOperationPlugin(snippetReflection, wordTypes);
+-        HotSpotNodePlugin nodePlugin = new HotSpotNodePlugin(wordOperationPlugin);
++        HotSpotNodePlugin nodePlugin = new HotSpotNodePlugin(wordOperationPlugin, config, wordTypes);
+ 
+         plugins.appendTypePlugin(nodePlugin);
+         plugins.appendNodePlugin(nodePlugin);
+--- old/src/jdk.internal.vm.compiler/share/classes/org.graalvm.compiler.hotspot/src/org/graalvm/compiler/hotspot/meta/HotSpotNodePlugin.java	2019-01-18 21:34:31.000000000 +0100
++++ new/src/jdk.internal.vm.compiler/share/classes/org.graalvm.compiler.hotspot/src/org/graalvm/compiler/hotspot/meta/HotSpotNodePlugin.java	2019-01-18 21:34:31.000000000 +0100
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -24,21 +24,41 @@
+ 
+ package org.graalvm.compiler.hotspot.meta;
+ 
++import static jdk.vm.ci.meta.DeoptimizationAction.None;
++import static jdk.vm.ci.meta.DeoptimizationReason.TransferToInterpreter;
+ import static org.graalvm.compiler.core.common.GraalOptions.ImmutableCode;
+ 
++import org.graalvm.compiler.core.common.CompilationIdentifier;
++import org.graalvm.compiler.core.common.type.StampFactory;
+ import org.graalvm.compiler.core.common.type.StampPair;
++import org.graalvm.compiler.hotspot.GraalHotSpotVMConfig;
++import org.graalvm.compiler.hotspot.HotSpotCompilationIdentifier;
++import org.graalvm.compiler.hotspot.nodes.CurrentJavaThreadNode;
++import org.graalvm.compiler.hotspot.word.HotSpotWordTypes;
+ import org.graalvm.compiler.nodes.ConstantNode;
++import org.graalvm.compiler.nodes.FixedGuardNode;
++import org.graalvm.compiler.nodes.FixedWithNextNode;
++import org.graalvm.compiler.nodes.LogicNode;
++import org.graalvm.compiler.nodes.NamedLocationIdentity;
++import org.graalvm.compiler.nodes.StructuredGraph;
+ import org.graalvm.compiler.nodes.ValueNode;
++import org.graalvm.compiler.nodes.calc.IntegerEqualsNode;
+ import org.graalvm.compiler.nodes.extended.GuardingNode;
+ import org.graalvm.compiler.nodes.graphbuilderconf.GraphBuilderContext;
+ import org.graalvm.compiler.nodes.graphbuilderconf.GraphBuilderTool;
+ import org.graalvm.compiler.nodes.graphbuilderconf.InlineInvokePlugin;
+ import org.graalvm.compiler.nodes.graphbuilderconf.NodePlugin;
+ import org.graalvm.compiler.nodes.graphbuilderconf.TypePlugin;
++import org.graalvm.compiler.nodes.memory.HeapAccess.BarrierType;
++import org.graalvm.compiler.nodes.memory.ReadNode;
++import org.graalvm.compiler.nodes.memory.address.AddressNode;
++import org.graalvm.compiler.nodes.memory.address.OffsetAddressNode;
+ import org.graalvm.compiler.nodes.util.ConstantFoldUtil;
+ import org.graalvm.compiler.word.Word;
+ import org.graalvm.compiler.word.WordOperationPlugin;
++import jdk.internal.vm.compiler.word.LocationIdentity;
+ 
++import jdk.vm.ci.hotspot.HotSpotCompilationRequest;
+ import jdk.vm.ci.meta.JavaConstant;
+ import jdk.vm.ci.meta.JavaKind;
+ import jdk.vm.ci.meta.JavaType;
+@@ -47,23 +67,30 @@
+ import jdk.vm.ci.meta.ResolvedJavaMethod;
+ import jdk.vm.ci.meta.ResolvedJavaType;
+ 
++import java.lang.reflect.Field;
++import sun.misc.Unsafe;
++
+ /**
+- * This plugin handles the HotSpot-specific customizations of bytecode parsing:
+- * <p>
+- * {@link Word}-type rewriting for {@link GraphBuilderContext#parsingIntrinsic intrinsic} functions
+- * (snippets and method substitutions), by forwarding to the {@link WordOperationPlugin}. Note that
+- * we forward the {@link NodePlugin} and {@link TypePlugin} methods, but not the
++ * This plugin does HotSpot-specific customization of bytecode parsing:
++ * <ul>
++ * <li>{@link Word}-type rewriting for {@link GraphBuilderContext#parsingIntrinsic intrinsic}
++ * functions (snippets and method substitutions), by forwarding to the {@link WordOperationPlugin}.
++ * Note that we forward the {@link NodePlugin} and {@link TypePlugin} methods, but not the
+  * {@link InlineInvokePlugin} methods implemented by {@link WordOperationPlugin}. The latter is not
+  * necessary because HotSpot only uses the {@link Word} type in methods that are force-inlined,
+- * i.e., there are never non-inlined invokes that involve the {@link Word} type.
+- * <p>
+- * Constant folding of field loads.
++ * i.e., there are never non-inlined invokes that involve the {@link Word} type.</li>
++ * <li>Constant folding of field loads.</li>
++ * </ul>
+  */
+ public final class HotSpotNodePlugin implements NodePlugin, TypePlugin {
+     protected final WordOperationPlugin wordOperationPlugin;
++    private final GraalHotSpotVMConfig config;
++    private final HotSpotWordTypes wordTypes;
+ 
+-    public HotSpotNodePlugin(WordOperationPlugin wordOperationPlugin) {
++    public HotSpotNodePlugin(WordOperationPlugin wordOperationPlugin, GraalHotSpotVMConfig config, HotSpotWordTypes wordTypes) {
+         this.wordOperationPlugin = wordOperationPlugin;
++        this.config = config;
++        this.wordTypes = wordTypes;
+     }
+ 
+     @Override
+@@ -180,4 +207,58 @@
+         }
+         return false;
+     }
++
++    @Override
++    public FixedWithNextNode instrumentExceptionDispatch(StructuredGraph graph, FixedWithNextNode afterExceptionLoaded) {
++        CompilationIdentifier id = graph.compilationId();
++        if (id instanceof HotSpotCompilationIdentifier) {
++            HotSpotCompilationRequest request = ((HotSpotCompilationIdentifier) id).getRequest();
++            if (request != null) {
++                long compileState = request.getJvmciEnv();
++                if (compileState != 0 &&
++                                config.jvmciCompileStateCanPostOnExceptionsOffset != Integer.MIN_VALUE &&
++                                config.javaThreadShouldPostOnExceptionsFlagOffset != Integer.MIN_VALUE) {
++                    long canPostOnExceptionsOffset = compileState + config.jvmciCompileStateCanPostOnExceptionsOffset;
++                    boolean canPostOnExceptions = UNSAFE.getByte(canPostOnExceptionsOffset) != 0;
++                    if (canPostOnExceptions) {
++                        // If the exception capability is set, then generate code
++                        // to check the JavaThread.should_post_on_exceptions flag to see
++                        // if we actually need to report exception events for the current
++                        // thread. If not, take the fast path otherwise deoptimize.
++                        CurrentJavaThreadNode thread = graph.unique(new CurrentJavaThreadNode(wordTypes.getWordKind()));
++                        ValueNode offset = graph.unique(ConstantNode.forLong(config.javaThreadShouldPostOnExceptionsFlagOffset));
++                        AddressNode address = graph.unique(new OffsetAddressNode(thread, offset));
++                        ReadNode shouldPostException = graph.add(new ReadNode(address, JAVA_THREAD_SHOULD_POST_ON_EXCEPTIONS_FLAG_LOCATION, StampFactory.intValue(), BarrierType.NONE));
++                        afterExceptionLoaded.setNext(shouldPostException);
++                        ValueNode zero = graph.unique(ConstantNode.forInt(0));
++                        LogicNode cond = graph.unique(new IntegerEqualsNode(shouldPostException, zero));
++                        FixedGuardNode check = graph.add(new FixedGuardNode(cond, TransferToInterpreter, None, false));
++                        shouldPostException.setNext(check);
++                        return check;
++                    }
++                }
++            }
++        }
++        return afterExceptionLoaded;
++    }
++
++    private static final LocationIdentity JAVA_THREAD_SHOULD_POST_ON_EXCEPTIONS_FLAG_LOCATION = NamedLocationIdentity.mutable("JavaThread::_should_post_on_exceptions_flag");
++
++    private static final Unsafe UNSAFE = initUnsafe();
++
++    private static Unsafe initUnsafe() {
++        try {
++            // Fast path when we are trusted.
++            return Unsafe.getUnsafe();
++        } catch (SecurityException se) {
++            // Slow path when we are not trusted.
++            try {
++                Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
++                theUnsafe.setAccessible(true);
++                return (Unsafe) theUnsafe.get(Unsafe.class);
++            } catch (Exception e) {
++                throw new RuntimeException("exception while trying to get Unsafe", e);
++            }
++        }
++    }
+ }
+--- old/src/jdk.internal.vm.compiler/share/classes/org.graalvm.compiler.java/src/org/graalvm/compiler/java/BytecodeParser.java	2019-01-18 21:34:32.000000000 +0100
++++ new/src/jdk.internal.vm.compiler/share/classes/org.graalvm.compiler.java/src/org/graalvm/compiler/java/BytecodeParser.java	2019-01-18 21:34:31.000000000 +0100
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2009, 2018, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2009, 2019, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -1106,7 +1106,11 @@
+         deopt.updateNodeSourcePosition(() -> createBytecodePosition());
+     }
+ 
++    /**
++     * @return the entry point to exception dispatch
++     */
+     private AbstractBeginNode handleException(ValueNode exceptionObject, int bci, boolean deoptimizeOnly) {
++        FixedWithNextNode currentLastInstr = lastInstr;
+         assert bci == BytecodeFrame.BEFORE_BCI || bci == bci() : "invalid bci";
+         debug.log("Creating exception dispatch edges at %d, exception object=%s, exception seen=%s", bci, exceptionObject, (profilingInfo == null ? "" : profilingInfo.getExceptionSeen(bci)));
+ 
+@@ -1126,18 +1130,25 @@
+             dispatchState.setRethrowException(true);
+         }
+         this.controlFlowSplit = true;
+-        FixedWithNextNode finishedDispatch = finishInstruction(dispatchBegin, dispatchState);
++        FixedWithNextNode afterExceptionLoaded = finishInstruction(dispatchBegin, dispatchState);
+ 
+         if (deoptimizeOnly) {
+             DeoptimizeNode deoptimizeNode = graph.add(new DeoptimizeNode(DeoptimizationAction.None, DeoptimizationReason.TransferToInterpreter));
+-            dispatchBegin.setNext(BeginNode.begin(deoptimizeNode));
++            afterExceptionLoaded.setNext(BeginNode.begin(deoptimizeNode));
+         } else {
+-            createHandleExceptionTarget(finishedDispatch, bci, dispatchState);
++            createHandleExceptionTarget(afterExceptionLoaded, bci, dispatchState);
+         }
++        assert currentLastInstr == lastInstr;
+         return dispatchBegin;
+     }
+ 
+-    protected void createHandleExceptionTarget(FixedWithNextNode finishedDispatch, int bci, FrameStateBuilder dispatchState) {
++    protected void createHandleExceptionTarget(FixedWithNextNode afterExceptionLoaded, int bci, FrameStateBuilder dispatchState) {
++        FixedWithNextNode afterInstrumentation = afterExceptionLoaded;
++        for (NodePlugin plugin : graphBuilderConfig.getPlugins().getNodePlugins()) {
++            afterInstrumentation = plugin.instrumentExceptionDispatch(graph, afterInstrumentation);
++            assert afterInstrumentation.next() == null : "exception dispatch instrumentation will be linked to dispatch block";
++        }
++
+         BciBlock dispatchBlock = currentBlock.exceptionDispatchBlock();
+         /*
+          * The exception dispatch block is always for the last bytecode of a block, so if we are not
+@@ -1149,7 +1160,7 @@
+         }
+ 
+         FixedNode target = createTarget(dispatchBlock, dispatchState);
+-        finishedDispatch.setNext(target);
++        afterInstrumentation.setNext(target);
+     }
+ 
+     protected ValueNode genLoadIndexed(ValueNode array, ValueNode index, GuardingNode boundsCheck, JavaKind kind) {
+--- old/src/jdk.internal.vm.compiler/share/classes/org.graalvm.compiler.nodes/src/org/graalvm/compiler/nodes/graphbuilderconf/NodePlugin.java	2019-01-18 21:34:33.000000000 +0100
++++ new/src/jdk.internal.vm.compiler/share/classes/org.graalvm.compiler.nodes/src/org/graalvm/compiler/nodes/graphbuilderconf/NodePlugin.java	2019-01-18 21:34:32.000000000 +0100
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -24,6 +24,9 @@
+ 
+ package org.graalvm.compiler.nodes.graphbuilderconf;
+ 
++import org.graalvm.compiler.graph.Node.ValueNumberable;
++import org.graalvm.compiler.nodes.FixedWithNextNode;
++import org.graalvm.compiler.nodes.StructuredGraph;
+ import org.graalvm.compiler.nodes.ValueNode;
+ import org.graalvm.compiler.nodes.extended.GuardingNode;
+ 
+@@ -210,6 +213,23 @@
+     }
+ 
+     /**
++     * Allows this plugin to add nodes after the exception object has been loaded in the dispatch
++     * sequence. Note that a {@link StructuredGraph} is provided to this call instead of a
++     * {@link GraphBuilderContext} so that the caller has a guarantee that its current control flow
++     * insertion point is not changed by this call. This means nodes must be added to the graph with
++     * the appropriate method (e.g., {@link StructuredGraph#unique} for {@link ValueNumberable}
++     * nodes) and fixed nodes must be manually {@linkplain FixedWithNextNode#setNext added} as
++     * successors of {@code afterExceptionLoaded}.
++     *
++     * @param graph the graph being parsed
++     * @param afterExceptionLoaded the last fixed node after loading the exception
++     * @return the last fixed node after instrumentation
++     */
++    default FixedWithNextNode instrumentExceptionDispatch(StructuredGraph graph, FixedWithNextNode afterExceptionLoaded) {
++        return afterExceptionLoaded;
++    }
++
++    /**
+      * If the plugin {@link GraphBuilderContext#push pushes} a value with a different
+      * {@link JavaKind} than specified by the bytecode, it must override this method and return
+      * {@code true}. This disables assertion checking for value kinds.

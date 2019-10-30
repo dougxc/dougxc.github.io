@@ -1,0 +1,536 @@
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantReflectionProvider.java	2017-04-03 16:03:50.000000000 +0200
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotConstantReflectionProvider.java	2017-04-03 16:03:50.000000000 +0200
+@@ -179,11 +179,14 @@
+         if (hotspotField.isStatic()) {
+             HotSpotResolvedJavaType holder = (HotSpotResolvedJavaType) hotspotField.getDeclaringClass();
+             if (holder.isInitialized()) {
+-                return memoryAccess.readUnsafeConstant(hotspotField.getJavaKind(), HotSpotObjectConstantImpl.forObject(holder.mirror()), hotspotField.offset());
++                return memoryAccess.readFieldValue(hotspotField, holder.mirror());
+             }
+         } else {
+-            if (receiver.isNonNull() && hotspotField.isInObject(((HotSpotObjectConstantImpl) receiver).object())) {
+-                return memoryAccess.readUnsafeConstant(hotspotField.getJavaKind(), receiver, hotspotField.offset());
++            if (receiver.isNonNull()) {
++                Object object = ((HotSpotObjectConstantImpl) receiver).object();
++                if (hotspotField.isInObject(object)) {
++                    return memoryAccess.readFieldValue(hotspotField, object);
++                }
+             }
+         }
+         return null;
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMemoryAccessProvider.java	2017-04-03 16:03:51.000000000 +0200
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMemoryAccessProvider.java	2017-04-03 16:03:51.000000000 +0200
+@@ -31,6 +31,10 @@
+  */
+ public interface HotSpotMemoryAccessProvider extends MemoryAccessProvider {
+ 
++    /**
++     * @throws IllegalArgumentException if the address computed from {@code base} and
++     *             {@code displacement} does not denote a location holding a narrow oop
++     */
+     JavaConstant readNarrowOopConstant(Constant base, long displacement);
+ 
+     Constant readKlassPointerConstant(Constant base, long displacement);
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMemoryAccessProviderImpl.java	2017-04-03 16:03:52.000000000 +0200
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotMemoryAccessProviderImpl.java	2017-04-03 16:03:52.000000000 +0200
+@@ -22,13 +22,21 @@
+  */
+ package jdk.vm.ci.hotspot;
+ 
++import static jdk.vm.ci.hotspot.HotSpotJVMCIRuntimeProvider.getArrayBaseOffset;
++import static jdk.vm.ci.hotspot.HotSpotJVMCIRuntimeProvider.getArrayIndexScale;
+ import static jdk.vm.ci.hotspot.UnsafeAccess.UNSAFE;
+ 
++import java.lang.reflect.Array;
++
++import jdk.vm.ci.common.JVMCIError;
+ import jdk.vm.ci.meta.Constant;
+ import jdk.vm.ci.meta.JavaConstant;
+ import jdk.vm.ci.meta.JavaKind;
+ import jdk.vm.ci.meta.MemoryAccessProvider;
++import jdk.vm.ci.meta.MetaAccessProvider;
+ import jdk.vm.ci.meta.PrimitiveConstant;
++import jdk.vm.ci.meta.ResolvedJavaField;
++import jdk.vm.ci.meta.ResolvedJavaType;
+ 
+ /**
+  * HotSpot implementation of {@link MemoryAccessProvider}.
+@@ -41,12 +49,93 @@
+         this.runtime = runtime;
+     }
+ 
+-    private static Object asObject(Constant base) {
++    /**
++     * Gets the object boxed by {@code base} that is about to have a value of kind {@code kind} read
++     * from it at the offset {@code displacement}.
++     *
++     * @param base constant value containing the base address for a pending read
++     * @return {@code null} if {@code base} does not box an object otherwise the object boxed in
++     *         {@code base}
++     */
++    private Object asObject(Constant base, JavaKind kind, long displacement) {
+         if (base instanceof HotSpotObjectConstantImpl) {
+-            return ((HotSpotObjectConstantImpl) base).object();
++            HotSpotObjectConstantImpl constant = (HotSpotObjectConstantImpl) base;
++            HotSpotResolvedObjectType type = constant.getType();
++            Object object = constant.object();
++            checkRead(kind, displacement, type, object);
++            return object;
++        }
++        return null;
++    }
++
++    /**
++     * Offset of injected {@code java.lang.Class::oop_size} field. No need to make {@code volatile}
++     * as initialization is idempotent.
++     */
++    private long oopSizeOffset;
++
++    private static int computeOopSizeOffset(HotSpotJVMCIRuntimeProvider runtime) {
++        MetaAccessProvider metaAccess = runtime.getHostJVMCIBackend().getMetaAccess();
++        ResolvedJavaType staticType = metaAccess.lookupJavaType(Class.class);
++        for (ResolvedJavaField f : staticType.getInstanceFields(false)) {
++            if (f.getName().equals("oop_size")) {
++                int offset = ((HotSpotResolvedJavaField) f).offset();
++                assert offset != 0 : "not expecting offset of java.lang.Class::oop_size to be 0";
++                return offset;
++            }
++        }
++        throw new JVMCIError("Could not find injected java.lang.Class::oop_size field");
++    }
++
++    private boolean checkRead(JavaKind kind, long displacement, HotSpotResolvedObjectType type, Object object) {
++        if (type.isArray()) {
++            ResolvedJavaType componentType = type.getComponentType();
++            JavaKind componentKind = componentType.getJavaKind();
++            final int headerSize = getArrayBaseOffset(componentKind);
++            int sizeOfElement = getArrayIndexScale(componentKind);
++            int length = Array.getLength(object);
++            long arrayEnd = headerSize + (sizeOfElement * length);
++            boolean aligned = ((displacement - headerSize) % sizeOfElement) == 0;
++            if (displacement < 0 || displacement > (arrayEnd - sizeOfElement) || (kind == JavaKind.Object && !aligned)) {
++                int index = (int) ((displacement - headerSize) / sizeOfElement);
++                throw new AssertionError("Unsafe array access: reading element of kind " + kind +
++                                " at offset " + displacement + " (index ~ " + index + ") in " +
++                                type.toJavaName() + " object of length " + length);
++            }
++        } else if (kind != JavaKind.Object) {
++            long size;
++            if (object instanceof Class) {
++                if (oopSizeOffset == 0) {
++                    oopSizeOffset = computeOopSizeOffset(runtime);
++                }
++                int wordSize = runtime.getHostJVMCIBackend().getCodeCache().getTarget().wordSize;
++                size = UNSAFE.getInt(object, oopSizeOffset) * wordSize;
++            } else {
++                size = Math.abs(type.instanceSize());
++            }
++            int bytesToRead = kind.getByteCount();
++            if (displacement + bytesToRead > size || displacement < 0) {
++                throw new IllegalArgumentException("Unsafe access: reading " + bytesToRead + " bytes at offset " + displacement + " in " +
++                                type.toJavaName() + " object of size " + size);
++            }
+         } else {
+-            return null;
++            ResolvedJavaField field = type.findInstanceFieldWithOffset(displacement, JavaKind.Object);
++            if (field == null && object instanceof Class) {
++                // Read of a static field
++                MetaAccessProvider metaAccess = runtime.getHostJVMCIBackend().getMetaAccess();
++                HotSpotResolvedObjectTypeImpl staticFieldsHolder = (HotSpotResolvedObjectTypeImpl) metaAccess.lookupJavaType((Class<?>) object);
++                field = staticFieldsHolder.findStaticFieldWithOffset(displacement, JavaKind.Object);
++            }
++            if (field == null) {
++                throw new IllegalArgumentException("Unsafe object access: field not found for read of kind Object" +
++                                " at offset " + displacement + " in " + type.toJavaName() + " object");
++            }
++            if (field.getJavaKind() != JavaKind.Object) {
++                throw new IllegalArgumentException("Unsafe object access: field " + field.format("%H.%n:%T") + " not of expected kind Object" +
++                                " at offset " + displacement + " in " + type.toJavaName() + " object");
++            }
+         }
++        return true;
+     }
+ 
+     private boolean isValidObjectFieldDisplacement(Constant base, long displacement) {
+@@ -77,8 +166,8 @@
+         throw new IllegalArgumentException(String.valueOf(base));
+     }
+ 
+-    private static long readRawValue(Constant baseConstant, long displacement, int bits) {
+-        Object base = asObject(baseConstant);
++    private long readRawValue(Constant baseConstant, long displacement, JavaKind kind, int bits) {
++        Object base = asObject(baseConstant, kind, displacement);
+         if (base != null) {
+             switch (bits) {
+                 case Byte.SIZE:
+@@ -123,9 +212,8 @@
+ 
+     private Object readRawObject(Constant baseConstant, long initialDisplacement, boolean compressed) {
+         long displacement = initialDisplacement;
+-
+         Object ret;
+-        Object base = asObject(baseConstant);
++        Object base = asObject(baseConstant, JavaKind.Object, displacement);
+         if (base == null) {
+             assert !compressed;
+             displacement += asRawPointer(baseConstant);
+@@ -138,34 +226,43 @@
+         return ret;
+     }
+ 
+-    /**
+-     * Reads a value of this kind using a base address and a displacement. No bounds checking or
+-     * type checking is performed. Returns {@code null} if the value is not available at this point.
+-     *
+-     * @param baseConstant the base address from which the value is read.
+-     * @param displacement the displacement within the object in bytes
+-     * @return the read value encapsulated in a {@link JavaConstant} object, or {@code null} if the
+-     *         value cannot be read.
+-     * @throws IllegalArgumentException if {@code kind} is {@code null}, {@link JavaKind#Void}, not
+-     *             {@link JavaKind#Object} or not {@linkplain JavaKind#isPrimitive() primitive} kind
+-     */
+-    JavaConstant readUnsafeConstant(JavaKind kind, JavaConstant baseConstant, long displacement) {
+-        if (kind == null) {
+-            throw new IllegalArgumentException("null JavaKind");
+-        }
+-        if (kind == JavaKind.Object) {
+-            Object o = readRawObject(baseConstant, displacement, runtime.getConfig().useCompressedOops);
++    JavaConstant readFieldValue(HotSpotResolvedJavaField field, Object obj) {
++        assert obj != null;
++        assert !field.isStatic() || obj instanceof Class;
++        long displacement = field.offset();
++        assert checkRead(field.getJavaKind(), displacement, (HotSpotResolvedObjectType) runtime.getHostJVMCIBackend().getMetaAccess().lookupJavaType(obj.getClass()), obj);
++        if (field.getJavaKind() == JavaKind.Object) {
++            Object o = UNSAFE.getObject(obj, displacement);
+             return HotSpotObjectConstantImpl.forObject(o);
+         } else {
+-            int bits = kind.getByteCount() * Byte.SIZE;
+-            return readPrimitiveConstant(kind, baseConstant, displacement, bits);
++            JavaKind kind = field.getJavaKind();
++            switch (kind) {
++                case Boolean:
++                    return JavaConstant.forBoolean(UNSAFE.getBoolean(obj, displacement));
++                case Byte:
++                    return JavaConstant.forByte(UNSAFE.getByte(obj, displacement));
++                case Char:
++                    return JavaConstant.forChar(UNSAFE.getChar(obj, displacement));
++                case Short:
++                    return JavaConstant.forShort(UNSAFE.getShort(obj, displacement));
++                case Int:
++                    return JavaConstant.forInt(UNSAFE.getInt(obj, displacement));
++                case Long:
++                    return JavaConstant.forLong(UNSAFE.getLong(obj, displacement));
++                case Float:
++                    return JavaConstant.forFloat(UNSAFE.getFloat(obj, displacement));
++                case Double:
++                    return JavaConstant.forDouble(UNSAFE.getDouble(obj, displacement));
++                default:
++                    throw new IllegalArgumentException("Unsupported kind: " + kind);
++            }
+         }
+     }
+ 
+     @Override
+     public JavaConstant readPrimitiveConstant(JavaKind kind, Constant baseConstant, long initialDisplacement, int bits) {
+         try {
+-            long rawValue = readRawValue(baseConstant, initialDisplacement, bits);
++            long rawValue = readRawValue(baseConstant, initialDisplacement, kind, bits);
+             switch (kind) {
+                 case Boolean:
+                     return JavaConstant.forBoolean(rawValue != 0);
+@@ -193,6 +290,10 @@
+ 
+     @Override
+     public JavaConstant readObjectConstant(Constant base, long displacement) {
++        if (base instanceof HotSpotObjectConstantImpl) {
++            Object o = readRawObject(base, displacement, runtime.getConfig().useCompressedOops);
++            return HotSpotObjectConstantImpl.forObject(o);
++        }
+         if (!isValidObjectFieldDisplacement(base, displacement)) {
+             return null;
+         }
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java	2017-04-03 16:03:53.000000000 +0200
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.hotspot/src/jdk/vm/ci/hotspot/HotSpotResolvedObjectTypeImpl.java	2017-04-03 16:03:53.000000000 +0200
+@@ -847,6 +847,15 @@
+     @Override
+     public ResolvedJavaField findInstanceFieldWithOffset(long offset, JavaKind expectedEntryKind) {
+         ResolvedJavaField[] declaredFields = getInstanceFields(true);
++        return findFieldWithOffset(offset, expectedEntryKind, declaredFields);
++    }
++
++    public ResolvedJavaField findStaticFieldWithOffset(long offset, JavaKind expectedEntryKind) {
++        ResolvedJavaField[] declaredFields = getStaticFields();
++        return findFieldWithOffset(offset, expectedEntryKind, declaredFields);
++    }
++
++    private static ResolvedJavaField findFieldWithOffset(long offset, JavaKind expectedEntryKind, ResolvedJavaField[] declaredFields) {
+         for (ResolvedJavaField field : declaredFields) {
+             HotSpotResolvedJavaField resolvedField = (HotSpotResolvedJavaField) field;
+             long resolvedFieldOffset = resolvedField.offset();
+--- old/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/MemoryAccessProvider.java	2017-04-03 16:03:54.000000000 +0200
++++ new/src/jdk.internal.vm.ci/share/classes/jdk.vm.ci.meta/src/jdk/vm/ci/meta/MemoryAccessProvider.java	2017-04-03 16:03:54.000000000 +0200
+@@ -35,9 +35,9 @@
+      * @param displacement the displacement within the object in bytes
+      * @param bits the number of bits to read from memory
+      * @return the read value encapsulated in a {@link JavaConstant} object of {@link JavaKind} kind
+-     * @throws IllegalArgumentException if {@code kind} is {@link JavaKind#Void} or not
+-     *             {@linkplain JavaKind#isPrimitive() primitive} kind or {@code bits} is not 8, 16,
+-     *             32 or 64
++     * @throws IllegalArgumentException if the read is out of bounds of the object or {@code kind}
++     *             is {@link JavaKind#Void} or not {@linkplain JavaKind#isPrimitive() primitive}
++     *             kind or {@code bits} is not 8, 16, 32 or 64
+      */
+     JavaConstant readPrimitiveConstant(JavaKind kind, Constant base, long displacement, int bits) throws IllegalArgumentException;
+ 
+@@ -46,9 +46,9 @@
+      *
+      * @param base the base address from which the value is read
+      * @param displacement the displacement within the object in bytes
+-     * @return the read value encapsulated in a {@link Constant} object or {@code null} if the
+-     *         address computed from {@code base} and {@code displacement} does not denote a
+-     *         location holding an {@code Object} value
++     * @return the read value encapsulated in a {@link Constant} object
++     * @throws IllegalArgumentException if the address computed from {@code base} and
++     *             {@code displacement} does not denote a location holding an {@code Object} value
+      */
+     JavaConstant readObjectConstant(Constant base, long displacement);
+ }
+--- old/test/compiler/jvmci/jdk.vm.ci.hotspot.test/src/jdk/vm/ci/hotspot/test/MemoryAccessProviderData.java	2017-04-03 16:03:55.000000000 +0200
++++ new/test/compiler/jvmci/jdk.vm.ci.hotspot.test/src/jdk/vm/ci/hotspot/test/MemoryAccessProviderData.java	2017-04-03 16:03:54.000000000 +0200
+@@ -27,6 +27,7 @@
+ 
+ import org.testng.annotations.DataProvider;
+ 
++import sun.hotspot.WhiteBox;
+ import jdk.internal.misc.Unsafe;
+ import jdk.vm.ci.hotspot.HotSpotConstantReflectionProvider;
+ import jdk.vm.ci.hotspot.HotSpotJVMCIRuntimeProvider;
+@@ -36,6 +37,10 @@
+ import jdk.vm.ci.meta.JavaConstant;
+ import jdk.vm.ci.meta.JavaKind;
+ import jdk.vm.ci.runtime.JVMCI;
++import java.util.List;
++import java.util.ArrayList;
++import java.util.Map;
++import java.util.HashMap;
+ 
+ public class MemoryAccessProviderData {
+     private static final Unsafe UNSAFE = Unsafe.getUnsafe();
+@@ -43,6 +48,18 @@
+     private static final TestClass TEST_OBJECT = new TestClass();
+     private static final JavaConstant TEST_CONSTANT = CONSTANT_REFLECTION.forObject(TEST_OBJECT);
+     private static final JavaConstant TEST_CLASS_CONSTANT = CONSTANT_REFLECTION.forObject(TestClass.class);
++    private static KindData[] PRIMITIVE_KIND_DATA = {
++        new KindData(JavaKind.Boolean, TEST_OBJECT),
++        new KindData(JavaKind.Byte, TEST_OBJECT),
++        new KindData(JavaKind.Char, TEST_OBJECT),
++        new KindData(JavaKind.Short, TEST_OBJECT),
++        new KindData(JavaKind.Int, TEST_OBJECT),
++        new KindData(JavaKind.Float, TEST_OBJECT),
++        new KindData(JavaKind.Long, TEST_OBJECT),
++        new KindData(JavaKind.Double, TEST_OBJECT)
++    };
++    private static final WhiteBox WHITE_BOX = WhiteBox.getWhiteBox();
++
+ 
+     @DataProvider(name = "positiveObject")
+     public static Object[][] getPositiveObjectJavaKind() {
+@@ -54,51 +71,40 @@
+ 
+     @DataProvider(name = "positivePrimitive")
+     public static Object[][] getPositivePrimitiveJavaKinds() {
+-        Field booleanField;
+-        Field byteField;
+-        Field shortField;
+-        Field intField;
+-        Field longField;
+-        Field floatField;
+-        Field doubleField;
+-        Field charField;
+-        try {
+-            booleanField = MemoryAccessProviderData.TestClass.class.getDeclaredField("booleanField");
+-            byteField = MemoryAccessProviderData.TestClass.class.getDeclaredField("byteField");
+-            shortField = MemoryAccessProviderData.TestClass.class.getDeclaredField("shortField");
+-            intField = MemoryAccessProviderData.TestClass.class.getDeclaredField("intField");
+-            longField = MemoryAccessProviderData.TestClass.class.getDeclaredField("longField");
+-            floatField = MemoryAccessProviderData.TestClass.class.getDeclaredField("floatField");
+-            doubleField = MemoryAccessProviderData.TestClass.class.getDeclaredField("doubleField");
+-            charField = MemoryAccessProviderData.TestClass.class.getDeclaredField("charField");
+-        } catch (NoSuchFieldException e) {
+-            throw new Error("TESTBUG: can't find test field " + e, e);
++        List<Object[]> result = new ArrayList<>();
++        for (KindData k : PRIMITIVE_KIND_DATA) {
++            result.add(new Object[] {k.kind, TEST_CONSTANT, k.instanceFieldOffset, k.instanceFieldValue, Math.max(8, k.kind.getBitCount())});
++            result.add(new Object[] {k.kind, TEST_CLASS_CONSTANT, k.staticFieldOffset, k.staticFieldValue, Math.max(8, k.kind.getBitCount())});
+         }
+-        long booleanFieldOffset = UNSAFE.objectFieldOffset(booleanField);
+-        long byteFieldOffset = UNSAFE.objectFieldOffset(byteField);
+-        long shortFieldOffset = UNSAFE.objectFieldOffset(shortField);
+-        long intFieldOffset = UNSAFE.objectFieldOffset(intField);
+-        long longFieldOffset = UNSAFE.objectFieldOffset(longField);
+-        long floatFieldOffset = UNSAFE.objectFieldOffset(floatField);
+-        long doubleFieldOffset = UNSAFE.objectFieldOffset(doubleField);
+-        long charFieldOffset = UNSAFE.objectFieldOffset(charField);
+-        return new Object[][]{
+-                        new Object[]{JavaKind.Boolean, TEST_CONSTANT, booleanFieldOffset,
+-                                        JavaConstant.forBoolean(TEST_OBJECT.booleanField), 8},
+-                        new Object[]{JavaKind.Byte, TEST_CONSTANT, byteFieldOffset,
+-                                        JavaConstant.forByte(TEST_OBJECT.byteField), 8},
+-                        new Object[]{JavaKind.Short, TEST_CONSTANT, shortFieldOffset,
+-                                        JavaConstant.forShort(TEST_OBJECT.shortField), 16},
+-                        new Object[]{JavaKind.Int, TEST_CONSTANT, intFieldOffset,
+-                                        JavaConstant.forInt(TEST_OBJECT.intField), 32},
+-                        new Object[]{JavaKind.Long, TEST_CONSTANT, longFieldOffset,
+-                                        JavaConstant.forLong(TEST_OBJECT.longField), 64},
+-                        new Object[]{JavaKind.Float, TEST_CONSTANT, floatFieldOffset,
+-                                        JavaConstant.forFloat(TEST_OBJECT.floatField), 32},
+-                        new Object[]{JavaKind.Double, TEST_CONSTANT, doubleFieldOffset,
+-                                        JavaConstant.forDouble(TEST_OBJECT.doubleField), 64},
+-                        new Object[]{JavaKind.Char, TEST_CONSTANT, charFieldOffset,
+-                                        JavaConstant.forChar(TEST_OBJECT.charField), 16}};
++        return result.toArray(new Object[result.size()][]);
++    }
++
++    @DataProvider(name = "outOfBoundsInstanceFields")
++    public static Object[][] getOutOfBoundsStaticFieldReads() {
++        long instanceSize = WHITE_BOX.getObjectSize(TEST_OBJECT);
++        List<Object[]> result = new ArrayList<>();
++        for (KindData k : PRIMITIVE_KIND_DATA) {
++            long lastValidOffset = instanceSize - (k.kind.getByteCount());
++            result.add(new Object[] {k.kind, TEST_CONSTANT, lastValidOffset, false});
++            result.add(new Object[] {k.kind, TEST_CONSTANT, (long) -1, true});
++            result.add(new Object[] {k.kind, TEST_CONSTANT, lastValidOffset + 1, true});
++            result.add(new Object[] {k.kind, TEST_CONSTANT, lastValidOffset + 100, true});
++        }
++        return result.toArray(new Object[result.size()][]);
++    }
++
++    @DataProvider(name = "outOfBoundsStaticFields")
++    public static Object[][] getOutOfBoundsInstanceFieldReads() {
++        long staticsSize = WHITE_BOX.getObjectSize(TEST_OBJECT.getClass());
++        List<Object[]> result = new ArrayList<>();
++        for (KindData k : PRIMITIVE_KIND_DATA) {
++            long lastValidOffset = staticsSize - (k.kind.getByteCount());
++            result.add(new Object[] {k.kind, TEST_CLASS_CONSTANT, lastValidOffset, false});
++            result.add(new Object[] {k.kind, TEST_CLASS_CONSTANT, (long) -1, true});
++            result.add(new Object[] {k.kind, TEST_CLASS_CONSTANT, lastValidOffset + 1, true});
++            result.add(new Object[] {k.kind, TEST_CLASS_CONSTANT, lastValidOffset + 100, true});
++        }
++        return result.toArray(new Object[result.size()][]);
+     }
+ 
+     @DataProvider(name = "negative")
+@@ -108,6 +114,7 @@
+                         new Object[]{JavaKind.Illegal, JavaConstant.INT_1}};
+     }
+ 
++
+     private static class TestClass {
+         public final boolean booleanField = true;
+         public final byte byteField = 2;
+@@ -117,6 +124,43 @@
+         public final double doubleField = 6.0d;
+         public final float floatField = 7.0f;
+         public final char charField = 'a';
+-        public final String stringField = "abc";
++        public final String objectField = "abc";
++
++        public static final boolean booleanStaticField = true;
++        public static final byte byteStaticField = 2;
++        public static final short shortStaticField = 3;
++        public static final int intStaticField = 4;
++        public static final long longStaticField = 5L;
++        public static final double doubleStaticField = 6.0d;
++        public static final float floatStaticField = 7.0f;
++        public static final char charStaticField = 'a';
++        public static final String objectStaticField = "abc";
++    }
++
++
++    static class KindData {
++        final JavaKind kind;
++        final Field instanceField;
++        final Field staticField;
++        final long instanceFieldOffset;
++        final long staticFieldOffset;
++        final JavaConstant instanceFieldValue;
++        final JavaConstant staticFieldValue;
++        KindData(JavaKind kind, Object testObject) {
++            this.kind = kind;
++            try {
++                Class<?> c = testObject.getClass();
++                instanceField = c.getDeclaredField(kind.getJavaName() + "Field");
++                staticField = c.getDeclaredField(kind.getJavaName() + "StaticField");
++                instanceField.setAccessible(true);
++                staticField.setAccessible(true);
++                instanceFieldOffset = UNSAFE.objectFieldOffset(instanceField);
++                staticFieldOffset = UNSAFE.staticFieldOffset(staticField);
++                instanceFieldValue = JavaConstant.forBoxedPrimitive(instanceField.get(testObject));
++                staticFieldValue = JavaConstant.forBoxedPrimitive(staticField.get(null));
++            } catch (Exception e) {
++                throw new Error("TESTBUG for kind " + kind, e);
++            }
++        }
+     }
+ }
+--- old/test/compiler/jvmci/jdk.vm.ci.hotspot.test/src/jdk/vm/ci/hotspot/test/MemoryAccessProviderTest.java	2017-04-03 16:03:56.000000000 +0200
++++ new/test/compiler/jvmci/jdk.vm.ci.hotspot.test/src/jdk/vm/ci/hotspot/test/MemoryAccessProviderTest.java	2017-04-03 16:03:56.000000000 +0200
+@@ -31,12 +31,19 @@
+  *          jdk.internal.vm.ci/jdk.vm.ci.runtime
+  *          jdk.internal.vm.ci/jdk.vm.ci.hotspot
+  *          java.base/jdk.internal.misc
+- * @run testng/othervm -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
++ * @build sun.hotspot.WhiteBox
++ * @run driver ClassFileInstaller sun.hotspot.WhiteBox
++ *                                sun.hotspot.WhiteBox$WhiteBoxPermission
++ * @run testng/othervm -Xbootclasspath/a:.
++ *      -XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI
++ *      -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
+  *      jdk.vm.ci.hotspot.test.MemoryAccessProviderTest
+  */
+ 
+ package jdk.vm.ci.hotspot.test;
+ 
++import sun.hotspot.WhiteBox;
++
+ import jdk.vm.ci.meta.Constant;
+ import jdk.vm.ci.meta.JavaKind;
+ import jdk.vm.ci.meta.MemoryAccessProvider;
+@@ -59,7 +66,27 @@
+ 
+     @Test(dataProvider = "negative", dataProviderClass = MemoryAccessProviderData.class, expectedExceptions = {IllegalArgumentException.class})
+     public void testNegativeReadPrimitiveConstant(JavaKind kind, Constant base) {
+-        PROVIDER.readPrimitiveConstant(kind, base, 0L, kind == null ? 0 : kind.getBitCount());
++        PROVIDER.readPrimitiveConstant(kind, base, 0L, kind == null ? 0 : kind.getByteCount() / 8);
++    }
++
++    @Test(dataProvider = "outOfBoundsInstanceFields", dataProviderClass = MemoryAccessProviderData.class)
++    public void testReadPrimitiveInstanceFieldOutOfBounds(JavaKind kind, Constant base, Long offset, boolean isOutOfBounds) {
++        try {
++            PROVIDER.readPrimitiveConstant(kind, base, offset, kind.getByteCount() * 8);
++            Assert.assertFalse(isOutOfBounds);
++        } catch (IllegalArgumentException iae) {
++            Assert.assertTrue(isOutOfBounds);
++        }
++    }
++
++    @Test(dataProvider = "outOfBoundsStaticFields", dataProviderClass = MemoryAccessProviderData.class)
++    public void testReadPrimitiveStaticFieldOutOFBounds(JavaKind kind, Constant base, Long offset, boolean isOutOfBounds) {
++        try {
++            PROVIDER.readPrimitiveConstant(kind, base, offset, kind.getByteCount() * 8);
++            Assert.assertFalse(isOutOfBounds);
++        } catch (IllegalArgumentException iae) {
++            Assert.assertTrue(isOutOfBounds);
++        }
+     }
+ 
+     @Test(dataProvider = "positiveObject", dataProviderClass = MemoryAccessProviderData.class, expectedExceptions = {IllegalArgumentException.class})
+@@ -87,7 +114,7 @@
+         Assert.assertNull(PROVIDER.readObjectConstant(base, offset + 1), "Expected null");
+     }
+ 
+-    @Test(dataProvider = "positivePrimitive", dataProviderClass = MemoryAccessProviderData.class)
++    @Test(dataProvider = "positivePrimitive", dataProviderClass = MemoryAccessProviderData.class, expectedExceptions = {IllegalArgumentException.class})
+     public void testNegativeReadObjectConstantPrimitiveBase(JavaKind kind, Constant base, Long offset, Object expected, int bitsCount) {
+         Assert.assertNull(PROVIDER.readObjectConstant(base, offset), "Expected null");
+     }
