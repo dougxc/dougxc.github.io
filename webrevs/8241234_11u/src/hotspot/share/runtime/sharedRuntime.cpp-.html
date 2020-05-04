@@ -1,0 +1,3215 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+<title>Old src/hotspot/share/runtime/sharedRuntime.cpp</title>
+<body id="SUNWwebrev">
+<pre>
+   1 /*
+   2  * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #include "precompiled.hpp"
+  26 #include "jvm.h"
+  27 #include "aot/aotLoader.hpp"
+  28 #include "code/compiledMethod.inline.hpp"
+  29 #include "classfile/stringTable.hpp"
+  30 #include "classfile/systemDictionary.hpp"
+  31 #include "classfile/vmSymbols.hpp"
+  32 #include "code/codeCache.hpp"
+  33 #include "code/compiledIC.hpp"
+  34 #include "code/scopeDesc.hpp"
+  35 #include "code/vtableStubs.hpp"
+  36 #include "compiler/abstractCompiler.hpp"
+  37 #include "compiler/compileBroker.hpp"
+  38 #include "compiler/disassembler.hpp"
+  39 #include "gc/shared/barrierSet.hpp"
+  40 #include "gc/shared/gcLocker.inline.hpp"
+  41 #include "interpreter/interpreter.hpp"
+  42 #include "interpreter/interpreterRuntime.hpp"
+  43 #include "jfr/jfrEvents.hpp"
+  44 #include "logging/log.hpp"
+  45 #include "memory/metaspaceShared.hpp"
+  46 #include "memory/resourceArea.hpp"
+  47 #include "memory/universe.hpp"
+  48 #include "oops/klass.hpp"
+  49 #include "oops/method.inline.hpp"
+  50 #include "oops/objArrayKlass.hpp"
+  51 #include "oops/oop.inline.hpp"
+  52 #include "prims/forte.hpp"
+  53 #include "prims/jvmtiExport.hpp"
+  54 #include "prims/methodHandles.hpp"
+  55 #include "prims/nativeLookup.hpp"
+  56 #include "runtime/arguments.hpp"
+  57 #include "runtime/atomic.hpp"
+  58 #include "runtime/biasedLocking.hpp"
+  59 #include "runtime/compilationPolicy.hpp"
+  60 #include "runtime/frame.inline.hpp"
+  61 #include "runtime/handles.inline.hpp"
+  62 #include "runtime/init.hpp"
+  63 #include "runtime/interfaceSupport.inline.hpp"
+  64 #include "runtime/java.hpp"
+  65 #include "runtime/javaCalls.hpp"
+  66 #include "runtime/sharedRuntime.hpp"
+  67 #include "runtime/stubRoutines.hpp"
+  68 #include "runtime/vframe.inline.hpp"
+  69 #include "runtime/vframeArray.hpp"
+  70 #include "utilities/copy.hpp"
+  71 #include "utilities/dtrace.hpp"
+  72 #include "utilities/events.hpp"
+  73 #include "utilities/hashtable.inline.hpp"
+  74 #include "utilities/macros.hpp"
+  75 #include "utilities/xmlstream.hpp"
+  76 #ifdef COMPILER1
+  77 #include "c1/c1_Runtime1.hpp"
+  78 #endif
+  79 
+  80 // Shared stub locations
+  81 RuntimeStub*        SharedRuntime::_wrong_method_blob;
+  82 RuntimeStub*        SharedRuntime::_wrong_method_abstract_blob;
+  83 RuntimeStub*        SharedRuntime::_ic_miss_blob;
+  84 RuntimeStub*        SharedRuntime::_resolve_opt_virtual_call_blob;
+  85 RuntimeStub*        SharedRuntime::_resolve_virtual_call_blob;
+  86 RuntimeStub*        SharedRuntime::_resolve_static_call_blob;
+  87 address             SharedRuntime::_resolve_static_call_entry;
+  88 
+  89 DeoptimizationBlob* SharedRuntime::_deopt_blob;
+  90 SafepointBlob*      SharedRuntime::_polling_page_vectors_safepoint_handler_blob;
+  91 SafepointBlob*      SharedRuntime::_polling_page_safepoint_handler_blob;
+  92 SafepointBlob*      SharedRuntime::_polling_page_return_handler_blob;
+  93 
+  94 #ifdef COMPILER2
+  95 UncommonTrapBlob*   SharedRuntime::_uncommon_trap_blob;
+  96 #endif // COMPILER2
+  97 
+  98 
+  99 //----------------------------generate_stubs-----------------------------------
+ 100 void SharedRuntime::generate_stubs() {
+ 101   _wrong_method_blob                   = generate_resolve_blob(CAST_FROM_FN_PTR(address, SharedRuntime::handle_wrong_method),          "wrong_method_stub");
+ 102   _wrong_method_abstract_blob          = generate_resolve_blob(CAST_FROM_FN_PTR(address, SharedRuntime::handle_wrong_method_abstract), "wrong_method_abstract_stub");
+ 103   _ic_miss_blob                        = generate_resolve_blob(CAST_FROM_FN_PTR(address, SharedRuntime::handle_wrong_method_ic_miss),  "ic_miss_stub");
+ 104   _resolve_opt_virtual_call_blob       = generate_resolve_blob(CAST_FROM_FN_PTR(address, SharedRuntime::resolve_opt_virtual_call_C),   "resolve_opt_virtual_call");
+ 105   _resolve_virtual_call_blob           = generate_resolve_blob(CAST_FROM_FN_PTR(address, SharedRuntime::resolve_virtual_call_C),       "resolve_virtual_call");
+ 106   _resolve_static_call_blob            = generate_resolve_blob(CAST_FROM_FN_PTR(address, SharedRuntime::resolve_static_call_C),        "resolve_static_call");
+ 107   _resolve_static_call_entry           = _resolve_static_call_blob-&gt;entry_point();
+ 108 
+ 109 #if COMPILER2_OR_JVMCI
+ 110   // Vectors are generated only by C2 and JVMCI.
+ 111   bool support_wide = is_wide_vector(MaxVectorSize);
+ 112   if (support_wide) {
+ 113     _polling_page_vectors_safepoint_handler_blob = generate_handler_blob(CAST_FROM_FN_PTR(address, SafepointSynchronize::handle_polling_page_exception), POLL_AT_VECTOR_LOOP);
+ 114   }
+ 115 #endif // COMPILER2_OR_JVMCI
+ 116   _polling_page_safepoint_handler_blob = generate_handler_blob(CAST_FROM_FN_PTR(address, SafepointSynchronize::handle_polling_page_exception), POLL_AT_LOOP);
+ 117   _polling_page_return_handler_blob    = generate_handler_blob(CAST_FROM_FN_PTR(address, SafepointSynchronize::handle_polling_page_exception), POLL_AT_RETURN);
+ 118 
+ 119   generate_deopt_blob();
+ 120 
+ 121 #ifdef COMPILER2
+ 122   generate_uncommon_trap_blob();
+ 123 #endif // COMPILER2
+ 124 }
+ 125 
+ 126 #include &lt;math.h&gt;
+ 127 
+ 128 // Implementation of SharedRuntime
+ 129 
+ 130 #ifndef PRODUCT
+ 131 // For statistics
+ 132 int SharedRuntime::_ic_miss_ctr = 0;
+ 133 int SharedRuntime::_wrong_method_ctr = 0;
+ 134 int SharedRuntime::_resolve_static_ctr = 0;
+ 135 int SharedRuntime::_resolve_virtual_ctr = 0;
+ 136 int SharedRuntime::_resolve_opt_virtual_ctr = 0;
+ 137 int SharedRuntime::_implicit_null_throws = 0;
+ 138 int SharedRuntime::_implicit_div0_throws = 0;
+ 139 int SharedRuntime::_throw_null_ctr = 0;
+ 140 
+ 141 int SharedRuntime::_nof_normal_calls = 0;
+ 142 int SharedRuntime::_nof_optimized_calls = 0;
+ 143 int SharedRuntime::_nof_inlined_calls = 0;
+ 144 int SharedRuntime::_nof_megamorphic_calls = 0;
+ 145 int SharedRuntime::_nof_static_calls = 0;
+ 146 int SharedRuntime::_nof_inlined_static_calls = 0;
+ 147 int SharedRuntime::_nof_interface_calls = 0;
+ 148 int SharedRuntime::_nof_optimized_interface_calls = 0;
+ 149 int SharedRuntime::_nof_inlined_interface_calls = 0;
+ 150 int SharedRuntime::_nof_megamorphic_interface_calls = 0;
+ 151 int SharedRuntime::_nof_removable_exceptions = 0;
+ 152 
+ 153 int SharedRuntime::_new_instance_ctr=0;
+ 154 int SharedRuntime::_new_array_ctr=0;
+ 155 int SharedRuntime::_multi1_ctr=0;
+ 156 int SharedRuntime::_multi2_ctr=0;
+ 157 int SharedRuntime::_multi3_ctr=0;
+ 158 int SharedRuntime::_multi4_ctr=0;
+ 159 int SharedRuntime::_multi5_ctr=0;
+ 160 int SharedRuntime::_mon_enter_stub_ctr=0;
+ 161 int SharedRuntime::_mon_exit_stub_ctr=0;
+ 162 int SharedRuntime::_mon_enter_ctr=0;
+ 163 int SharedRuntime::_mon_exit_ctr=0;
+ 164 int SharedRuntime::_partial_subtype_ctr=0;
+ 165 int SharedRuntime::_jbyte_array_copy_ctr=0;
+ 166 int SharedRuntime::_jshort_array_copy_ctr=0;
+ 167 int SharedRuntime::_jint_array_copy_ctr=0;
+ 168 int SharedRuntime::_jlong_array_copy_ctr=0;
+ 169 int SharedRuntime::_oop_array_copy_ctr=0;
+ 170 int SharedRuntime::_checkcast_array_copy_ctr=0;
+ 171 int SharedRuntime::_unsafe_array_copy_ctr=0;
+ 172 int SharedRuntime::_generic_array_copy_ctr=0;
+ 173 int SharedRuntime::_slow_array_copy_ctr=0;
+ 174 int SharedRuntime::_find_handler_ctr=0;
+ 175 int SharedRuntime::_rethrow_ctr=0;
+ 176 
+ 177 int     SharedRuntime::_ICmiss_index                    = 0;
+ 178 int     SharedRuntime::_ICmiss_count[SharedRuntime::maxICmiss_count];
+ 179 address SharedRuntime::_ICmiss_at[SharedRuntime::maxICmiss_count];
+ 180 
+ 181 
+ 182 void SharedRuntime::trace_ic_miss(address at) {
+ 183   for (int i = 0; i &lt; _ICmiss_index; i++) {
+ 184     if (_ICmiss_at[i] == at) {
+ 185       _ICmiss_count[i]++;
+ 186       return;
+ 187     }
+ 188   }
+ 189   int index = _ICmiss_index++;
+ 190   if (_ICmiss_index &gt;= maxICmiss_count) _ICmiss_index = maxICmiss_count - 1;
+ 191   _ICmiss_at[index] = at;
+ 192   _ICmiss_count[index] = 1;
+ 193 }
+ 194 
+ 195 void SharedRuntime::print_ic_miss_histogram() {
+ 196   if (ICMissHistogram) {
+ 197     tty-&gt;print_cr("IC Miss Histogram:");
+ 198     int tot_misses = 0;
+ 199     for (int i = 0; i &lt; _ICmiss_index; i++) {
+ 200       tty-&gt;print_cr("  at: " INTPTR_FORMAT "  nof: %d", p2i(_ICmiss_at[i]), _ICmiss_count[i]);
+ 201       tot_misses += _ICmiss_count[i];
+ 202     }
+ 203     tty-&gt;print_cr("Total IC misses: %7d", tot_misses);
+ 204   }
+ 205 }
+ 206 #endif // PRODUCT
+ 207 
+ 208 
+ 209 JRT_LEAF(jlong, SharedRuntime::lmul(jlong y, jlong x))
+ 210   return x * y;
+ 211 JRT_END
+ 212 
+ 213 
+ 214 JRT_LEAF(jlong, SharedRuntime::ldiv(jlong y, jlong x))
+ 215   if (x == min_jlong &amp;&amp; y == CONST64(-1)) {
+ 216     return x;
+ 217   } else {
+ 218     return x / y;
+ 219   }
+ 220 JRT_END
+ 221 
+ 222 
+ 223 JRT_LEAF(jlong, SharedRuntime::lrem(jlong y, jlong x))
+ 224   if (x == min_jlong &amp;&amp; y == CONST64(-1)) {
+ 225     return 0;
+ 226   } else {
+ 227     return x % y;
+ 228   }
+ 229 JRT_END
+ 230 
+ 231 
+ 232 const juint  float_sign_mask  = 0x7FFFFFFF;
+ 233 const juint  float_infinity   = 0x7F800000;
+ 234 const julong double_sign_mask = CONST64(0x7FFFFFFFFFFFFFFF);
+ 235 const julong double_infinity  = CONST64(0x7FF0000000000000);
+ 236 
+ 237 JRT_LEAF(jfloat, SharedRuntime::frem(jfloat  x, jfloat  y))
+ 238 #ifdef _WIN64
+ 239   // 64-bit Windows on amd64 returns the wrong values for
+ 240   // infinity operands.
+ 241   union { jfloat f; juint i; } xbits, ybits;
+ 242   xbits.f = x;
+ 243   ybits.f = y;
+ 244   // x Mod Infinity == x unless x is infinity
+ 245   if (((xbits.i &amp; float_sign_mask) != float_infinity) &amp;&amp;
+ 246        ((ybits.i &amp; float_sign_mask) == float_infinity) ) {
+ 247     return x;
+ 248   }
+ 249   return ((jfloat)fmod_winx64((double)x, (double)y));
+ 250 #else
+ 251   return ((jfloat)fmod((double)x,(double)y));
+ 252 #endif
+ 253 JRT_END
+ 254 
+ 255 
+ 256 JRT_LEAF(jdouble, SharedRuntime::drem(jdouble x, jdouble y))
+ 257 #ifdef _WIN64
+ 258   union { jdouble d; julong l; } xbits, ybits;
+ 259   xbits.d = x;
+ 260   ybits.d = y;
+ 261   // x Mod Infinity == x unless x is infinity
+ 262   if (((xbits.l &amp; double_sign_mask) != double_infinity) &amp;&amp;
+ 263        ((ybits.l &amp; double_sign_mask) == double_infinity) ) {
+ 264     return x;
+ 265   }
+ 266   return ((jdouble)fmod_winx64((double)x, (double)y));
+ 267 #else
+ 268   return ((jdouble)fmod((double)x,(double)y));
+ 269 #endif
+ 270 JRT_END
+ 271 
+ 272 #ifdef __SOFTFP__
+ 273 JRT_LEAF(jfloat, SharedRuntime::fadd(jfloat x, jfloat y))
+ 274   return x + y;
+ 275 JRT_END
+ 276 
+ 277 JRT_LEAF(jfloat, SharedRuntime::fsub(jfloat x, jfloat y))
+ 278   return x - y;
+ 279 JRT_END
+ 280 
+ 281 JRT_LEAF(jfloat, SharedRuntime::fmul(jfloat x, jfloat y))
+ 282   return x * y;
+ 283 JRT_END
+ 284 
+ 285 JRT_LEAF(jfloat, SharedRuntime::fdiv(jfloat x, jfloat y))
+ 286   return x / y;
+ 287 JRT_END
+ 288 
+ 289 JRT_LEAF(jdouble, SharedRuntime::dadd(jdouble x, jdouble y))
+ 290   return x + y;
+ 291 JRT_END
+ 292 
+ 293 JRT_LEAF(jdouble, SharedRuntime::dsub(jdouble x, jdouble y))
+ 294   return x - y;
+ 295 JRT_END
+ 296 
+ 297 JRT_LEAF(jdouble, SharedRuntime::dmul(jdouble x, jdouble y))
+ 298   return x * y;
+ 299 JRT_END
+ 300 
+ 301 JRT_LEAF(jdouble, SharedRuntime::ddiv(jdouble x, jdouble y))
+ 302   return x / y;
+ 303 JRT_END
+ 304 
+ 305 JRT_LEAF(jfloat, SharedRuntime::i2f(jint x))
+ 306   return (jfloat)x;
+ 307 JRT_END
+ 308 
+ 309 JRT_LEAF(jdouble, SharedRuntime::i2d(jint x))
+ 310   return (jdouble)x;
+ 311 JRT_END
+ 312 
+ 313 JRT_LEAF(jdouble, SharedRuntime::f2d(jfloat x))
+ 314   return (jdouble)x;
+ 315 JRT_END
+ 316 
+ 317 JRT_LEAF(int,  SharedRuntime::fcmpl(float x, float y))
+ 318   return x&gt;y ? 1 : (x==y ? 0 : -1);  /* x&lt;y or is_nan*/
+ 319 JRT_END
+ 320 
+ 321 JRT_LEAF(int,  SharedRuntime::fcmpg(float x, float y))
+ 322   return x&lt;y ? -1 : (x==y ? 0 : 1);  /* x&gt;y or is_nan */
+ 323 JRT_END
+ 324 
+ 325 JRT_LEAF(int,  SharedRuntime::dcmpl(double x, double y))
+ 326   return x&gt;y ? 1 : (x==y ? 0 : -1); /* x&lt;y or is_nan */
+ 327 JRT_END
+ 328 
+ 329 JRT_LEAF(int,  SharedRuntime::dcmpg(double x, double y))
+ 330   return x&lt;y ? -1 : (x==y ? 0 : 1);  /* x&gt;y or is_nan */
+ 331 JRT_END
+ 332 
+ 333 // Functions to return the opposite of the aeabi functions for nan.
+ 334 JRT_LEAF(int, SharedRuntime::unordered_fcmplt(float x, float y))
+ 335   return (x &lt; y) ? 1 : ((g_isnan(x) || g_isnan(y)) ? 1 : 0);
+ 336 JRT_END
+ 337 
+ 338 JRT_LEAF(int, SharedRuntime::unordered_dcmplt(double x, double y))
+ 339   return (x &lt; y) ? 1 : ((g_isnan(x) || g_isnan(y)) ? 1 : 0);
+ 340 JRT_END
+ 341 
+ 342 JRT_LEAF(int, SharedRuntime::unordered_fcmple(float x, float y))
+ 343   return (x &lt;= y) ? 1 : ((g_isnan(x) || g_isnan(y)) ? 1 : 0);
+ 344 JRT_END
+ 345 
+ 346 JRT_LEAF(int, SharedRuntime::unordered_dcmple(double x, double y))
+ 347   return (x &lt;= y) ? 1 : ((g_isnan(x) || g_isnan(y)) ? 1 : 0);
+ 348 JRT_END
+ 349 
+ 350 JRT_LEAF(int, SharedRuntime::unordered_fcmpge(float x, float y))
+ 351   return (x &gt;= y) ? 1 : ((g_isnan(x) || g_isnan(y)) ? 1 : 0);
+ 352 JRT_END
+ 353 
+ 354 JRT_LEAF(int, SharedRuntime::unordered_dcmpge(double x, double y))
+ 355   return (x &gt;= y) ? 1 : ((g_isnan(x) || g_isnan(y)) ? 1 : 0);
+ 356 JRT_END
+ 357 
+ 358 JRT_LEAF(int, SharedRuntime::unordered_fcmpgt(float x, float y))
+ 359   return (x &gt; y) ? 1 : ((g_isnan(x) || g_isnan(y)) ? 1 : 0);
+ 360 JRT_END
+ 361 
+ 362 JRT_LEAF(int, SharedRuntime::unordered_dcmpgt(double x, double y))
+ 363   return (x &gt; y) ? 1 : ((g_isnan(x) || g_isnan(y)) ? 1 : 0);
+ 364 JRT_END
+ 365 
+ 366 // Intrinsics make gcc generate code for these.
+ 367 float  SharedRuntime::fneg(float f)   {
+ 368   return -f;
+ 369 }
+ 370 
+ 371 double SharedRuntime::dneg(double f)  {
+ 372   return -f;
+ 373 }
+ 374 
+ 375 #endif // __SOFTFP__
+ 376 
+ 377 #if defined(__SOFTFP__) || defined(E500V2)
+ 378 // Intrinsics make gcc generate code for these.
+ 379 double SharedRuntime::dabs(double f)  {
+ 380   return (f &lt;= (double)0.0) ? (double)0.0 - f : f;
+ 381 }
+ 382 
+ 383 #endif
+ 384 
+ 385 #if defined(__SOFTFP__) || defined(PPC)
+ 386 double SharedRuntime::dsqrt(double f) {
+ 387   return sqrt(f);
+ 388 }
+ 389 #endif
+ 390 
+ 391 JRT_LEAF(jint, SharedRuntime::f2i(jfloat  x))
+ 392   if (g_isnan(x))
+ 393     return 0;
+ 394   if (x &gt;= (jfloat) max_jint)
+ 395     return max_jint;
+ 396   if (x &lt;= (jfloat) min_jint)
+ 397     return min_jint;
+ 398   return (jint) x;
+ 399 JRT_END
+ 400 
+ 401 
+ 402 JRT_LEAF(jlong, SharedRuntime::f2l(jfloat  x))
+ 403   if (g_isnan(x))
+ 404     return 0;
+ 405   if (x &gt;= (jfloat) max_jlong)
+ 406     return max_jlong;
+ 407   if (x &lt;= (jfloat) min_jlong)
+ 408     return min_jlong;
+ 409   return (jlong) x;
+ 410 JRT_END
+ 411 
+ 412 
+ 413 JRT_LEAF(jint, SharedRuntime::d2i(jdouble x))
+ 414   if (g_isnan(x))
+ 415     return 0;
+ 416   if (x &gt;= (jdouble) max_jint)
+ 417     return max_jint;
+ 418   if (x &lt;= (jdouble) min_jint)
+ 419     return min_jint;
+ 420   return (jint) x;
+ 421 JRT_END
+ 422 
+ 423 
+ 424 JRT_LEAF(jlong, SharedRuntime::d2l(jdouble x))
+ 425   if (g_isnan(x))
+ 426     return 0;
+ 427   if (x &gt;= (jdouble) max_jlong)
+ 428     return max_jlong;
+ 429   if (x &lt;= (jdouble) min_jlong)
+ 430     return min_jlong;
+ 431   return (jlong) x;
+ 432 JRT_END
+ 433 
+ 434 
+ 435 JRT_LEAF(jfloat, SharedRuntime::d2f(jdouble x))
+ 436   return (jfloat)x;
+ 437 JRT_END
+ 438 
+ 439 
+ 440 JRT_LEAF(jfloat, SharedRuntime::l2f(jlong x))
+ 441   return (jfloat)x;
+ 442 JRT_END
+ 443 
+ 444 
+ 445 JRT_LEAF(jdouble, SharedRuntime::l2d(jlong x))
+ 446   return (jdouble)x;
+ 447 JRT_END
+ 448 
+ 449 // Exception handling across interpreter/compiler boundaries
+ 450 //
+ 451 // exception_handler_for_return_address(...) returns the continuation address.
+ 452 // The continuation address is the entry point of the exception handler of the
+ 453 // previous frame depending on the return address.
+ 454 
+ 455 address SharedRuntime::raw_exception_handler_for_return_address(JavaThread* thread, address return_address) {
+ 456   assert(frame::verify_return_pc(return_address), "must be a return address: " INTPTR_FORMAT, p2i(return_address));
+ 457   assert(thread-&gt;frames_to_pop_failed_realloc() == 0 || Interpreter::contains(return_address), "missed frames to pop?");
+ 458 
+ 459   // Reset method handle flag.
+ 460   thread-&gt;set_is_method_handle_return(false);
+ 461 
+ 462 #if INCLUDE_JVMCI
+ 463   // JVMCI's ExceptionHandlerStub expects the thread local exception PC to be clear
+ 464   // and other exception handler continuations do not read it
+ 465   thread-&gt;set_exception_pc(NULL);
+ 466 #endif // INCLUDE_JVMCI
+ 467 
+ 468   // The fastest case first
+ 469   CodeBlob* blob = CodeCache::find_blob(return_address);
+ 470   CompiledMethod* nm = (blob != NULL) ? blob-&gt;as_compiled_method_or_null() : NULL;
+ 471   if (nm != NULL) {
+ 472     // Set flag if return address is a method handle call site.
+ 473     thread-&gt;set_is_method_handle_return(nm-&gt;is_method_handle_return(return_address));
+ 474     // native nmethods don't have exception handlers
+ 475     assert(!nm-&gt;is_native_method(), "no exception handler");
+ 476     assert(nm-&gt;header_begin() != nm-&gt;exception_begin(), "no exception handler");
+ 477     if (nm-&gt;is_deopt_pc(return_address)) {
+ 478       // If we come here because of a stack overflow, the stack may be
+ 479       // unguarded. Reguard the stack otherwise if we return to the
+ 480       // deopt blob and the stack bang causes a stack overflow we
+ 481       // crash.
+ 482       bool guard_pages_enabled = thread-&gt;stack_guards_enabled();
+ 483       if (!guard_pages_enabled) guard_pages_enabled = thread-&gt;reguard_stack();
+ 484       if (thread-&gt;reserved_stack_activation() != thread-&gt;stack_base()) {
+ 485         thread-&gt;set_reserved_stack_activation(thread-&gt;stack_base());
+ 486       }
+ 487       assert(guard_pages_enabled, "stack banging in deopt blob may cause crash");
+ 488       return SharedRuntime::deopt_blob()-&gt;unpack_with_exception();
+ 489     } else {
+ 490       return nm-&gt;exception_begin();
+ 491     }
+ 492   }
+ 493 
+ 494   // Entry code
+ 495   if (StubRoutines::returns_to_call_stub(return_address)) {
+ 496     return StubRoutines::catch_exception_entry();
+ 497   }
+ 498   // Interpreted code
+ 499   if (Interpreter::contains(return_address)) {
+ 500     return Interpreter::rethrow_exception_entry();
+ 501   }
+ 502 
+ 503   guarantee(blob == NULL || !blob-&gt;is_runtime_stub(), "caller should have skipped stub");
+ 504   guarantee(!VtableStubs::contains(return_address), "NULL exceptions in vtables should have been handled already!");
+ 505 
+ 506 #ifndef PRODUCT
+ 507   { ResourceMark rm;
+ 508     tty-&gt;print_cr("No exception handler found for exception at " INTPTR_FORMAT " - potential problems:", p2i(return_address));
+ 509     tty-&gt;print_cr("a) exception happened in (new?) code stubs/buffers that is not handled here");
+ 510     tty-&gt;print_cr("b) other problem");
+ 511   }
+ 512 #endif // PRODUCT
+ 513 
+ 514   ShouldNotReachHere();
+ 515   return NULL;
+ 516 }
+ 517 
+ 518 
+ 519 JRT_LEAF(address, SharedRuntime::exception_handler_for_return_address(JavaThread* thread, address return_address))
+ 520   return raw_exception_handler_for_return_address(thread, return_address);
+ 521 JRT_END
+ 522 
+ 523 
+ 524 address SharedRuntime::get_poll_stub(address pc) {
+ 525   address stub;
+ 526   // Look up the code blob
+ 527   CodeBlob *cb = CodeCache::find_blob(pc);
+ 528 
+ 529   // Should be an nmethod
+ 530   guarantee(cb != NULL &amp;&amp; cb-&gt;is_compiled(), "safepoint polling: pc must refer to an nmethod");
+ 531 
+ 532   // Look up the relocation information
+ 533   assert(((CompiledMethod*)cb)-&gt;is_at_poll_or_poll_return(pc),
+ 534     "safepoint polling: type must be poll");
+ 535 
+ 536 #ifdef ASSERT
+ 537   if (!((NativeInstruction*)pc)-&gt;is_safepoint_poll()) {
+ 538     tty-&gt;print_cr("bad pc: " PTR_FORMAT, p2i(pc));
+ 539     Disassembler::decode(cb);
+ 540     fatal("Only polling locations are used for safepoint");
+ 541   }
+ 542 #endif
+ 543 
+ 544   bool at_poll_return = ((CompiledMethod*)cb)-&gt;is_at_poll_return(pc);
+ 545   bool has_wide_vectors = ((CompiledMethod*)cb)-&gt;has_wide_vectors();
+ 546   if (at_poll_return) {
+ 547     assert(SharedRuntime::polling_page_return_handler_blob() != NULL,
+ 548            "polling page return stub not created yet");
+ 549     stub = SharedRuntime::polling_page_return_handler_blob()-&gt;entry_point();
+ 550   } else if (has_wide_vectors) {
+ 551     assert(SharedRuntime::polling_page_vectors_safepoint_handler_blob() != NULL,
+ 552            "polling page vectors safepoint stub not created yet");
+ 553     stub = SharedRuntime::polling_page_vectors_safepoint_handler_blob()-&gt;entry_point();
+ 554   } else {
+ 555     assert(SharedRuntime::polling_page_safepoint_handler_blob() != NULL,
+ 556            "polling page safepoint stub not created yet");
+ 557     stub = SharedRuntime::polling_page_safepoint_handler_blob()-&gt;entry_point();
+ 558   }
+ 559   log_debug(safepoint)("... found polling page %s exception at pc = "
+ 560                        INTPTR_FORMAT ", stub =" INTPTR_FORMAT,
+ 561                        at_poll_return ? "return" : "loop",
+ 562                        (intptr_t)pc, (intptr_t)stub);
+ 563   return stub;
+ 564 }
+ 565 
+ 566 
+ 567 oop SharedRuntime::retrieve_receiver( Symbol* sig, frame caller ) {
+ 568   assert(caller.is_interpreted_frame(), "");
+ 569   int args_size = ArgumentSizeComputer(sig).size() + 1;
+ 570   assert(args_size &lt;= caller.interpreter_frame_expression_stack_size(), "receiver must be on interpreter stack");
+ 571   oop result = cast_to_oop(*caller.interpreter_frame_tos_at(args_size - 1));
+ 572   assert(Universe::heap()-&gt;is_in(result) &amp;&amp; oopDesc::is_oop(result), "receiver must be an oop");
+ 573   return result;
+ 574 }
+ 575 
+ 576 
+ 577 void SharedRuntime::throw_and_post_jvmti_exception(JavaThread *thread, Handle h_exception) {
+ 578   if (JvmtiExport::can_post_on_exceptions()) {
+ 579     vframeStream vfst(thread, true);
+ 580     methodHandle method = methodHandle(thread, vfst.method());
+ 581     address bcp = method()-&gt;bcp_from(vfst.bci());
+ 582     JvmtiExport::post_exception_throw(thread, method(), bcp, h_exception());
+ 583   }
+ 584   Exceptions::_throw(thread, __FILE__, __LINE__, h_exception);
+ 585 }
+ 586 
+ 587 void SharedRuntime::throw_and_post_jvmti_exception(JavaThread *thread, Symbol* name, const char *message) {
+ 588   Handle h_exception = Exceptions::new_exception(thread, name, message);
+ 589   throw_and_post_jvmti_exception(thread, h_exception);
+ 590 }
+ 591 
+ 592 // The interpreter code to call this tracing function is only
+ 593 // called/generated when UL is on for redefine, class and has the right level
+ 594 // and tags. Since obsolete methods are never compiled, we don't have
+ 595 // to modify the compilers to generate calls to this function.
+ 596 //
+ 597 JRT_LEAF(int, SharedRuntime::rc_trace_method_entry(
+ 598     JavaThread* thread, Method* method))
+ 599   if (method-&gt;is_obsolete()) {
+ 600     // We are calling an obsolete method, but this is not necessarily
+ 601     // an error. Our method could have been redefined just after we
+ 602     // fetched the Method* from the constant pool.
+ 603     ResourceMark rm;
+ 604     log_trace(redefine, class, obsolete)("calling obsolete method '%s'", method-&gt;name_and_sig_as_C_string());
+ 605   }
+ 606   return 0;
+ 607 JRT_END
+ 608 
+ 609 // ret_pc points into caller; we are returning caller's exception handler
+ 610 // for given exception
+ 611 address SharedRuntime::compute_compiled_exc_handler(CompiledMethod* cm, address ret_pc, Handle&amp; exception,
+ 612                                                     bool force_unwind, bool top_frame_only, bool&amp; recursive_exception_occurred) {
+ 613   assert(cm != NULL, "must exist");
+ 614   ResourceMark rm;
+ 615 
+ 616 #if INCLUDE_JVMCI
+ 617   if (cm-&gt;is_compiled_by_jvmci()) {
+ 618     // lookup exception handler for this pc
+ 619     int catch_pco = ret_pc - cm-&gt;code_begin();
+ 620     ExceptionHandlerTable table(cm);
+ 621     HandlerTableEntry *t = table.entry_for(catch_pco, -1, 0);
+ 622     if (t != NULL) {
+ 623       return cm-&gt;code_begin() + t-&gt;pco();
+ 624     } else {
+ 625       return Deoptimization::deoptimize_for_missing_exception_handler(cm);
+ 626     }
+ 627   }
+ 628 #endif // INCLUDE_JVMCI
+ 629 
+ 630   nmethod* nm = cm-&gt;as_nmethod();
+ 631   ScopeDesc* sd = nm-&gt;scope_desc_at(ret_pc);
+ 632   // determine handler bci, if any
+ 633   EXCEPTION_MARK;
+ 634 
+ 635   int handler_bci = -1;
+ 636   int scope_depth = 0;
+ 637   if (!force_unwind) {
+ 638     int bci = sd-&gt;bci();
+ 639     bool recursive_exception = false;
+ 640     do {
+ 641       bool skip_scope_increment = false;
+ 642       // exception handler lookup
+ 643       Klass* ek = exception-&gt;klass();
+ 644       methodHandle mh(THREAD, sd-&gt;method());
+ 645       handler_bci = Method::fast_exception_handler_bci_for(mh, ek, bci, THREAD);
+ 646       if (HAS_PENDING_EXCEPTION) {
+ 647         recursive_exception = true;
+ 648         // We threw an exception while trying to find the exception handler.
+ 649         // Transfer the new exception to the exception handle which will
+ 650         // be set into thread local storage, and do another lookup for an
+ 651         // exception handler for this exception, this time starting at the
+ 652         // BCI of the exception handler which caused the exception to be
+ 653         // thrown (bugs 4307310 and 4546590). Set "exception" reference
+ 654         // argument to ensure that the correct exception is thrown (4870175).
+ 655         recursive_exception_occurred = true;
+ 656         exception = Handle(THREAD, PENDING_EXCEPTION);
+ 657         CLEAR_PENDING_EXCEPTION;
+ 658         if (handler_bci &gt;= 0) {
+ 659           bci = handler_bci;
+ 660           handler_bci = -1;
+ 661           skip_scope_increment = true;
+ 662         }
+ 663       }
+ 664       else {
+ 665         recursive_exception = false;
+ 666       }
+ 667       if (!top_frame_only &amp;&amp; handler_bci &lt; 0 &amp;&amp; !skip_scope_increment) {
+ 668         sd = sd-&gt;sender();
+ 669         if (sd != NULL) {
+ 670           bci = sd-&gt;bci();
+ 671         }
+ 672         ++scope_depth;
+ 673       }
+ 674     } while (recursive_exception || (!top_frame_only &amp;&amp; handler_bci &lt; 0 &amp;&amp; sd != NULL));
+ 675   }
+ 676 
+ 677   // found handling method =&gt; lookup exception handler
+ 678   int catch_pco = ret_pc - nm-&gt;code_begin();
+ 679 
+ 680   ExceptionHandlerTable table(nm);
+ 681   HandlerTableEntry *t = table.entry_for(catch_pco, handler_bci, scope_depth);
+ 682   if (t == NULL &amp;&amp; (nm-&gt;is_compiled_by_c1() || handler_bci != -1)) {
+ 683     // Allow abbreviated catch tables.  The idea is to allow a method
+ 684     // to materialize its exceptions without committing to the exact
+ 685     // routing of exceptions.  In particular this is needed for adding
+ 686     // a synthetic handler to unlock monitors when inlining
+ 687     // synchronized methods since the unlock path isn't represented in
+ 688     // the bytecodes.
+ 689     t = table.entry_for(catch_pco, -1, 0);
+ 690   }
+ 691 
+ 692 #ifdef COMPILER1
+ 693   if (t == NULL &amp;&amp; nm-&gt;is_compiled_by_c1()) {
+ 694     assert(nm-&gt;unwind_handler_begin() != NULL, "");
+ 695     return nm-&gt;unwind_handler_begin();
+ 696   }
+ 697 #endif
+ 698 
+ 699   if (t == NULL) {
+ 700     ttyLocker ttyl;
+ 701     tty-&gt;print_cr("MISSING EXCEPTION HANDLER for pc " INTPTR_FORMAT " and handler bci %d", p2i(ret_pc), handler_bci);
+ 702     tty-&gt;print_cr("   Exception:");
+ 703     exception-&gt;print();
+ 704     tty-&gt;cr();
+ 705     tty-&gt;print_cr(" Compiled exception table :");
+ 706     table.print();
+ 707     nm-&gt;print_code();
+ 708     guarantee(false, "missing exception handler");
+ 709     return NULL;
+ 710   }
+ 711 
+ 712   return nm-&gt;code_begin() + t-&gt;pco();
+ 713 }
+ 714 
+ 715 JRT_ENTRY(void, SharedRuntime::throw_AbstractMethodError(JavaThread* thread))
+ 716   // These errors occur only at call sites
+ 717   throw_and_post_jvmti_exception(thread, vmSymbols::java_lang_AbstractMethodError());
+ 718 JRT_END
+ 719 
+ 720 JRT_ENTRY(void, SharedRuntime::throw_IncompatibleClassChangeError(JavaThread* thread))
+ 721   // These errors occur only at call sites
+ 722   throw_and_post_jvmti_exception(thread, vmSymbols::java_lang_IncompatibleClassChangeError(), "vtable stub");
+ 723 JRT_END
+ 724 
+ 725 JRT_ENTRY(void, SharedRuntime::throw_ArithmeticException(JavaThread* thread))
+ 726   throw_and_post_jvmti_exception(thread, vmSymbols::java_lang_ArithmeticException(), "/ by zero");
+ 727 JRT_END
+ 728 
+ 729 JRT_ENTRY(void, SharedRuntime::throw_NullPointerException(JavaThread* thread))
+ 730   throw_and_post_jvmti_exception(thread, vmSymbols::java_lang_NullPointerException());
+ 731 JRT_END
+ 732 
+ 733 JRT_ENTRY(void, SharedRuntime::throw_NullPointerException_at_call(JavaThread* thread))
+ 734   // This entry point is effectively only used for NullPointerExceptions which occur at inline
+ 735   // cache sites (when the callee activation is not yet set up) so we are at a call site
+ 736   throw_and_post_jvmti_exception(thread, vmSymbols::java_lang_NullPointerException());
+ 737 JRT_END
+ 738 
+ 739 JRT_ENTRY(void, SharedRuntime::throw_StackOverflowError(JavaThread* thread))
+ 740   throw_StackOverflowError_common(thread, false);
+ 741 JRT_END
+ 742 
+ 743 JRT_ENTRY(void, SharedRuntime::throw_delayed_StackOverflowError(JavaThread* thread))
+ 744   throw_StackOverflowError_common(thread, true);
+ 745 JRT_END
+ 746 
+ 747 void SharedRuntime::throw_StackOverflowError_common(JavaThread* thread, bool delayed) {
+ 748   // We avoid using the normal exception construction in this case because
+ 749   // it performs an upcall to Java, and we're already out of stack space.
+ 750   Thread* THREAD = thread;
+ 751   Klass* k = SystemDictionary::StackOverflowError_klass();
+ 752   oop exception_oop = InstanceKlass::cast(k)-&gt;allocate_instance(CHECK);
+ 753   if (delayed) {
+ 754     java_lang_Throwable::set_message(exception_oop,
+ 755                                      Universe::delayed_stack_overflow_error_message());
+ 756   }
+ 757   Handle exception (thread, exception_oop);
+ 758   if (StackTraceInThrowable) {
+ 759     java_lang_Throwable::fill_in_stack_trace(exception);
+ 760   }
+ 761   // Increment counter for hs_err file reporting
+ 762   Atomic::inc(&amp;Exceptions::_stack_overflow_errors);
+ 763   throw_and_post_jvmti_exception(thread, exception);
+ 764 }
+ 765 
+ 766 address SharedRuntime::continuation_for_implicit_exception(JavaThread* thread,
+ 767                                                            address pc,
+ 768                                                            ImplicitExceptionKind exception_kind)
+ 769 {
+ 770   address target_pc = NULL;
+ 771 
+ 772   if (Interpreter::contains(pc)) {
+ 773 #ifdef CC_INTERP
+ 774     // C++ interpreter doesn't throw implicit exceptions
+ 775     ShouldNotReachHere();
+ 776 #else
+ 777     switch (exception_kind) {
+ 778       case IMPLICIT_NULL:           return Interpreter::throw_NullPointerException_entry();
+ 779       case IMPLICIT_DIVIDE_BY_ZERO: return Interpreter::throw_ArithmeticException_entry();
+ 780       case STACK_OVERFLOW:          return Interpreter::throw_StackOverflowError_entry();
+ 781       default:                      ShouldNotReachHere();
+ 782     }
+ 783 #endif // !CC_INTERP
+ 784   } else {
+ 785     switch (exception_kind) {
+ 786       case STACK_OVERFLOW: {
+ 787         // Stack overflow only occurs upon frame setup; the callee is
+ 788         // going to be unwound. Dispatch to a shared runtime stub
+ 789         // which will cause the StackOverflowError to be fabricated
+ 790         // and processed.
+ 791         // Stack overflow should never occur during deoptimization:
+ 792         // the compiled method bangs the stack by as much as the
+ 793         // interpreter would need in case of a deoptimization. The
+ 794         // deoptimization blob and uncommon trap blob bang the stack
+ 795         // in a debug VM to verify the correctness of the compiled
+ 796         // method stack banging.
+ 797         assert(thread-&gt;deopt_mark() == NULL, "no stack overflow from deopt blob/uncommon trap");
+ 798         Events::log_exception(thread, "StackOverflowError at " INTPTR_FORMAT, p2i(pc));
+ 799         return StubRoutines::throw_StackOverflowError_entry();
+ 800       }
+ 801 
+ 802       case IMPLICIT_NULL: {
+ 803         if (VtableStubs::contains(pc)) {
+ 804           // We haven't yet entered the callee frame. Fabricate an
+ 805           // exception and begin dispatching it in the caller. Since
+ 806           // the caller was at a call site, it's safe to destroy all
+ 807           // caller-saved registers, as these entry points do.
+ 808           VtableStub* vt_stub = VtableStubs::stub_containing(pc);
+ 809 
+ 810           // If vt_stub is NULL, then return NULL to signal handler to report the SEGV error.
+ 811           if (vt_stub == NULL) return NULL;
+ 812 
+ 813           if (vt_stub-&gt;is_abstract_method_error(pc)) {
+ 814             assert(!vt_stub-&gt;is_vtable_stub(), "should never see AbstractMethodErrors from vtable-type VtableStubs");
+ 815             Events::log_exception(thread, "AbstractMethodError at " INTPTR_FORMAT, p2i(pc));
+ 816             // Instead of throwing the abstract method error here directly, we re-resolve
+ 817             // and will throw the AbstractMethodError during resolve. As a result, we'll
+ 818             // get a more detailed error message.
+ 819             return SharedRuntime::get_handle_wrong_method_stub();
+ 820           } else {
+ 821             Events::log_exception(thread, "NullPointerException at vtable entry " INTPTR_FORMAT, p2i(pc));
+ 822             // Assert that the signal comes from the expected location in stub code.
+ 823             assert(vt_stub-&gt;is_null_pointer_exception(pc),
+ 824                    "obtained signal from unexpected location in stub code");
+ 825             return StubRoutines::throw_NullPointerException_at_call_entry();
+ 826           }
+ 827         } else {
+ 828           CodeBlob* cb = CodeCache::find_blob(pc);
+ 829 
+ 830           // If code blob is NULL, then return NULL to signal handler to report the SEGV error.
+ 831           if (cb == NULL) return NULL;
+ 832 
+ 833           // Exception happened in CodeCache. Must be either:
+ 834           // 1. Inline-cache check in C2I handler blob,
+ 835           // 2. Inline-cache check in nmethod, or
+ 836           // 3. Implicit null exception in nmethod
+ 837 
+ 838           if (!cb-&gt;is_compiled()) {
+ 839             bool is_in_blob = cb-&gt;is_adapter_blob() || cb-&gt;is_method_handles_adapter_blob();
+ 840             if (!is_in_blob) {
+ 841               // Allow normal crash reporting to handle this
+ 842               return NULL;
+ 843             }
+ 844             Events::log_exception(thread, "NullPointerException in code blob at " INTPTR_FORMAT, p2i(pc));
+ 845             // There is no handler here, so we will simply unwind.
+ 846             return StubRoutines::throw_NullPointerException_at_call_entry();
+ 847           }
+ 848 
+ 849           // Otherwise, it's a compiled method.  Consult its exception handlers.
+ 850           CompiledMethod* cm = (CompiledMethod*)cb;
+ 851           if (cm-&gt;inlinecache_check_contains(pc)) {
+ 852             // exception happened inside inline-cache check code
+ 853             // =&gt; the nmethod is not yet active (i.e., the frame
+ 854             // is not set up yet) =&gt; use return address pushed by
+ 855             // caller =&gt; don't push another return address
+ 856             Events::log_exception(thread, "NullPointerException in IC check " INTPTR_FORMAT, p2i(pc));
+ 857             return StubRoutines::throw_NullPointerException_at_call_entry();
+ 858           }
+ 859 
+ 860           if (cm-&gt;method()-&gt;is_method_handle_intrinsic()) {
+ 861             // exception happened inside MH dispatch code, similar to a vtable stub
+ 862             Events::log_exception(thread, "NullPointerException in MH adapter " INTPTR_FORMAT, p2i(pc));
+ 863             return StubRoutines::throw_NullPointerException_at_call_entry();
+ 864           }
+ 865 
+ 866 #ifndef PRODUCT
+ 867           _implicit_null_throws++;
+ 868 #endif
+ 869           target_pc = cm-&gt;continuation_for_implicit_null_exception(pc);
+ 870           // If there's an unexpected fault, target_pc might be NULL,
+ 871           // in which case we want to fall through into the normal
+ 872           // error handling code.
+ 873         }
+ 874 
+ 875         break; // fall through
+ 876       }
+ 877 
+ 878 
+ 879       case IMPLICIT_DIVIDE_BY_ZERO: {
+ 880         CompiledMethod* cm = CodeCache::find_compiled(pc);
+ 881         guarantee(cm != NULL, "must have containing compiled method for implicit division-by-zero exceptions");
+ 882 #ifndef PRODUCT
+ 883         _implicit_div0_throws++;
+ 884 #endif
+ 885         target_pc = cm-&gt;continuation_for_implicit_div0_exception(pc);
+ 886         // If there's an unexpected fault, target_pc might be NULL,
+ 887         // in which case we want to fall through into the normal
+ 888         // error handling code.
+ 889         break; // fall through
+ 890       }
+ 891 
+ 892       default: ShouldNotReachHere();
+ 893     }
+ 894 
+ 895     assert(exception_kind == IMPLICIT_NULL || exception_kind == IMPLICIT_DIVIDE_BY_ZERO, "wrong implicit exception kind");
+ 896 
+ 897     if (exception_kind == IMPLICIT_NULL) {
+ 898 #ifndef PRODUCT
+ 899       // for AbortVMOnException flag
+ 900       Exceptions::debug_check_abort("java.lang.NullPointerException");
+ 901 #endif //PRODUCT
+ 902       Events::log_exception(thread, "Implicit null exception at " INTPTR_FORMAT " to " INTPTR_FORMAT, p2i(pc), p2i(target_pc));
+ 903     } else {
+ 904 #ifndef PRODUCT
+ 905       // for AbortVMOnException flag
+ 906       Exceptions::debug_check_abort("java.lang.ArithmeticException");
+ 907 #endif //PRODUCT
+ 908       Events::log_exception(thread, "Implicit division by zero exception at " INTPTR_FORMAT " to " INTPTR_FORMAT, p2i(pc), p2i(target_pc));
+ 909     }
+ 910     return target_pc;
+ 911   }
+ 912 
+ 913   ShouldNotReachHere();
+ 914   return NULL;
+ 915 }
+ 916 
+ 917 
+ 918 /**
+ 919  * Throws an java/lang/UnsatisfiedLinkError.  The address of this method is
+ 920  * installed in the native function entry of all native Java methods before
+ 921  * they get linked to their actual native methods.
+ 922  *
+ 923  * \note
+ 924  * This method actually never gets called!  The reason is because
+ 925  * the interpreter's native entries call NativeLookup::lookup() which
+ 926  * throws the exception when the lookup fails.  The exception is then
+ 927  * caught and forwarded on the return from NativeLookup::lookup() call
+ 928  * before the call to the native function.  This might change in the future.
+ 929  */
+ 930 JNI_ENTRY(void*, throw_unsatisfied_link_error(JNIEnv* env, ...))
+ 931 {
+ 932   // We return a bad value here to make sure that the exception is
+ 933   // forwarded before we look at the return value.
+ 934   THROW_(vmSymbols::java_lang_UnsatisfiedLinkError(), (void*)badAddress);
+ 935 }
+ 936 JNI_END
+ 937 
+ 938 address SharedRuntime::native_method_throw_unsatisfied_link_error_entry() {
+ 939   return CAST_FROM_FN_PTR(address, &amp;throw_unsatisfied_link_error);
+ 940 }
+ 941 
+ 942 JRT_ENTRY_NO_ASYNC(void, SharedRuntime::register_finalizer(JavaThread* thread, oopDesc* obj))
+ 943 #if INCLUDE_JVMCI
+ 944   if (!obj-&gt;klass()-&gt;has_finalizer()) {
+ 945     return;
+ 946   }
+ 947 #endif // INCLUDE_JVMCI
+ 948   assert(oopDesc::is_oop(obj), "must be a valid oop");
+ 949   assert(obj-&gt;klass()-&gt;has_finalizer(), "shouldn't be here otherwise");
+ 950   InstanceKlass::register_finalizer(instanceOop(obj), CHECK);
+ 951 JRT_END
+ 952 
+ 953 
+ 954 jlong SharedRuntime::get_java_tid(Thread* thread) {
+ 955   if (thread != NULL) {
+ 956     if (thread-&gt;is_Java_thread()) {
+ 957       oop obj = ((JavaThread*)thread)-&gt;threadObj();
+ 958       return (obj == NULL) ? 0 : java_lang_Thread::thread_id(obj);
+ 959     }
+ 960   }
+ 961   return 0;
+ 962 }
+ 963 
+ 964 /**
+ 965  * This function ought to be a void function, but cannot be because
+ 966  * it gets turned into a tail-call on sparc, which runs into dtrace bug
+ 967  * 6254741.  Once that is fixed we can remove the dummy return value.
+ 968  */
+ 969 int SharedRuntime::dtrace_object_alloc(oopDesc* o, int size) {
+ 970   return dtrace_object_alloc_base(Thread::current(), o, size);
+ 971 }
+ 972 
+ 973 int SharedRuntime::dtrace_object_alloc_base(Thread* thread, oopDesc* o, int size) {
+ 974   assert(DTraceAllocProbes, "wrong call");
+ 975   Klass* klass = o-&gt;klass();
+ 976   Symbol* name = klass-&gt;name();
+ 977   HOTSPOT_OBJECT_ALLOC(
+ 978                    get_java_tid(thread),
+ 979                    (char *) name-&gt;bytes(), name-&gt;utf8_length(), size * HeapWordSize);
+ 980   return 0;
+ 981 }
+ 982 
+ 983 JRT_LEAF(int, SharedRuntime::dtrace_method_entry(
+ 984     JavaThread* thread, Method* method))
+ 985   assert(DTraceMethodProbes, "wrong call");
+ 986   Symbol* kname = method-&gt;klass_name();
+ 987   Symbol* name = method-&gt;name();
+ 988   Symbol* sig = method-&gt;signature();
+ 989   HOTSPOT_METHOD_ENTRY(
+ 990       get_java_tid(thread),
+ 991       (char *) kname-&gt;bytes(), kname-&gt;utf8_length(),
+ 992       (char *) name-&gt;bytes(), name-&gt;utf8_length(),
+ 993       (char *) sig-&gt;bytes(), sig-&gt;utf8_length());
+ 994   return 0;
+ 995 JRT_END
+ 996 
+ 997 JRT_LEAF(int, SharedRuntime::dtrace_method_exit(
+ 998     JavaThread* thread, Method* method))
+ 999   assert(DTraceMethodProbes, "wrong call");
+1000   Symbol* kname = method-&gt;klass_name();
+1001   Symbol* name = method-&gt;name();
+1002   Symbol* sig = method-&gt;signature();
+1003   HOTSPOT_METHOD_RETURN(
+1004       get_java_tid(thread),
+1005       (char *) kname-&gt;bytes(), kname-&gt;utf8_length(),
+1006       (char *) name-&gt;bytes(), name-&gt;utf8_length(),
+1007       (char *) sig-&gt;bytes(), sig-&gt;utf8_length());
+1008   return 0;
+1009 JRT_END
+1010 
+1011 
+1012 // Finds receiver, CallInfo (i.e. receiver method), and calling bytecode)
+1013 // for a call current in progress, i.e., arguments has been pushed on stack
+1014 // put callee has not been invoked yet.  Used by: resolve virtual/static,
+1015 // vtable updates, etc.  Caller frame must be compiled.
+1016 Handle SharedRuntime::find_callee_info(JavaThread* thread, Bytecodes::Code&amp; bc, CallInfo&amp; callinfo, TRAPS) {
+1017   ResourceMark rm(THREAD);
+1018 
+1019   // last java frame on stack (which includes native call frames)
+1020   vframeStream vfst(thread, true);  // Do not skip and javaCalls
+1021 
+1022   return find_callee_info_helper(thread, vfst, bc, callinfo, THREAD);
+1023 }
+1024 
+1025 methodHandle SharedRuntime::extract_attached_method(vframeStream&amp; vfst) {
+1026   CompiledMethod* caller = vfst.nm();
+1027 
+1028   nmethodLocker caller_lock(caller);
+1029 
+1030   address pc = vfst.frame_pc();
+1031   { // Get call instruction under lock because another thread may be busy patching it.
+1032     MutexLockerEx ml_patch(Patching_lock, Mutex::_no_safepoint_check_flag);
+1033     return caller-&gt;attached_method_before_pc(pc);
+1034   }
+1035   return NULL;
+1036 }
+1037 
+1038 // Finds receiver, CallInfo (i.e. receiver method), and calling bytecode
+1039 // for a call current in progress, i.e., arguments has been pushed on stack
+1040 // but callee has not been invoked yet.  Caller frame must be compiled.
+1041 Handle SharedRuntime::find_callee_info_helper(JavaThread* thread,
+1042                                               vframeStream&amp; vfst,
+1043                                               Bytecodes::Code&amp; bc,
+1044                                               CallInfo&amp; callinfo, TRAPS) {
+1045   Handle receiver;
+1046   Handle nullHandle;  //create a handy null handle for exception returns
+1047 
+1048   assert(!vfst.at_end(), "Java frame must exist");
+1049 
+1050   // Find caller and bci from vframe
+1051   methodHandle caller(THREAD, vfst.method());
+1052   int          bci   = vfst.bci();
+1053 
+1054   Bytecode_invoke bytecode(caller, bci);
+1055   int bytecode_index = bytecode.index();
+1056   bc = bytecode.invoke_code();
+1057 
+1058   methodHandle attached_method = extract_attached_method(vfst);
+1059   if (attached_method.not_null()) {
+1060     methodHandle callee = bytecode.static_target(CHECK_NH);
+1061     vmIntrinsics::ID id = callee-&gt;intrinsic_id();
+1062     // When VM replaces MH.invokeBasic/linkTo* call with a direct/virtual call,
+1063     // it attaches statically resolved method to the call site.
+1064     if (MethodHandles::is_signature_polymorphic(id) &amp;&amp;
+1065         MethodHandles::is_signature_polymorphic_intrinsic(id)) {
+1066       bc = MethodHandles::signature_polymorphic_intrinsic_bytecode(id);
+1067 
+1068       // Adjust invocation mode according to the attached method.
+1069       switch (bc) {
+1070         case Bytecodes::_invokevirtual:
+1071           if (attached_method-&gt;method_holder()-&gt;is_interface()) {
+1072             bc = Bytecodes::_invokeinterface;
+1073           }
+1074           break;
+1075         case Bytecodes::_invokeinterface:
+1076           if (!attached_method-&gt;method_holder()-&gt;is_interface()) {
+1077             bc = Bytecodes::_invokevirtual;
+1078           }
+1079           break;
+1080         case Bytecodes::_invokehandle:
+1081           if (!MethodHandles::is_signature_polymorphic_method(attached_method())) {
+1082             bc = attached_method-&gt;is_static() ? Bytecodes::_invokestatic
+1083                                               : Bytecodes::_invokevirtual;
+1084           }
+1085           break;
+1086         default:
+1087           break;
+1088       }
+1089     }
+1090   }
+1091 
+1092   assert(bc != Bytecodes::_illegal, "not initialized");
+1093 
+1094   bool has_receiver = bc != Bytecodes::_invokestatic &amp;&amp;
+1095                       bc != Bytecodes::_invokedynamic &amp;&amp;
+1096                       bc != Bytecodes::_invokehandle;
+1097 
+1098   // Find receiver for non-static call
+1099   if (has_receiver) {
+1100     // This register map must be update since we need to find the receiver for
+1101     // compiled frames. The receiver might be in a register.
+1102     RegisterMap reg_map2(thread);
+1103     frame stubFrame   = thread-&gt;last_frame();
+1104     // Caller-frame is a compiled frame
+1105     frame callerFrame = stubFrame.sender(&amp;reg_map2);
+1106 
+1107     if (attached_method.is_null()) {
+1108       methodHandle callee = bytecode.static_target(CHECK_NH);
+1109       if (callee.is_null()) {
+1110         THROW_(vmSymbols::java_lang_NoSuchMethodException(), nullHandle);
+1111       }
+1112     }
+1113 
+1114     // Retrieve from a compiled argument list
+1115     receiver = Handle(THREAD, callerFrame.retrieve_receiver(&amp;reg_map2));
+1116 
+1117     if (receiver.is_null()) {
+1118       THROW_(vmSymbols::java_lang_NullPointerException(), nullHandle);
+1119     }
+1120   }
+1121 
+1122   // Resolve method
+1123   if (attached_method.not_null()) {
+1124     // Parameterized by attached method.
+1125     LinkResolver::resolve_invoke(callinfo, receiver, attached_method, bc, CHECK_NH);
+1126   } else {
+1127     // Parameterized by bytecode.
+1128     constantPoolHandle constants(THREAD, caller-&gt;constants());
+1129     LinkResolver::resolve_invoke(callinfo, receiver, constants, bytecode_index, bc, CHECK_NH);
+1130   }
+1131 
+1132 #ifdef ASSERT
+1133   // Check that the receiver klass is of the right subtype and that it is initialized for virtual calls
+1134   if (has_receiver) {
+1135     assert(receiver.not_null(), "should have thrown exception");
+1136     Klass* receiver_klass = receiver-&gt;klass();
+1137     Klass* rk = NULL;
+1138     if (attached_method.not_null()) {
+1139       // In case there's resolved method attached, use its holder during the check.
+1140       rk = attached_method-&gt;method_holder();
+1141     } else {
+1142       // Klass is already loaded.
+1143       constantPoolHandle constants(THREAD, caller-&gt;constants());
+1144       rk = constants-&gt;klass_ref_at(bytecode_index, CHECK_NH);
+1145     }
+1146     Klass* static_receiver_klass = rk;
+1147     methodHandle callee = callinfo.selected_method();
+1148     assert(receiver_klass-&gt;is_subtype_of(static_receiver_klass),
+1149            "actual receiver must be subclass of static receiver klass");
+1150     if (receiver_klass-&gt;is_instance_klass()) {
+1151       if (InstanceKlass::cast(receiver_klass)-&gt;is_not_initialized()) {
+1152         tty-&gt;print_cr("ERROR: Klass not yet initialized!!");
+1153         receiver_klass-&gt;print();
+1154       }
+1155       assert(!InstanceKlass::cast(receiver_klass)-&gt;is_not_initialized(), "receiver_klass must be initialized");
+1156     }
+1157   }
+1158 #endif
+1159 
+1160   return receiver;
+1161 }
+1162 
+1163 methodHandle SharedRuntime::find_callee_method(JavaThread* thread, TRAPS) {
+1164   ResourceMark rm(THREAD);
+1165   // We need first to check if any Java activations (compiled, interpreted)
+1166   // exist on the stack since last JavaCall.  If not, we need
+1167   // to get the target method from the JavaCall wrapper.
+1168   vframeStream vfst(thread, true);  // Do not skip any javaCalls
+1169   methodHandle callee_method;
+1170   if (vfst.at_end()) {
+1171     // No Java frames were found on stack since we did the JavaCall.
+1172     // Hence the stack can only contain an entry_frame.  We need to
+1173     // find the target method from the stub frame.
+1174     RegisterMap reg_map(thread, false);
+1175     frame fr = thread-&gt;last_frame();
+1176     assert(fr.is_runtime_frame(), "must be a runtimeStub");
+1177     fr = fr.sender(&amp;reg_map);
+1178     assert(fr.is_entry_frame(), "must be");
+1179     // fr is now pointing to the entry frame.
+1180     callee_method = methodHandle(THREAD, fr.entry_frame_call_wrapper()-&gt;callee_method());
+1181   } else {
+1182     Bytecodes::Code bc;
+1183     CallInfo callinfo;
+1184     find_callee_info_helper(thread, vfst, bc, callinfo, CHECK_(methodHandle()));
+1185     callee_method = callinfo.selected_method();
+1186   }
+1187   assert(callee_method()-&gt;is_method(), "must be");
+1188   return callee_method;
+1189 }
+1190 
+1191 // Resolves a call.
+1192 methodHandle SharedRuntime::resolve_helper(JavaThread *thread,
+1193                                            bool is_virtual,
+1194                                            bool is_optimized, TRAPS) {
+1195   methodHandle callee_method;
+1196   callee_method = resolve_sub_helper(thread, is_virtual, is_optimized, THREAD);
+1197   if (JvmtiExport::can_hotswap_or_post_breakpoint()) {
+1198     int retry_count = 0;
+1199     while (!HAS_PENDING_EXCEPTION &amp;&amp; callee_method-&gt;is_old() &amp;&amp;
+1200            callee_method-&gt;method_holder() != SystemDictionary::Object_klass()) {
+1201       // If has a pending exception then there is no need to re-try to
+1202       // resolve this method.
+1203       // If the method has been redefined, we need to try again.
+1204       // Hack: we have no way to update the vtables of arrays, so don't
+1205       // require that java.lang.Object has been updated.
+1206 
+1207       // It is very unlikely that method is redefined more than 100 times
+1208       // in the middle of resolve. If it is looping here more than 100 times
+1209       // means then there could be a bug here.
+1210       guarantee((retry_count++ &lt; 100),
+1211                 "Could not resolve to latest version of redefined method");
+1212       // method is redefined in the middle of resolve so re-try.
+1213       callee_method = resolve_sub_helper(thread, is_virtual, is_optimized, THREAD);
+1214     }
+1215   }
+1216   return callee_method;
+1217 }
+1218 
+1219 // Resolves a call.  The compilers generate code for calls that go here
+1220 // and are patched with the real destination of the call.
+1221 methodHandle SharedRuntime::resolve_sub_helper(JavaThread *thread,
+1222                                            bool is_virtual,
+1223                                            bool is_optimized, TRAPS) {
+1224 
+1225   ResourceMark rm(thread);
+1226   RegisterMap cbl_map(thread, false);
+1227   frame caller_frame = thread-&gt;last_frame().sender(&amp;cbl_map);
+1228 
+1229   CodeBlob* caller_cb = caller_frame.cb();
+1230   guarantee(caller_cb != NULL &amp;&amp; caller_cb-&gt;is_compiled(), "must be called from compiled method");
+1231   CompiledMethod* caller_nm = caller_cb-&gt;as_compiled_method_or_null();
+1232 
+1233   // make sure caller is not getting deoptimized
+1234   // and removed before we are done with it.
+1235   // CLEANUP - with lazy deopt shouldn't need this lock
+1236   nmethodLocker caller_lock(caller_nm);
+1237 
+1238   // determine call info &amp; receiver
+1239   // note: a) receiver is NULL for static calls
+1240   //       b) an exception is thrown if receiver is NULL for non-static calls
+1241   CallInfo call_info;
+1242   Bytecodes::Code invoke_code = Bytecodes::_illegal;
+1243   Handle receiver = find_callee_info(thread, invoke_code,
+1244                                      call_info, CHECK_(methodHandle()));
+1245   methodHandle callee_method = call_info.selected_method();
+1246 
+1247   assert((!is_virtual &amp;&amp; invoke_code == Bytecodes::_invokestatic ) ||
+1248          (!is_virtual &amp;&amp; invoke_code == Bytecodes::_invokespecial) ||
+1249          (!is_virtual &amp;&amp; invoke_code == Bytecodes::_invokehandle ) ||
+1250          (!is_virtual &amp;&amp; invoke_code == Bytecodes::_invokedynamic) ||
+1251          ( is_virtual &amp;&amp; invoke_code != Bytecodes::_invokestatic ), "inconsistent bytecode");
+1252 
+1253   assert(caller_nm-&gt;is_alive(), "It should be alive");
+1254 
+1255 #ifndef PRODUCT
+1256   // tracing/debugging/statistics
+1257   int *addr = (is_optimized) ? (&amp;_resolve_opt_virtual_ctr) :
+1258                 (is_virtual) ? (&amp;_resolve_virtual_ctr) :
+1259                                (&amp;_resolve_static_ctr);
+1260   Atomic::inc(addr);
+1261 
+1262   if (TraceCallFixup) {
+1263     ResourceMark rm(thread);
+1264     tty-&gt;print("resolving %s%s (%s) call to",
+1265       (is_optimized) ? "optimized " : "", (is_virtual) ? "virtual" : "static",
+1266       Bytecodes::name(invoke_code));
+1267     callee_method-&gt;print_short_name(tty);
+1268     tty-&gt;print_cr(" at pc: " INTPTR_FORMAT " to code: " INTPTR_FORMAT,
+1269                   p2i(caller_frame.pc()), p2i(callee_method-&gt;code()));
+1270   }
+1271 #endif
+1272 
+1273   // Do not patch call site for static call when the class is not
+1274   // fully initialized.
+1275   if (invoke_code == Bytecodes::_invokestatic &amp;&amp;
+1276       !callee_method-&gt;method_holder()-&gt;is_initialized()) {
+1277     assert(callee_method-&gt;method_holder()-&gt;is_linked(), "must be");
+1278     return callee_method;
+1279   }
+1280 
+1281   // JSR 292 key invariant:
+1282   // If the resolved method is a MethodHandle invoke target, the call
+1283   // site must be a MethodHandle call site, because the lambda form might tail-call
+1284   // leaving the stack in a state unknown to either caller or callee
+1285   // TODO detune for now but we might need it again
+1286 //  assert(!callee_method-&gt;is_compiled_lambda_form() ||
+1287 //         caller_nm-&gt;is_method_handle_return(caller_frame.pc()), "must be MH call site");
+1288 
+1289   // Compute entry points. This might require generation of C2I converter
+1290   // frames, so we cannot be holding any locks here. Furthermore, the
+1291   // computation of the entry points is independent of patching the call.  We
+1292   // always return the entry-point, but we only patch the stub if the call has
+1293   // not been deoptimized.  Return values: For a virtual call this is an
+1294   // (cached_oop, destination address) pair. For a static call/optimized
+1295   // virtual this is just a destination address.
+1296 
+1297   StaticCallInfo static_call_info;
+1298   CompiledICInfo virtual_call_info;
+1299 
+1300   // Make sure the callee nmethod does not get deoptimized and removed before
+1301   // we are done patching the code.
+1302   CompiledMethod* callee = callee_method-&gt;code();
+1303 
+1304   if (callee != NULL) {
+1305     assert(callee-&gt;is_compiled(), "must be nmethod for patching");
+1306   }
+1307 
+1308   if (callee != NULL &amp;&amp; !callee-&gt;is_in_use()) {
+1309     // Patch call site to C2I adapter if callee nmethod is deoptimized or unloaded.
+1310     callee = NULL;
+1311   }
+1312   nmethodLocker nl_callee(callee);
+1313 #ifdef ASSERT
+1314   address dest_entry_point = callee == NULL ? 0 : callee-&gt;entry_point(); // used below
+1315 #endif
+1316 
+1317   bool is_nmethod = caller_nm-&gt;is_nmethod();
+1318 
+1319   if (is_virtual) {
+1320     assert(receiver.not_null() || invoke_code == Bytecodes::_invokehandle, "sanity check");
+1321     bool static_bound = call_info.resolved_method()-&gt;can_be_statically_bound();
+1322     Klass* klass = invoke_code == Bytecodes::_invokehandle ? NULL : receiver-&gt;klass();
+1323     CompiledIC::compute_monomorphic_entry(callee_method, klass,
+1324                      is_optimized, static_bound, is_nmethod, virtual_call_info,
+1325                      CHECK_(methodHandle()));
+1326   } else {
+1327     // static call
+1328     CompiledStaticCall::compute_entry(callee_method, is_nmethod, static_call_info);
+1329   }
+1330 
+1331   // grab lock, check for deoptimization and potentially patch caller
+1332   {
+1333     MutexLocker ml_patch(CompiledIC_lock);
+1334 
+1335     // Lock blocks for safepoint during which both nmethods can change state.
+1336 
+1337     // Now that we are ready to patch if the Method* was redefined then
+1338     // don't update call site and let the caller retry.
+1339     // Don't update call site if callee nmethod was unloaded or deoptimized.
+1340     // Don't update call site if callee nmethod was replaced by an other nmethod
+1341     // which may happen when multiply alive nmethod (tiered compilation)
+1342     // will be supported.
+1343     if (!callee_method-&gt;is_old() &amp;&amp;
+1344         (callee == NULL || (callee-&gt;is_in_use() &amp;&amp; callee_method-&gt;code() == callee))) {
+1345 #ifdef ASSERT
+1346       // We must not try to patch to jump to an already unloaded method.
+1347       if (dest_entry_point != 0) {
+1348         CodeBlob* cb = CodeCache::find_blob(dest_entry_point);
+1349         assert((cb != NULL) &amp;&amp; cb-&gt;is_compiled() &amp;&amp; (((CompiledMethod*)cb) == callee),
+1350                "should not call unloaded nmethod");
+1351       }
+1352 #endif
+1353       if (is_virtual) {
+1354         CompiledIC* inline_cache = CompiledIC_before(caller_nm, caller_frame.pc());
+1355         if (inline_cache-&gt;is_clean()) {
+1356           inline_cache-&gt;set_to_monomorphic(virtual_call_info);
+1357         }
+1358       } else {
+1359         CompiledStaticCall* ssc = caller_nm-&gt;compiledStaticCall_before(caller_frame.pc());
+1360         if (ssc-&gt;is_clean()) ssc-&gt;set(static_call_info);
+1361       }
+1362     }
+1363 
+1364   } // unlock CompiledIC_lock
+1365 
+1366   return callee_method;
+1367 }
+1368 
+1369 
+1370 // Inline caches exist only in compiled code
+1371 JRT_BLOCK_ENTRY(address, SharedRuntime::handle_wrong_method_ic_miss(JavaThread* thread))
+1372 #ifdef ASSERT
+1373   RegisterMap reg_map(thread, false);
+1374   frame stub_frame = thread-&gt;last_frame();
+1375   assert(stub_frame.is_runtime_frame(), "sanity check");
+1376   frame caller_frame = stub_frame.sender(&amp;reg_map);
+1377   assert(!caller_frame.is_interpreted_frame() &amp;&amp; !caller_frame.is_entry_frame(), "unexpected frame");
+1378 #endif /* ASSERT */
+1379 
+1380   methodHandle callee_method;
+1381   JRT_BLOCK
+1382     callee_method = SharedRuntime::handle_ic_miss_helper(thread, CHECK_NULL);
+1383     // Return Method* through TLS
+1384     thread-&gt;set_vm_result_2(callee_method());
+1385   JRT_BLOCK_END
+1386   // return compiled code entry point after potential safepoints
+1387   assert(callee_method-&gt;verified_code_entry() != NULL, " Jump to zero!");
+1388   return callee_method-&gt;verified_code_entry();
+1389 JRT_END
+1390 
+1391 
+1392 // Handle call site that has been made non-entrant
+1393 JRT_BLOCK_ENTRY(address, SharedRuntime::handle_wrong_method(JavaThread* thread))
+1394   // 6243940 We might end up in here if the callee is deoptimized
+1395   // as we race to call it.  We don't want to take a safepoint if
+1396   // the caller was interpreted because the caller frame will look
+1397   // interpreted to the stack walkers and arguments are now
+1398   // "compiled" so it is much better to make this transition
+1399   // invisible to the stack walking code. The i2c path will
+1400   // place the callee method in the callee_target. It is stashed
+1401   // there because if we try and find the callee by normal means a
+1402   // safepoint is possible and have trouble gc'ing the compiled args.
+1403   RegisterMap reg_map(thread, false);
+1404   frame stub_frame = thread-&gt;last_frame();
+1405   assert(stub_frame.is_runtime_frame(), "sanity check");
+1406   frame caller_frame = stub_frame.sender(&amp;reg_map);
+1407 
+1408   if (caller_frame.is_interpreted_frame() ||
+1409       caller_frame.is_entry_frame()) {
+1410     Method* callee = thread-&gt;callee_target();
+1411     guarantee(callee != NULL &amp;&amp; callee-&gt;is_method(), "bad handshake");
+1412     thread-&gt;set_vm_result_2(callee);
+1413     thread-&gt;set_callee_target(NULL);
+1414     return callee-&gt;get_c2i_entry();
+1415   }
+1416 
+1417   // Must be compiled to compiled path which is safe to stackwalk
+1418   methodHandle callee_method;
+1419   JRT_BLOCK
+1420     // Force resolving of caller (if we called from compiled frame)
+1421     callee_method = SharedRuntime::reresolve_call_site(thread, CHECK_NULL);
+1422     thread-&gt;set_vm_result_2(callee_method());
+1423   JRT_BLOCK_END
+1424   // return compiled code entry point after potential safepoints
+1425   assert(callee_method-&gt;verified_code_entry() != NULL, " Jump to zero!");
+1426   return callee_method-&gt;verified_code_entry();
+1427 JRT_END
+1428 
+1429 // Handle abstract method call
+1430 JRT_BLOCK_ENTRY(address, SharedRuntime::handle_wrong_method_abstract(JavaThread* thread))
+1431   // Verbose error message for AbstractMethodError.
+1432   // Get the called method from the invoke bytecode.
+1433   vframeStream vfst(thread, true);
+1434   assert(!vfst.at_end(), "Java frame must exist");
+1435   methodHandle caller(vfst.method());
+1436   Bytecode_invoke invoke(caller, vfst.bci());
+1437   DEBUG_ONLY( invoke.verify(); )
+1438 
+1439   // Find the compiled caller frame.
+1440   RegisterMap reg_map(thread);
+1441   frame stubFrame = thread-&gt;last_frame();
+1442   assert(stubFrame.is_runtime_frame(), "must be");
+1443   frame callerFrame = stubFrame.sender(&amp;reg_map);
+1444   assert(callerFrame.is_compiled_frame(), "must be");
+1445 
+1446   // Install exception and return forward entry.
+1447   address res = StubRoutines::throw_AbstractMethodError_entry();
+1448   JRT_BLOCK
+1449     methodHandle callee = invoke.static_target(thread);
+1450     if (!callee.is_null()) {
+1451       oop recv = callerFrame.retrieve_receiver(&amp;reg_map);
+1452       Klass *recv_klass = (recv != NULL) ? recv-&gt;klass() : NULL;
+1453       LinkResolver::throw_abstract_method_error(callee, recv_klass, thread);
+1454       res = StubRoutines::forward_exception_entry();
+1455     }
+1456   JRT_BLOCK_END
+1457   return res;
+1458 JRT_END
+1459 
+1460 
+1461 // resolve a static call and patch code
+1462 JRT_BLOCK_ENTRY(address, SharedRuntime::resolve_static_call_C(JavaThread *thread ))
+1463   methodHandle callee_method;
+1464   JRT_BLOCK
+1465     callee_method = SharedRuntime::resolve_helper(thread, false, false, CHECK_NULL);
+1466     thread-&gt;set_vm_result_2(callee_method());
+1467   JRT_BLOCK_END
+1468   // return compiled code entry point after potential safepoints
+1469   assert(callee_method-&gt;verified_code_entry() != NULL, " Jump to zero!");
+1470   return callee_method-&gt;verified_code_entry();
+1471 JRT_END
+1472 
+1473 
+1474 // resolve virtual call and update inline cache to monomorphic
+1475 JRT_BLOCK_ENTRY(address, SharedRuntime::resolve_virtual_call_C(JavaThread *thread ))
+1476   methodHandle callee_method;
+1477   JRT_BLOCK
+1478     callee_method = SharedRuntime::resolve_helper(thread, true, false, CHECK_NULL);
+1479     thread-&gt;set_vm_result_2(callee_method());
+1480   JRT_BLOCK_END
+1481   // return compiled code entry point after potential safepoints
+1482   assert(callee_method-&gt;verified_code_entry() != NULL, " Jump to zero!");
+1483   return callee_method-&gt;verified_code_entry();
+1484 JRT_END
+1485 
+1486 
+1487 // Resolve a virtual call that can be statically bound (e.g., always
+1488 // monomorphic, so it has no inline cache).  Patch code to resolved target.
+1489 JRT_BLOCK_ENTRY(address, SharedRuntime::resolve_opt_virtual_call_C(JavaThread *thread))
+1490   methodHandle callee_method;
+1491   JRT_BLOCK
+1492     callee_method = SharedRuntime::resolve_helper(thread, true, true, CHECK_NULL);
+1493     thread-&gt;set_vm_result_2(callee_method());
+1494   JRT_BLOCK_END
+1495   // return compiled code entry point after potential safepoints
+1496   assert(callee_method-&gt;verified_code_entry() != NULL, " Jump to zero!");
+1497   return callee_method-&gt;verified_code_entry();
+1498 JRT_END
+1499 
+1500 
+1501 
+1502 methodHandle SharedRuntime::handle_ic_miss_helper(JavaThread *thread, TRAPS) {
+1503   ResourceMark rm(thread);
+1504   CallInfo call_info;
+1505   Bytecodes::Code bc;
+1506 
+1507   // receiver is NULL for static calls. An exception is thrown for NULL
+1508   // receivers for non-static calls
+1509   Handle receiver = find_callee_info(thread, bc, call_info,
+1510                                      CHECK_(methodHandle()));
+1511   // Compiler1 can produce virtual call sites that can actually be statically bound
+1512   // If we fell thru to below we would think that the site was going megamorphic
+1513   // when in fact the site can never miss. Worse because we'd think it was megamorphic
+1514   // we'd try and do a vtable dispatch however methods that can be statically bound
+1515   // don't have vtable entries (vtable_index &lt; 0) and we'd blow up. So we force a
+1516   // reresolution of the  call site (as if we did a handle_wrong_method and not an
+1517   // plain ic_miss) and the site will be converted to an optimized virtual call site
+1518   // never to miss again. I don't believe C2 will produce code like this but if it
+1519   // did this would still be the correct thing to do for it too, hence no ifdef.
+1520   //
+1521   if (call_info.resolved_method()-&gt;can_be_statically_bound()) {
+1522     methodHandle callee_method = SharedRuntime::reresolve_call_site(thread, CHECK_(methodHandle()));
+1523     if (TraceCallFixup) {
+1524       RegisterMap reg_map(thread, false);
+1525       frame caller_frame = thread-&gt;last_frame().sender(&amp;reg_map);
+1526       ResourceMark rm(thread);
+1527       tty-&gt;print("converting IC miss to reresolve (%s) call to", Bytecodes::name(bc));
+1528       callee_method-&gt;print_short_name(tty);
+1529       tty-&gt;print_cr(" from pc: " INTPTR_FORMAT, p2i(caller_frame.pc()));
+1530       tty-&gt;print_cr(" code: " INTPTR_FORMAT, p2i(callee_method-&gt;code()));
+1531     }
+1532     return callee_method;
+1533   }
+1534 
+1535   methodHandle callee_method = call_info.selected_method();
+1536 
+1537   bool should_be_mono = false;
+1538 
+1539 #ifndef PRODUCT
+1540   Atomic::inc(&amp;_ic_miss_ctr);
+1541 
+1542   // Statistics &amp; Tracing
+1543   if (TraceCallFixup) {
+1544     ResourceMark rm(thread);
+1545     tty-&gt;print("IC miss (%s) call to", Bytecodes::name(bc));
+1546     callee_method-&gt;print_short_name(tty);
+1547     tty-&gt;print_cr(" code: " INTPTR_FORMAT, p2i(callee_method-&gt;code()));
+1548   }
+1549 
+1550   if (ICMissHistogram) {
+1551     MutexLocker m(VMStatistic_lock);
+1552     RegisterMap reg_map(thread, false);
+1553     frame f = thread-&gt;last_frame().real_sender(&amp;reg_map);// skip runtime stub
+1554     // produce statistics under the lock
+1555     trace_ic_miss(f.pc());
+1556   }
+1557 #endif
+1558 
+1559   // install an event collector so that when a vtable stub is created the
+1560   // profiler can be notified via a DYNAMIC_CODE_GENERATED event. The
+1561   // event can't be posted when the stub is created as locks are held
+1562   // - instead the event will be deferred until the event collector goes
+1563   // out of scope.
+1564   JvmtiDynamicCodeEventCollector event_collector;
+1565 
+1566   // Update inline cache to megamorphic. Skip update if we are called from interpreted.
+1567   { MutexLocker ml_patch (CompiledIC_lock);
+1568     RegisterMap reg_map(thread, false);
+1569     frame caller_frame = thread-&gt;last_frame().sender(&amp;reg_map);
+1570     CodeBlob* cb = caller_frame.cb();
+1571     CompiledMethod* caller_nm = cb-&gt;as_compiled_method_or_null();
+1572     if (cb-&gt;is_compiled()) {
+1573       CompiledIC* inline_cache = CompiledIC_before(((CompiledMethod*)cb), caller_frame.pc());
+1574       bool should_be_mono = false;
+1575       if (inline_cache-&gt;is_optimized()) {
+1576         if (TraceCallFixup) {
+1577           ResourceMark rm(thread);
+1578           tty-&gt;print("OPTIMIZED IC miss (%s) call to", Bytecodes::name(bc));
+1579           callee_method-&gt;print_short_name(tty);
+1580           tty-&gt;print_cr(" code: " INTPTR_FORMAT, p2i(callee_method-&gt;code()));
+1581         }
+1582         should_be_mono = true;
+1583       } else if (inline_cache-&gt;is_icholder_call()) {
+1584         CompiledICHolder* ic_oop = inline_cache-&gt;cached_icholder();
+1585         if (ic_oop != NULL) {
+1586 
+1587           if (receiver()-&gt;klass() == ic_oop-&gt;holder_klass()) {
+1588             // This isn't a real miss. We must have seen that compiled code
+1589             // is now available and we want the call site converted to a
+1590             // monomorphic compiled call site.
+1591             // We can't assert for callee_method-&gt;code() != NULL because it
+1592             // could have been deoptimized in the meantime
+1593             if (TraceCallFixup) {
+1594               ResourceMark rm(thread);
+1595               tty-&gt;print("FALSE IC miss (%s) converting to compiled call to", Bytecodes::name(bc));
+1596               callee_method-&gt;print_short_name(tty);
+1597               tty-&gt;print_cr(" code: " INTPTR_FORMAT, p2i(callee_method-&gt;code()));
+1598             }
+1599             should_be_mono = true;
+1600           }
+1601         }
+1602       }
+1603 
+1604       if (should_be_mono) {
+1605 
+1606         // We have a path that was monomorphic but was going interpreted
+1607         // and now we have (or had) a compiled entry. We correct the IC
+1608         // by using a new icBuffer.
+1609         CompiledICInfo info;
+1610         Klass* receiver_klass = receiver()-&gt;klass();
+1611         inline_cache-&gt;compute_monomorphic_entry(callee_method,
+1612                                                 receiver_klass,
+1613                                                 inline_cache-&gt;is_optimized(),
+1614                                                 false, caller_nm-&gt;is_nmethod(),
+1615                                                 info, CHECK_(methodHandle()));
+1616         inline_cache-&gt;set_to_monomorphic(info);
+1617       } else if (!inline_cache-&gt;is_megamorphic() &amp;&amp; !inline_cache-&gt;is_clean()) {
+1618         // Potential change to megamorphic
+1619         bool successful = inline_cache-&gt;set_to_megamorphic(&amp;call_info, bc, CHECK_(methodHandle()));
+1620         if (!successful) {
+1621           inline_cache-&gt;set_to_clean();
+1622         }
+1623       } else {
+1624         // Either clean or megamorphic
+1625       }
+1626     } else {
+1627       fatal("Unimplemented");
+1628     }
+1629   } // Release CompiledIC_lock
+1630 
+1631   return callee_method;
+1632 }
+1633 
+1634 //
+1635 // Resets a call-site in compiled code so it will get resolved again.
+1636 // This routines handles both virtual call sites, optimized virtual call
+1637 // sites, and static call sites. Typically used to change a call sites
+1638 // destination from compiled to interpreted.
+1639 //
+1640 methodHandle SharedRuntime::reresolve_call_site(JavaThread *thread, TRAPS) {
+1641   ResourceMark rm(thread);
+1642   RegisterMap reg_map(thread, false);
+1643   frame stub_frame = thread-&gt;last_frame();
+1644   assert(stub_frame.is_runtime_frame(), "must be a runtimeStub");
+1645   frame caller = stub_frame.sender(&amp;reg_map);
+1646 
+1647   // Do nothing if the frame isn't a live compiled frame.
+1648   // nmethod could be deoptimized by the time we get here
+1649   // so no update to the caller is needed.
+1650 
+1651   if (caller.is_compiled_frame() &amp;&amp; !caller.is_deoptimized_frame()) {
+1652 
+1653     address pc = caller.pc();
+1654 
+1655     // Check for static or virtual call
+1656     bool is_static_call = false;
+1657     CompiledMethod* caller_nm = CodeCache::find_compiled(pc);
+1658 
+1659     // Default call_addr is the location of the "basic" call.
+1660     // Determine the address of the call we a reresolving. With
+1661     // Inline Caches we will always find a recognizable call.
+1662     // With Inline Caches disabled we may or may not find a
+1663     // recognizable call. We will always find a call for static
+1664     // calls and for optimized virtual calls. For vanilla virtual
+1665     // calls it depends on the state of the UseInlineCaches switch.
+1666     //
+1667     // With Inline Caches disabled we can get here for a virtual call
+1668     // for two reasons:
+1669     //   1 - calling an abstract method. The vtable for abstract methods
+1670     //       will run us thru handle_wrong_method and we will eventually
+1671     //       end up in the interpreter to throw the ame.
+1672     //   2 - a racing deoptimization. We could be doing a vanilla vtable
+1673     //       call and between the time we fetch the entry address and
+1674     //       we jump to it the target gets deoptimized. Similar to 1
+1675     //       we will wind up in the interprter (thru a c2i with c2).
+1676     //
+1677     address call_addr = NULL;
+1678     {
+1679       // Get call instruction under lock because another thread may be
+1680       // busy patching it.
+1681       MutexLockerEx ml_patch(Patching_lock, Mutex::_no_safepoint_check_flag);
+1682       // Location of call instruction
+1683       call_addr = caller_nm-&gt;call_instruction_address(pc);
+1684     }
+1685     // Make sure nmethod doesn't get deoptimized and removed until
+1686     // this is done with it.
+1687     // CLEANUP - with lazy deopt shouldn't need this lock
+1688     nmethodLocker nmlock(caller_nm);
+1689 
+1690     if (call_addr != NULL) {
+1691       RelocIterator iter(caller_nm, call_addr, call_addr+1);
+1692       int ret = iter.next(); // Get item
+1693       if (ret) {
+1694         assert(iter.addr() == call_addr, "must find call");
+1695         if (iter.type() == relocInfo::static_call_type) {
+1696           is_static_call = true;
+1697         } else {
+1698           assert(iter.type() == relocInfo::virtual_call_type ||
+1699                  iter.type() == relocInfo::opt_virtual_call_type
+1700                 , "unexpected relocInfo. type");
+1701         }
+1702       } else {
+1703         assert(!UseInlineCaches, "relocation info. must exist for this address");
+1704       }
+1705 
+1706       // Cleaning the inline cache will force a new resolve. This is more robust
+1707       // than directly setting it to the new destination, since resolving of calls
+1708       // is always done through the same code path. (experience shows that it
+1709       // leads to very hard to track down bugs, if an inline cache gets updated
+1710       // to a wrong method). It should not be performance critical, since the
+1711       // resolve is only done once.
+1712 
+1713       bool is_nmethod = caller_nm-&gt;is_nmethod();
+1714       MutexLocker ml(CompiledIC_lock);
+1715       if (is_static_call) {
+1716         CompiledStaticCall* ssc = caller_nm-&gt;compiledStaticCall_at(call_addr);
+1717         ssc-&gt;set_to_clean();
+1718       } else {
+1719         // compiled, dispatched call (which used to call an interpreted method)
+1720         CompiledIC* inline_cache = CompiledIC_at(caller_nm, call_addr);
+1721         inline_cache-&gt;set_to_clean();
+1722       }
+1723     }
+1724   }
+1725 
+1726   methodHandle callee_method = find_callee_method(thread, CHECK_(methodHandle()));
+1727 
+1728 
+1729 #ifndef PRODUCT
+1730   Atomic::inc(&amp;_wrong_method_ctr);
+1731 
+1732   if (TraceCallFixup) {
+1733     ResourceMark rm(thread);
+1734     tty-&gt;print("handle_wrong_method reresolving call to");
+1735     callee_method-&gt;print_short_name(tty);
+1736     tty-&gt;print_cr(" code: " INTPTR_FORMAT, p2i(callee_method-&gt;code()));
+1737   }
+1738 #endif
+1739 
+1740   return callee_method;
+1741 }
+1742 
+1743 address SharedRuntime::handle_unsafe_access(JavaThread* thread, address next_pc) {
+1744   // The faulting unsafe accesses should be changed to throw the error
+1745   // synchronously instead. Meanwhile the faulting instruction will be
+1746   // skipped over (effectively turning it into a no-op) and an
+1747   // asynchronous exception will be raised which the thread will
+1748   // handle at a later point. If the instruction is a load it will
+1749   // return garbage.
+1750 
+1751   // Request an async exception.
+1752   thread-&gt;set_pending_unsafe_access_error();
+1753 
+1754   // Return address of next instruction to execute.
+1755   return next_pc;
+1756 }
+1757 
+1758 #ifdef ASSERT
+1759 void SharedRuntime::check_member_name_argument_is_last_argument(const methodHandle&amp; method,
+1760                                                                 const BasicType* sig_bt,
+1761                                                                 const VMRegPair* regs) {
+1762   ResourceMark rm;
+1763   const int total_args_passed = method-&gt;size_of_parameters();
+1764   const VMRegPair*    regs_with_member_name = regs;
+1765         VMRegPair* regs_without_member_name = NEW_RESOURCE_ARRAY(VMRegPair, total_args_passed - 1);
+1766 
+1767   const int member_arg_pos = total_args_passed - 1;
+1768   assert(member_arg_pos &gt;= 0 &amp;&amp; member_arg_pos &lt; total_args_passed, "oob");
+1769   assert(sig_bt[member_arg_pos] == T_OBJECT, "dispatch argument must be an object");
+1770 
+1771   const bool is_outgoing = method-&gt;is_method_handle_intrinsic();
+1772   int comp_args_on_stack = java_calling_convention(sig_bt, regs_without_member_name, total_args_passed - 1, is_outgoing);
+1773 
+1774   for (int i = 0; i &lt; member_arg_pos; i++) {
+1775     VMReg a =    regs_with_member_name[i].first();
+1776     VMReg b = regs_without_member_name[i].first();
+1777     assert(a-&gt;value() == b-&gt;value(), "register allocation mismatch: a=" INTX_FORMAT ", b=" INTX_FORMAT, a-&gt;value(), b-&gt;value());
+1778   }
+1779   assert(regs_with_member_name[member_arg_pos].first()-&gt;is_valid(), "bad member arg");
+1780 }
+1781 #endif
+1782 
+1783 bool SharedRuntime::should_fixup_call_destination(address destination, address entry_point, address caller_pc, Method* moop, CodeBlob* cb) {
+1784   if (destination != entry_point) {
+1785     CodeBlob* callee = CodeCache::find_blob(destination);
+1786     // callee == cb seems weird. It means calling interpreter thru stub.
+1787     if (callee != NULL &amp;&amp; (callee == cb || callee-&gt;is_adapter_blob())) {
+1788       // static call or optimized virtual
+1789       if (TraceCallFixup) {
+1790         tty-&gt;print("fixup callsite           at " INTPTR_FORMAT " to compiled code for", p2i(caller_pc));
+1791         moop-&gt;print_short_name(tty);
+1792         tty-&gt;print_cr(" to " INTPTR_FORMAT, p2i(entry_point));
+1793       }
+1794       return true;
+1795     } else {
+1796       if (TraceCallFixup) {
+1797         tty-&gt;print("failed to fixup callsite at " INTPTR_FORMAT " to compiled code for", p2i(caller_pc));
+1798         moop-&gt;print_short_name(tty);
+1799         tty-&gt;print_cr(" to " INTPTR_FORMAT, p2i(entry_point));
+1800       }
+1801       // assert is too strong could also be resolve destinations.
+1802       // assert(InlineCacheBuffer::contains(destination) || VtableStubs::contains(destination), "must be");
+1803     }
+1804   } else {
+1805     if (TraceCallFixup) {
+1806       tty-&gt;print("already patched callsite at " INTPTR_FORMAT " to compiled code for", p2i(caller_pc));
+1807       moop-&gt;print_short_name(tty);
+1808       tty-&gt;print_cr(" to " INTPTR_FORMAT, p2i(entry_point));
+1809     }
+1810   }
+1811   return false;
+1812 }
+1813 
+1814 // ---------------------------------------------------------------------------
+1815 // We are calling the interpreter via a c2i. Normally this would mean that
+1816 // we were called by a compiled method. However we could have lost a race
+1817 // where we went int -&gt; i2c -&gt; c2i and so the caller could in fact be
+1818 // interpreted. If the caller is compiled we attempt to patch the caller
+1819 // so he no longer calls into the interpreter.
+1820 IRT_LEAF(void, SharedRuntime::fixup_callers_callsite(Method* method, address caller_pc))
+1821   Method* moop(method);
+1822 
+1823   address entry_point = moop-&gt;from_compiled_entry_no_trampoline();
+1824 
+1825   // It's possible that deoptimization can occur at a call site which hasn't
+1826   // been resolved yet, in which case this function will be called from
+1827   // an nmethod that has been patched for deopt and we can ignore the
+1828   // request for a fixup.
+1829   // Also it is possible that we lost a race in that from_compiled_entry
+1830   // is now back to the i2c in that case we don't need to patch and if
+1831   // we did we'd leap into space because the callsite needs to use
+1832   // "to interpreter" stub in order to load up the Method*. Don't
+1833   // ask me how I know this...
+1834 
+1835   CodeBlob* cb = CodeCache::find_blob(caller_pc);
+1836   if (cb == NULL || !cb-&gt;is_compiled() || entry_point == moop-&gt;get_c2i_entry()) {
+1837     return;
+1838   }
+1839 
+1840   // The check above makes sure this is a nmethod.
+1841   CompiledMethod* nm = cb-&gt;as_compiled_method_or_null();
+1842   assert(nm, "must be");
+1843 
+1844   // Get the return PC for the passed caller PC.
+1845   address return_pc = caller_pc + frame::pc_return_offset;
+1846 
+1847   // There is a benign race here. We could be attempting to patch to a compiled
+1848   // entry point at the same time the callee is being deoptimized. If that is
+1849   // the case then entry_point may in fact point to a c2i and we'd patch the
+1850   // call site with the same old data. clear_code will set code() to NULL
+1851   // at the end of it. If we happen to see that NULL then we can skip trying
+1852   // to patch. If we hit the window where the callee has a c2i in the
+1853   // from_compiled_entry and the NULL isn't present yet then we lose the race
+1854   // and patch the code with the same old data. Asi es la vida.
+1855 
+1856   if (moop-&gt;code() == NULL) return;
+1857 
+1858   if (nm-&gt;is_in_use()) {
+1859 
+1860     // Expect to find a native call there (unless it was no-inline cache vtable dispatch)
+1861     MutexLockerEx ml_patch(Patching_lock, Mutex::_no_safepoint_check_flag);
+1862     if (NativeCall::is_call_before(return_pc)) {
+1863       ResourceMark mark;
+1864       NativeCallWrapper* call = nm-&gt;call_wrapper_before(return_pc);
+1865       //
+1866       // bug 6281185. We might get here after resolving a call site to a vanilla
+1867       // virtual call. Because the resolvee uses the verified entry it may then
+1868       // see compiled code and attempt to patch the site by calling us. This would
+1869       // then incorrectly convert the call site to optimized and its downhill from
+1870       // there. If you're lucky you'll get the assert in the bugid, if not you've
+1871       // just made a call site that could be megamorphic into a monomorphic site
+1872       // for the rest of its life! Just another racing bug in the life of
+1873       // fixup_callers_callsite ...
+1874       //
+1875       RelocIterator iter(nm, call-&gt;instruction_address(), call-&gt;next_instruction_address());
+1876       iter.next();
+1877       assert(iter.has_current(), "must have a reloc at java call site");
+1878       relocInfo::relocType typ = iter.reloc()-&gt;type();
+1879       if (typ != relocInfo::static_call_type &amp;&amp;
+1880            typ != relocInfo::opt_virtual_call_type &amp;&amp;
+1881            typ != relocInfo::static_stub_type) {
+1882         return;
+1883       }
+1884       address destination = call-&gt;destination();
+1885       if (should_fixup_call_destination(destination, entry_point, caller_pc, moop, cb)) {
+1886         call-&gt;set_destination_mt_safe(entry_point);
+1887       }
+1888     }
+1889   }
+1890 IRT_END
+1891 
+1892 
+1893 // same as JVM_Arraycopy, but called directly from compiled code
+1894 JRT_ENTRY(void, SharedRuntime::slow_arraycopy_C(oopDesc* src,  jint src_pos,
+1895                                                 oopDesc* dest, jint dest_pos,
+1896                                                 jint length,
+1897                                                 JavaThread* thread)) {
+1898 #ifndef PRODUCT
+1899   _slow_array_copy_ctr++;
+1900 #endif
+1901   // Check if we have null pointers
+1902   if (src == NULL || dest == NULL) {
+1903     THROW(vmSymbols::java_lang_NullPointerException());
+1904   }
+1905   // Do the copy.  The casts to arrayOop are necessary to the copy_array API,
+1906   // even though the copy_array API also performs dynamic checks to ensure
+1907   // that src and dest are truly arrays (and are conformable).
+1908   // The copy_array mechanism is awkward and could be removed, but
+1909   // the compilers don't call this function except as a last resort,
+1910   // so it probably doesn't matter.
+1911   src-&gt;klass()-&gt;copy_array((arrayOopDesc*)src, src_pos,
+1912                                         (arrayOopDesc*)dest, dest_pos,
+1913                                         length, thread);
+1914 }
+1915 JRT_END
+1916 
+1917 // The caller of generate_class_cast_message() (or one of its callers)
+1918 // must use a ResourceMark in order to correctly free the result.
+1919 char* SharedRuntime::generate_class_cast_message(
+1920     JavaThread* thread, Klass* caster_klass) {
+1921 
+1922   // Get target class name from the checkcast instruction
+1923   vframeStream vfst(thread, true);
+1924   assert(!vfst.at_end(), "Java frame must exist");
+1925   Bytecode_checkcast cc(vfst.method(), vfst.method()-&gt;bcp_from(vfst.bci()));
+1926   constantPoolHandle cpool(thread, vfst.method()-&gt;constants());
+1927   Klass* target_klass = ConstantPool::klass_at_if_loaded(cpool, cc.index());
+1928   Symbol* target_klass_name = NULL;
+1929   if (target_klass == NULL) {
+1930     // This klass should be resolved, but just in case, get the name in the klass slot.
+1931     target_klass_name = cpool-&gt;klass_name_at(cc.index());
+1932   }
+1933   return generate_class_cast_message(caster_klass, target_klass, target_klass_name);
+1934 }
+1935 
+1936 
+1937 // The caller of generate_class_cast_message() (or one of its callers)
+1938 // must use a ResourceMark in order to correctly free the result.
+1939 char* SharedRuntime::generate_class_cast_message(
+1940     Klass* caster_klass, Klass* target_klass, Symbol* target_klass_name) {
+1941   const char* caster_name = caster_klass-&gt;external_name();
+1942 
+1943   assert(target_klass != NULL || target_klass_name != NULL, "one must be provided");
+1944   const char* target_name = target_klass == NULL ? target_klass_name-&gt;as_klass_external_name() :
+1945                                                    target_klass-&gt;external_name();
+1946 
+1947   size_t msglen = strlen(caster_name) + strlen("class ") + strlen(" cannot be cast to class ") + strlen(target_name) + 1;
+1948 
+1949   const char* caster_klass_description = "";
+1950   const char* target_klass_description = "";
+1951   const char* klass_separator = "";
+1952   if (target_klass != NULL &amp;&amp; caster_klass-&gt;module() == target_klass-&gt;module()) {
+1953     caster_klass_description = caster_klass-&gt;joint_in_module_of_loader(target_klass);
+1954   } else {
+1955     caster_klass_description = caster_klass-&gt;class_in_module_of_loader();
+1956     target_klass_description = (target_klass != NULL) ? target_klass-&gt;class_in_module_of_loader() : "";
+1957     klass_separator = (target_klass != NULL) ? "; " : "";
+1958   }
+1959 
+1960   // add 3 for parenthesis and preceeding space
+1961   msglen += strlen(caster_klass_description) + strlen(target_klass_description) + strlen(klass_separator) + 3;
+1962 
+1963   char* message = NEW_RESOURCE_ARRAY_RETURN_NULL(char, msglen);
+1964   if (message == NULL) {
+1965     // Shouldn't happen, but don't cause even more problems if it does
+1966     message = const_cast&lt;char*&gt;(caster_klass-&gt;external_name());
+1967   } else {
+1968     jio_snprintf(message,
+1969                  msglen,
+1970                  "class %s cannot be cast to class %s (%s%s%s)",
+1971                  caster_name,
+1972                  target_name,
+1973                  caster_klass_description,
+1974                  klass_separator,
+1975                  target_klass_description
+1976                  );
+1977   }
+1978   return message;
+1979 }
+1980 
+1981 JRT_LEAF(void, SharedRuntime::reguard_yellow_pages())
+1982   (void) JavaThread::current()-&gt;reguard_stack();
+1983 JRT_END
+1984 
+1985 
+1986 // Handles the uncommon case in locking, i.e., contention or an inflated lock.
+1987 JRT_BLOCK_ENTRY(void, SharedRuntime::complete_monitor_locking_C(oopDesc* _obj, BasicLock* lock, JavaThread* thread))
+1988   if (!SafepointSynchronize::is_synchronizing()) {
+1989     // Only try quick_enter() if we're not trying to reach a safepoint
+1990     // so that the calling thread reaches the safepoint more quickly.
+1991     if (ObjectSynchronizer::quick_enter(_obj, thread, lock)) return;
+1992   }
+1993   // NO_ASYNC required because an async exception on the state transition destructor
+1994   // would leave you with the lock held and it would never be released.
+1995   // The normal monitorenter NullPointerException is thrown without acquiring a lock
+1996   // and the model is that an exception implies the method failed.
+1997   JRT_BLOCK_NO_ASYNC
+1998   oop obj(_obj);
+1999   if (PrintBiasedLockingStatistics) {
+2000     Atomic::inc(BiasedLocking::slow_path_entry_count_addr());
+2001   }
+2002   Handle h_obj(THREAD, obj);
+2003   if (UseBiasedLocking) {
+2004     // Retry fast entry if bias is revoked to avoid unnecessary inflation
+2005     ObjectSynchronizer::fast_enter(h_obj, lock, true, CHECK);
+2006   } else {
+2007     ObjectSynchronizer::slow_enter(h_obj, lock, CHECK);
+2008   }
+2009   assert(!HAS_PENDING_EXCEPTION, "Should have no exception here");
+2010   JRT_BLOCK_END
+2011 JRT_END
+2012 
+2013 // Handles the uncommon cases of monitor unlocking in compiled code
+2014 JRT_LEAF(void, SharedRuntime::complete_monitor_unlocking_C(oopDesc* _obj, BasicLock* lock, JavaThread * THREAD))
+2015    oop obj(_obj);
+2016   assert(JavaThread::current() == THREAD, "invariant");
+2017   // I'm not convinced we need the code contained by MIGHT_HAVE_PENDING anymore
+2018   // testing was unable to ever fire the assert that guarded it so I have removed it.
+2019   assert(!HAS_PENDING_EXCEPTION, "Do we need code below anymore?");
+2020 #undef MIGHT_HAVE_PENDING
+2021 #ifdef MIGHT_HAVE_PENDING
+2022   // Save and restore any pending_exception around the exception mark.
+2023   // While the slow_exit must not throw an exception, we could come into
+2024   // this routine with one set.
+2025   oop pending_excep = NULL;
+2026   const char* pending_file;
+2027   int pending_line;
+2028   if (HAS_PENDING_EXCEPTION) {
+2029     pending_excep = PENDING_EXCEPTION;
+2030     pending_file  = THREAD-&gt;exception_file();
+2031     pending_line  = THREAD-&gt;exception_line();
+2032     CLEAR_PENDING_EXCEPTION;
+2033   }
+2034 #endif /* MIGHT_HAVE_PENDING */
+2035 
+2036   {
+2037     // Exit must be non-blocking, and therefore no exceptions can be thrown.
+2038     EXCEPTION_MARK;
+2039     ObjectSynchronizer::slow_exit(obj, lock, THREAD);
+2040   }
+2041 
+2042 #ifdef MIGHT_HAVE_PENDING
+2043   if (pending_excep != NULL) {
+2044     THREAD-&gt;set_pending_exception(pending_excep, pending_file, pending_line);
+2045   }
+2046 #endif /* MIGHT_HAVE_PENDING */
+2047 JRT_END
+2048 
+2049 #ifndef PRODUCT
+2050 
+2051 void SharedRuntime::print_statistics() {
+2052   ttyLocker ttyl;
+2053   if (xtty != NULL)  xtty-&gt;head("statistics type='SharedRuntime'");
+2054 
+2055   if (_throw_null_ctr) tty-&gt;print_cr("%5d implicit null throw", _throw_null_ctr);
+2056 
+2057   SharedRuntime::print_ic_miss_histogram();
+2058 
+2059   if (CountRemovableExceptions) {
+2060     if (_nof_removable_exceptions &gt; 0) {
+2061       Unimplemented(); // this counter is not yet incremented
+2062       tty-&gt;print_cr("Removable exceptions: %d", _nof_removable_exceptions);
+2063     }
+2064   }
+2065 
+2066   // Dump the JRT_ENTRY counters
+2067   if (_new_instance_ctr) tty-&gt;print_cr("%5d new instance requires GC", _new_instance_ctr);
+2068   if (_new_array_ctr) tty-&gt;print_cr("%5d new array requires GC", _new_array_ctr);
+2069   if (_multi1_ctr) tty-&gt;print_cr("%5d multianewarray 1 dim", _multi1_ctr);
+2070   if (_multi2_ctr) tty-&gt;print_cr("%5d multianewarray 2 dim", _multi2_ctr);
+2071   if (_multi3_ctr) tty-&gt;print_cr("%5d multianewarray 3 dim", _multi3_ctr);
+2072   if (_multi4_ctr) tty-&gt;print_cr("%5d multianewarray 4 dim", _multi4_ctr);
+2073   if (_multi5_ctr) tty-&gt;print_cr("%5d multianewarray 5 dim", _multi5_ctr);
+2074 
+2075   tty-&gt;print_cr("%5d inline cache miss in compiled", _ic_miss_ctr);
+2076   tty-&gt;print_cr("%5d wrong method", _wrong_method_ctr);
+2077   tty-&gt;print_cr("%5d unresolved static call site", _resolve_static_ctr);
+2078   tty-&gt;print_cr("%5d unresolved virtual call site", _resolve_virtual_ctr);
+2079   tty-&gt;print_cr("%5d unresolved opt virtual call site", _resolve_opt_virtual_ctr);
+2080 
+2081   if (_mon_enter_stub_ctr) tty-&gt;print_cr("%5d monitor enter stub", _mon_enter_stub_ctr);
+2082   if (_mon_exit_stub_ctr) tty-&gt;print_cr("%5d monitor exit stub", _mon_exit_stub_ctr);
+2083   if (_mon_enter_ctr) tty-&gt;print_cr("%5d monitor enter slow", _mon_enter_ctr);
+2084   if (_mon_exit_ctr) tty-&gt;print_cr("%5d monitor exit slow", _mon_exit_ctr);
+2085   if (_partial_subtype_ctr) tty-&gt;print_cr("%5d slow partial subtype", _partial_subtype_ctr);
+2086   if (_jbyte_array_copy_ctr) tty-&gt;print_cr("%5d byte array copies", _jbyte_array_copy_ctr);
+2087   if (_jshort_array_copy_ctr) tty-&gt;print_cr("%5d short array copies", _jshort_array_copy_ctr);
+2088   if (_jint_array_copy_ctr) tty-&gt;print_cr("%5d int array copies", _jint_array_copy_ctr);
+2089   if (_jlong_array_copy_ctr) tty-&gt;print_cr("%5d long array copies", _jlong_array_copy_ctr);
+2090   if (_oop_array_copy_ctr) tty-&gt;print_cr("%5d oop array copies", _oop_array_copy_ctr);
+2091   if (_checkcast_array_copy_ctr) tty-&gt;print_cr("%5d checkcast array copies", _checkcast_array_copy_ctr);
+2092   if (_unsafe_array_copy_ctr) tty-&gt;print_cr("%5d unsafe array copies", _unsafe_array_copy_ctr);
+2093   if (_generic_array_copy_ctr) tty-&gt;print_cr("%5d generic array copies", _generic_array_copy_ctr);
+2094   if (_slow_array_copy_ctr) tty-&gt;print_cr("%5d slow array copies", _slow_array_copy_ctr);
+2095   if (_find_handler_ctr) tty-&gt;print_cr("%5d find exception handler", _find_handler_ctr);
+2096   if (_rethrow_ctr) tty-&gt;print_cr("%5d rethrow handler", _rethrow_ctr);
+2097 
+2098   AdapterHandlerLibrary::print_statistics();
+2099 
+2100   if (xtty != NULL)  xtty-&gt;tail("statistics");
+2101 }
+2102 
+2103 inline double percent(int x, int y) {
+2104   return 100.0 * x / MAX2(y, 1);
+2105 }
+2106 
+2107 class MethodArityHistogram {
+2108  public:
+2109   enum { MAX_ARITY = 256 };
+2110  private:
+2111   static int _arity_histogram[MAX_ARITY];     // histogram of #args
+2112   static int _size_histogram[MAX_ARITY];      // histogram of arg size in words
+2113   static int _max_arity;                      // max. arity seen
+2114   static int _max_size;                       // max. arg size seen
+2115 
+2116   static void add_method_to_histogram(nmethod* nm) {
+2117     if (CompiledMethod::nmethod_access_is_safe(nm)) {
+2118       Method* method = nm-&gt;method();
+2119       ArgumentCount args(method-&gt;signature());
+2120       int arity   = args.size() + (method-&gt;is_static() ? 0 : 1);
+2121       int argsize = method-&gt;size_of_parameters();
+2122       arity   = MIN2(arity, MAX_ARITY-1);
+2123       argsize = MIN2(argsize, MAX_ARITY-1);
+2124       int count = method-&gt;compiled_invocation_count();
+2125       _arity_histogram[arity]  += count;
+2126       _size_histogram[argsize] += count;
+2127       _max_arity = MAX2(_max_arity, arity);
+2128       _max_size  = MAX2(_max_size, argsize);
+2129     }
+2130   }
+2131 
+2132   void print_histogram_helper(int n, int* histo, const char* name) {
+2133     const int N = MIN2(5, n);
+2134     tty-&gt;print_cr("\nHistogram of call arity (incl. rcvr, calls to compiled methods only):");
+2135     double sum = 0;
+2136     double weighted_sum = 0;
+2137     int i;
+2138     for (i = 0; i &lt;= n; i++) { sum += histo[i]; weighted_sum += i*histo[i]; }
+2139     double rest = sum;
+2140     double percent = sum / 100;
+2141     for (i = 0; i &lt;= N; i++) {
+2142       rest -= histo[i];
+2143       tty-&gt;print_cr("%4d: %7d (%5.1f%%)", i, histo[i], histo[i] / percent);
+2144     }
+2145     tty-&gt;print_cr("rest: %7d (%5.1f%%))", (int)rest, rest / percent);
+2146     tty-&gt;print_cr("(avg. %s = %3.1f, max = %d)", name, weighted_sum / sum, n);
+2147   }
+2148 
+2149   void print_histogram() {
+2150     tty-&gt;print_cr("\nHistogram of call arity (incl. rcvr, calls to compiled methods only):");
+2151     print_histogram_helper(_max_arity, _arity_histogram, "arity");
+2152     tty-&gt;print_cr("\nSame for parameter size (in words):");
+2153     print_histogram_helper(_max_size, _size_histogram, "size");
+2154     tty-&gt;cr();
+2155   }
+2156 
+2157  public:
+2158   MethodArityHistogram() {
+2159     MutexLockerEx mu(CodeCache_lock, Mutex::_no_safepoint_check_flag);
+2160     _max_arity = _max_size = 0;
+2161     for (int i = 0; i &lt; MAX_ARITY; i++) _arity_histogram[i] = _size_histogram[i] = 0;
+2162     CodeCache::nmethods_do(add_method_to_histogram);
+2163     print_histogram();
+2164   }
+2165 };
+2166 
+2167 int MethodArityHistogram::_arity_histogram[MethodArityHistogram::MAX_ARITY];
+2168 int MethodArityHistogram::_size_histogram[MethodArityHistogram::MAX_ARITY];
+2169 int MethodArityHistogram::_max_arity;
+2170 int MethodArityHistogram::_max_size;
+2171 
+2172 void SharedRuntime::print_call_statistics(int comp_total) {
+2173   tty-&gt;print_cr("Calls from compiled code:");
+2174   int total  = _nof_normal_calls + _nof_interface_calls + _nof_static_calls;
+2175   int mono_c = _nof_normal_calls - _nof_optimized_calls - _nof_megamorphic_calls;
+2176   int mono_i = _nof_interface_calls - _nof_optimized_interface_calls - _nof_megamorphic_interface_calls;
+2177   tty-&gt;print_cr("\t%9d   (%4.1f%%) total non-inlined   ", total, percent(total, total));
+2178   tty-&gt;print_cr("\t%9d   (%4.1f%%) virtual calls       ", _nof_normal_calls, percent(_nof_normal_calls, total));
+2179   tty-&gt;print_cr("\t  %9d  (%3.0f%%)   inlined          ", _nof_inlined_calls, percent(_nof_inlined_calls, _nof_normal_calls));
+2180   tty-&gt;print_cr("\t  %9d  (%3.0f%%)   optimized        ", _nof_optimized_calls, percent(_nof_optimized_calls, _nof_normal_calls));
+2181   tty-&gt;print_cr("\t  %9d  (%3.0f%%)   monomorphic      ", mono_c, percent(mono_c, _nof_normal_calls));
+2182   tty-&gt;print_cr("\t  %9d  (%3.0f%%)   megamorphic      ", _nof_megamorphic_calls, percent(_nof_megamorphic_calls, _nof_normal_calls));
+2183   tty-&gt;print_cr("\t%9d   (%4.1f%%) interface calls     ", _nof_interface_calls, percent(_nof_interface_calls, total));
+2184   tty-&gt;print_cr("\t  %9d  (%3.0f%%)   inlined          ", _nof_inlined_interface_calls, percent(_nof_inlined_interface_calls, _nof_interface_calls));
+2185   tty-&gt;print_cr("\t  %9d  (%3.0f%%)   optimized        ", _nof_optimized_interface_calls, percent(_nof_optimized_interface_calls, _nof_interface_calls));
+2186   tty-&gt;print_cr("\t  %9d  (%3.0f%%)   monomorphic      ", mono_i, percent(mono_i, _nof_interface_calls));
+2187   tty-&gt;print_cr("\t  %9d  (%3.0f%%)   megamorphic      ", _nof_megamorphic_interface_calls, percent(_nof_megamorphic_interface_calls, _nof_interface_calls));
+2188   tty-&gt;print_cr("\t%9d   (%4.1f%%) static/special calls", _nof_static_calls, percent(_nof_static_calls, total));
+2189   tty-&gt;print_cr("\t  %9d  (%3.0f%%)   inlined          ", _nof_inlined_static_calls, percent(_nof_inlined_static_calls, _nof_static_calls));
+2190   tty-&gt;cr();
+2191   tty-&gt;print_cr("Note 1: counter updates are not MT-safe.");
+2192   tty-&gt;print_cr("Note 2: %% in major categories are relative to total non-inlined calls;");
+2193   tty-&gt;print_cr("        %% in nested categories are relative to their category");
+2194   tty-&gt;print_cr("        (and thus add up to more than 100%% with inlining)");
+2195   tty-&gt;cr();
+2196 
+2197   MethodArityHistogram h;
+2198 }
+2199 #endif
+2200 
+2201 
+2202 // A simple wrapper class around the calling convention information
+2203 // that allows sharing of adapters for the same calling convention.
+2204 class AdapterFingerPrint : public CHeapObj&lt;mtCode&gt; {
+2205  private:
+2206   enum {
+2207     _basic_type_bits = 4,
+2208     _basic_type_mask = right_n_bits(_basic_type_bits),
+2209     _basic_types_per_int = BitsPerInt / _basic_type_bits,
+2210     _compact_int_count = 3
+2211   };
+2212   // TO DO:  Consider integrating this with a more global scheme for compressing signatures.
+2213   // For now, 4 bits per components (plus T_VOID gaps after double/long) is not excessive.
+2214 
+2215   union {
+2216     int  _compact[_compact_int_count];
+2217     int* _fingerprint;
+2218   } _value;
+2219   int _length; // A negative length indicates the fingerprint is in the compact form,
+2220                // Otherwise _value._fingerprint is the array.
+2221 
+2222   // Remap BasicTypes that are handled equivalently by the adapters.
+2223   // These are correct for the current system but someday it might be
+2224   // necessary to make this mapping platform dependent.
+2225   static int adapter_encoding(BasicType in) {
+2226     switch (in) {
+2227       case T_BOOLEAN:
+2228       case T_BYTE:
+2229       case T_SHORT:
+2230       case T_CHAR:
+2231         // There are all promoted to T_INT in the calling convention
+2232         return T_INT;
+2233 
+2234       case T_OBJECT:
+2235       case T_ARRAY:
+2236         // In other words, we assume that any register good enough for
+2237         // an int or long is good enough for a managed pointer.
+2238 #ifdef _LP64
+2239         return T_LONG;
+2240 #else
+2241         return T_INT;
+2242 #endif
+2243 
+2244       case T_INT:
+2245       case T_LONG:
+2246       case T_FLOAT:
+2247       case T_DOUBLE:
+2248       case T_VOID:
+2249         return in;
+2250 
+2251       default:
+2252         ShouldNotReachHere();
+2253         return T_CONFLICT;
+2254     }
+2255   }
+2256 
+2257  public:
+2258   AdapterFingerPrint(int total_args_passed, BasicType* sig_bt) {
+2259     // The fingerprint is based on the BasicType signature encoded
+2260     // into an array of ints with eight entries per int.
+2261     int* ptr;
+2262     int len = (total_args_passed + (_basic_types_per_int-1)) / _basic_types_per_int;
+2263     if (len &lt;= _compact_int_count) {
+2264       assert(_compact_int_count == 3, "else change next line");
+2265       _value._compact[0] = _value._compact[1] = _value._compact[2] = 0;
+2266       // Storing the signature encoded as signed chars hits about 98%
+2267       // of the time.
+2268       _length = -len;
+2269       ptr = _value._compact;
+2270     } else {
+2271       _length = len;
+2272       _value._fingerprint = NEW_C_HEAP_ARRAY(int, _length, mtCode);
+2273       ptr = _value._fingerprint;
+2274     }
+2275 
+2276     // Now pack the BasicTypes with 8 per int
+2277     int sig_index = 0;
+2278     for (int index = 0; index &lt; len; index++) {
+2279       int value = 0;
+2280       for (int byte = 0; byte &lt; _basic_types_per_int; byte++) {
+2281         int bt = ((sig_index &lt; total_args_passed)
+2282                   ? adapter_encoding(sig_bt[sig_index++])
+2283                   : 0);
+2284         assert((bt &amp; _basic_type_mask) == bt, "must fit in 4 bits");
+2285         value = (value &lt;&lt; _basic_type_bits) | bt;
+2286       }
+2287       ptr[index] = value;
+2288     }
+2289   }
+2290 
+2291   ~AdapterFingerPrint() {
+2292     if (_length &gt; 0) {
+2293       FREE_C_HEAP_ARRAY(int, _value._fingerprint);
+2294     }
+2295   }
+2296 
+2297   int value(int index) {
+2298     if (_length &lt; 0) {
+2299       return _value._compact[index];
+2300     }
+2301     return _value._fingerprint[index];
+2302   }
+2303   int length() {
+2304     if (_length &lt; 0) return -_length;
+2305     return _length;
+2306   }
+2307 
+2308   bool is_compact() {
+2309     return _length &lt;= 0;
+2310   }
+2311 
+2312   unsigned int compute_hash() {
+2313     int hash = 0;
+2314     for (int i = 0; i &lt; length(); i++) {
+2315       int v = value(i);
+2316       hash = (hash &lt;&lt; 8) ^ v ^ (hash &gt;&gt; 5);
+2317     }
+2318     return (unsigned int)hash;
+2319   }
+2320 
+2321   const char* as_string() {
+2322     stringStream st;
+2323     st.print("0x");
+2324     for (int i = 0; i &lt; length(); i++) {
+2325       st.print("%08x", value(i));
+2326     }
+2327     return st.as_string();
+2328   }
+2329 
+2330   bool equals(AdapterFingerPrint* other) {
+2331     if (other-&gt;_length != _length) {
+2332       return false;
+2333     }
+2334     if (_length &lt; 0) {
+2335       assert(_compact_int_count == 3, "else change next line");
+2336       return _value._compact[0] == other-&gt;_value._compact[0] &amp;&amp;
+2337              _value._compact[1] == other-&gt;_value._compact[1] &amp;&amp;
+2338              _value._compact[2] == other-&gt;_value._compact[2];
+2339     } else {
+2340       for (int i = 0; i &lt; _length; i++) {
+2341         if (_value._fingerprint[i] != other-&gt;_value._fingerprint[i]) {
+2342           return false;
+2343         }
+2344       }
+2345     }
+2346     return true;
+2347   }
+2348 };
+2349 
+2350 
+2351 // A hashtable mapping from AdapterFingerPrints to AdapterHandlerEntries
+2352 class AdapterHandlerTable : public BasicHashtable&lt;mtCode&gt; {
+2353   friend class AdapterHandlerTableIterator;
+2354 
+2355  private:
+2356 
+2357 #ifndef PRODUCT
+2358   static int _lookups; // number of calls to lookup
+2359   static int _buckets; // number of buckets checked
+2360   static int _equals;  // number of buckets checked with matching hash
+2361   static int _hits;    // number of successful lookups
+2362   static int _compact; // number of equals calls with compact signature
+2363 #endif
+2364 
+2365   AdapterHandlerEntry* bucket(int i) {
+2366     return (AdapterHandlerEntry*)BasicHashtable&lt;mtCode&gt;::bucket(i);
+2367   }
+2368 
+2369  public:
+2370   AdapterHandlerTable()
+2371     : BasicHashtable&lt;mtCode&gt;(293, (DumpSharedSpaces ? sizeof(CDSAdapterHandlerEntry) : sizeof(AdapterHandlerEntry))) { }
+2372 
+2373   // Create a new entry suitable for insertion in the table
+2374   AdapterHandlerEntry* new_entry(AdapterFingerPrint* fingerprint, address i2c_entry, address c2i_entry, address c2i_unverified_entry) {
+2375     AdapterHandlerEntry* entry = (AdapterHandlerEntry*)BasicHashtable&lt;mtCode&gt;::new_entry(fingerprint-&gt;compute_hash());
+2376     entry-&gt;init(fingerprint, i2c_entry, c2i_entry, c2i_unverified_entry);
+2377     if (DumpSharedSpaces) {
+2378       ((CDSAdapterHandlerEntry*)entry)-&gt;init();
+2379     }
+2380     return entry;
+2381   }
+2382 
+2383   // Insert an entry into the table
+2384   void add(AdapterHandlerEntry* entry) {
+2385     int index = hash_to_index(entry-&gt;hash());
+2386     add_entry(index, entry);
+2387   }
+2388 
+2389   void free_entry(AdapterHandlerEntry* entry) {
+2390     entry-&gt;deallocate();
+2391     BasicHashtable&lt;mtCode&gt;::free_entry(entry);
+2392   }
+2393 
+2394   // Find a entry with the same fingerprint if it exists
+2395   AdapterHandlerEntry* lookup(int total_args_passed, BasicType* sig_bt) {
+2396     NOT_PRODUCT(_lookups++);
+2397     AdapterFingerPrint fp(total_args_passed, sig_bt);
+2398     unsigned int hash = fp.compute_hash();
+2399     int index = hash_to_index(hash);
+2400     for (AdapterHandlerEntry* e = bucket(index); e != NULL; e = e-&gt;next()) {
+2401       NOT_PRODUCT(_buckets++);
+2402       if (e-&gt;hash() == hash) {
+2403         NOT_PRODUCT(_equals++);
+2404         if (fp.equals(e-&gt;fingerprint())) {
+2405 #ifndef PRODUCT
+2406           if (fp.is_compact()) _compact++;
+2407           _hits++;
+2408 #endif
+2409           return e;
+2410         }
+2411       }
+2412     }
+2413     return NULL;
+2414   }
+2415 
+2416 #ifndef PRODUCT
+2417   void print_statistics() {
+2418     ResourceMark rm;
+2419     int longest = 0;
+2420     int empty = 0;
+2421     int total = 0;
+2422     int nonempty = 0;
+2423     for (int index = 0; index &lt; table_size(); index++) {
+2424       int count = 0;
+2425       for (AdapterHandlerEntry* e = bucket(index); e != NULL; e = e-&gt;next()) {
+2426         count++;
+2427       }
+2428       if (count != 0) nonempty++;
+2429       if (count == 0) empty++;
+2430       if (count &gt; longest) longest = count;
+2431       total += count;
+2432     }
+2433     tty-&gt;print_cr("AdapterHandlerTable: empty %d longest %d total %d average %f",
+2434                   empty, longest, total, total / (double)nonempty);
+2435     tty-&gt;print_cr("AdapterHandlerTable: lookups %d buckets %d equals %d hits %d compact %d",
+2436                   _lookups, _buckets, _equals, _hits, _compact);
+2437   }
+2438 #endif
+2439 };
+2440 
+2441 
+2442 #ifndef PRODUCT
+2443 
+2444 int AdapterHandlerTable::_lookups;
+2445 int AdapterHandlerTable::_buckets;
+2446 int AdapterHandlerTable::_equals;
+2447 int AdapterHandlerTable::_hits;
+2448 int AdapterHandlerTable::_compact;
+2449 
+2450 #endif
+2451 
+2452 class AdapterHandlerTableIterator : public StackObj {
+2453  private:
+2454   AdapterHandlerTable* _table;
+2455   int _index;
+2456   AdapterHandlerEntry* _current;
+2457 
+2458   void scan() {
+2459     while (_index &lt; _table-&gt;table_size()) {
+2460       AdapterHandlerEntry* a = _table-&gt;bucket(_index);
+2461       _index++;
+2462       if (a != NULL) {
+2463         _current = a;
+2464         return;
+2465       }
+2466     }
+2467   }
+2468 
+2469  public:
+2470   AdapterHandlerTableIterator(AdapterHandlerTable* table): _table(table), _index(0), _current(NULL) {
+2471     scan();
+2472   }
+2473   bool has_next() {
+2474     return _current != NULL;
+2475   }
+2476   AdapterHandlerEntry* next() {
+2477     if (_current != NULL) {
+2478       AdapterHandlerEntry* result = _current;
+2479       _current = _current-&gt;next();
+2480       if (_current == NULL) scan();
+2481       return result;
+2482     } else {
+2483       return NULL;
+2484     }
+2485   }
+2486 };
+2487 
+2488 
+2489 // ---------------------------------------------------------------------------
+2490 // Implementation of AdapterHandlerLibrary
+2491 AdapterHandlerTable* AdapterHandlerLibrary::_adapters = NULL;
+2492 AdapterHandlerEntry* AdapterHandlerLibrary::_abstract_method_handler = NULL;
+2493 const int AdapterHandlerLibrary_size = 16*K;
+2494 BufferBlob* AdapterHandlerLibrary::_buffer = NULL;
+2495 
+2496 BufferBlob* AdapterHandlerLibrary::buffer_blob() {
+2497   // Should be called only when AdapterHandlerLibrary_lock is active.
+2498   if (_buffer == NULL) // Initialize lazily
+2499       _buffer = BufferBlob::create("adapters", AdapterHandlerLibrary_size);
+2500   return _buffer;
+2501 }
+2502 
+2503 extern "C" void unexpected_adapter_call() {
+2504   ShouldNotCallThis();
+2505 }
+2506 
+2507 void AdapterHandlerLibrary::initialize() {
+2508   if (_adapters != NULL) return;
+2509   _adapters = new AdapterHandlerTable();
+2510 
+2511   // Create a special handler for abstract methods.  Abstract methods
+2512   // are never compiled so an i2c entry is somewhat meaningless, but
+2513   // throw AbstractMethodError just in case.
+2514   // Pass wrong_method_abstract for the c2i transitions to return
+2515   // AbstractMethodError for invalid invocations.
+2516   address wrong_method_abstract = SharedRuntime::get_handle_wrong_method_abstract_stub();
+2517   _abstract_method_handler = AdapterHandlerLibrary::new_entry(new AdapterFingerPrint(0, NULL),
+2518                                                               StubRoutines::throw_AbstractMethodError_entry(),
+2519                                                               wrong_method_abstract, wrong_method_abstract);
+2520 }
+2521 
+2522 AdapterHandlerEntry* AdapterHandlerLibrary::new_entry(AdapterFingerPrint* fingerprint,
+2523                                                       address i2c_entry,
+2524                                                       address c2i_entry,
+2525                                                       address c2i_unverified_entry) {
+2526   return _adapters-&gt;new_entry(fingerprint, i2c_entry, c2i_entry, c2i_unverified_entry);
+2527 }
+2528 
+2529 AdapterHandlerEntry* AdapterHandlerLibrary::get_adapter(const methodHandle&amp; method) {
+2530   AdapterHandlerEntry* entry = get_adapter0(method);
+2531   if (entry != NULL &amp;&amp; method-&gt;is_shared()) {
+2532     // See comments around Method::link_method()
+2533     MutexLocker mu(AdapterHandlerLibrary_lock);
+2534     if (method-&gt;adapter() == NULL) {
+2535       method-&gt;update_adapter_trampoline(entry);
+2536     }
+2537     address trampoline = method-&gt;from_compiled_entry();
+2538     if (*(int*)trampoline == 0) {
+2539       CodeBuffer buffer(trampoline, (int)SharedRuntime::trampoline_size());
+2540       MacroAssembler _masm(&amp;buffer);
+2541       SharedRuntime::generate_trampoline(&amp;_masm, entry-&gt;get_c2i_entry());
+2542       assert(*(int*)trampoline != 0, "Instruction(s) for trampoline must not be encoded as zeros.");
+2543 
+2544       if (PrintInterpreter) {
+2545         Disassembler::decode(buffer.insts_begin(), buffer.insts_end());
+2546       }
+2547     }
+2548   }
+2549 
+2550   return entry;
+2551 }
+2552 
+2553 AdapterHandlerEntry* AdapterHandlerLibrary::get_adapter0(const methodHandle&amp; method) {
+2554   // Use customized signature handler.  Need to lock around updates to
+2555   // the AdapterHandlerTable (it is not safe for concurrent readers
+2556   // and a single writer: this could be fixed if it becomes a
+2557   // problem).
+2558 
+2559   ResourceMark rm;
+2560 
+2561   NOT_PRODUCT(int insts_size);
+2562   AdapterBlob* new_adapter = NULL;
+2563   AdapterHandlerEntry* entry = NULL;
+2564   AdapterFingerPrint* fingerprint = NULL;
+2565   {
+2566     MutexLocker mu(AdapterHandlerLibrary_lock);
+2567     // make sure data structure is initialized
+2568     initialize();
+2569 
+2570     if (method-&gt;is_abstract()) {
+2571       return _abstract_method_handler;
+2572     }
+2573 
+2574     // Fill in the signature array, for the calling-convention call.
+2575     int total_args_passed = method-&gt;size_of_parameters(); // All args on stack
+2576 
+2577     BasicType* sig_bt = NEW_RESOURCE_ARRAY(BasicType, total_args_passed);
+2578     VMRegPair* regs   = NEW_RESOURCE_ARRAY(VMRegPair, total_args_passed);
+2579     int i = 0;
+2580     if (!method-&gt;is_static())  // Pass in receiver first
+2581       sig_bt[i++] = T_OBJECT;
+2582     for (SignatureStream ss(method-&gt;signature()); !ss.at_return_type(); ss.next()) {
+2583       sig_bt[i++] = ss.type();  // Collect remaining bits of signature
+2584       if (ss.type() == T_LONG || ss.type() == T_DOUBLE)
+2585         sig_bt[i++] = T_VOID;   // Longs &amp; doubles take 2 Java slots
+2586     }
+2587     assert(i == total_args_passed, "");
+2588 
+2589     // Lookup method signature's fingerprint
+2590     entry = _adapters-&gt;lookup(total_args_passed, sig_bt);
+2591 
+2592 #ifdef ASSERT
+2593     AdapterHandlerEntry* shared_entry = NULL;
+2594     // Start adapter sharing verification only after the VM is booted.
+2595     if (VerifyAdapterSharing &amp;&amp; (entry != NULL)) {
+2596       shared_entry = entry;
+2597       entry = NULL;
+2598     }
+2599 #endif
+2600 
+2601     if (entry != NULL) {
+2602       return entry;
+2603     }
+2604 
+2605     // Get a description of the compiled java calling convention and the largest used (VMReg) stack slot usage
+2606     int comp_args_on_stack = SharedRuntime::java_calling_convention(sig_bt, regs, total_args_passed, false);
+2607 
+2608     // Make a C heap allocated version of the fingerprint to store in the adapter
+2609     fingerprint = new AdapterFingerPrint(total_args_passed, sig_bt);
+2610 
+2611     // StubRoutines::code2() is initialized after this function can be called. As a result,
+2612     // VerifyAdapterCalls and VerifyAdapterSharing can fail if we re-use code that generated
+2613     // prior to StubRoutines::code2() being set. Checks refer to checks generated in an I2C
+2614     // stub that ensure that an I2C stub is called from an interpreter frame.
+2615     bool contains_all_checks = StubRoutines::code2() != NULL;
+2616 
+2617     // Create I2C &amp; C2I handlers
+2618     BufferBlob* buf = buffer_blob(); // the temporary code buffer in CodeCache
+2619     if (buf != NULL) {
+2620       CodeBuffer buffer(buf);
+2621       short buffer_locs[20];
+2622       buffer.insts()-&gt;initialize_shared_locs((relocInfo*)buffer_locs,
+2623                                              sizeof(buffer_locs)/sizeof(relocInfo));
+2624 
+2625       MacroAssembler _masm(&amp;buffer);
+2626       entry = SharedRuntime::generate_i2c2i_adapters(&amp;_masm,
+2627                                                      total_args_passed,
+2628                                                      comp_args_on_stack,
+2629                                                      sig_bt,
+2630                                                      regs,
+2631                                                      fingerprint);
+2632 #ifdef ASSERT
+2633       if (VerifyAdapterSharing) {
+2634         if (shared_entry != NULL) {
+2635           assert(shared_entry-&gt;compare_code(buf-&gt;code_begin(), buffer.insts_size()), "code must match");
+2636           // Release the one just created and return the original
+2637           _adapters-&gt;free_entry(entry);
+2638           return shared_entry;
+2639         } else  {
+2640           entry-&gt;save_code(buf-&gt;code_begin(), buffer.insts_size());
+2641         }
+2642       }
+2643 #endif
+2644 
+2645       new_adapter = AdapterBlob::create(&amp;buffer);
+2646       NOT_PRODUCT(insts_size = buffer.insts_size());
+2647     }
+2648     if (new_adapter == NULL) {
+2649       // CodeCache is full, disable compilation
+2650       // Ought to log this but compile log is only per compile thread
+2651       // and we're some non descript Java thread.
+2652       return NULL; // Out of CodeCache space
+2653     }
+2654     entry-&gt;relocate(new_adapter-&gt;content_begin());
+2655 #ifndef PRODUCT
+2656     // debugging suppport
+2657     if (PrintAdapterHandlers || PrintStubCode) {
+2658       ttyLocker ttyl;
+2659       entry-&gt;print_adapter_on(tty);
+2660       tty-&gt;print_cr("i2c argument handler #%d for: %s %s %s (%d bytes generated)",
+2661                     _adapters-&gt;number_of_entries(), (method-&gt;is_static() ? "static" : "receiver"),
+2662                     method-&gt;signature()-&gt;as_C_string(), fingerprint-&gt;as_string(), insts_size);
+2663       tty-&gt;print_cr("c2i argument handler starts at %p", entry-&gt;get_c2i_entry());
+2664       if (Verbose || PrintStubCode) {
+2665         address first_pc = entry-&gt;base_address();
+2666         if (first_pc != NULL) {
+2667           Disassembler::decode(first_pc, first_pc + insts_size);
+2668           tty-&gt;cr();
+2669         }
+2670       }
+2671     }
+2672 #endif
+2673     // Add the entry only if the entry contains all required checks (see sharedRuntime_xxx.cpp)
+2674     // The checks are inserted only if -XX:+VerifyAdapterCalls is specified.
+2675     if (contains_all_checks || !VerifyAdapterCalls) {
+2676       _adapters-&gt;add(entry);
+2677     }
+2678   }
+2679   // Outside of the lock
+2680   if (new_adapter != NULL) {
+2681     char blob_id[256];
+2682     jio_snprintf(blob_id,
+2683                  sizeof(blob_id),
+2684                  "%s(%s)@" PTR_FORMAT,
+2685                  new_adapter-&gt;name(),
+2686                  fingerprint-&gt;as_string(),
+2687                  new_adapter-&gt;content_begin());
+2688     Forte::register_stub(blob_id, new_adapter-&gt;content_begin(), new_adapter-&gt;content_end());
+2689 
+2690     if (JvmtiExport::should_post_dynamic_code_generated()) {
+2691       JvmtiExport::post_dynamic_code_generated(blob_id, new_adapter-&gt;content_begin(), new_adapter-&gt;content_end());
+2692     }
+2693   }
+2694   return entry;
+2695 }
+2696 
+2697 address AdapterHandlerEntry::base_address() {
+2698   address base = _i2c_entry;
+2699   if (base == NULL)  base = _c2i_entry;
+2700   assert(base &lt;= _c2i_entry || _c2i_entry == NULL, "");
+2701   assert(base &lt;= _c2i_unverified_entry || _c2i_unverified_entry == NULL, "");
+2702   return base;
+2703 }
+2704 
+2705 void AdapterHandlerEntry::relocate(address new_base) {
+2706   address old_base = base_address();
+2707   assert(old_base != NULL, "");
+2708   ptrdiff_t delta = new_base - old_base;
+2709   if (_i2c_entry != NULL)
+2710     _i2c_entry += delta;
+2711   if (_c2i_entry != NULL)
+2712     _c2i_entry += delta;
+2713   if (_c2i_unverified_entry != NULL)
+2714     _c2i_unverified_entry += delta;
+2715   assert(base_address() == new_base, "");
+2716 }
+2717 
+2718 
+2719 void AdapterHandlerEntry::deallocate() {
+2720   delete _fingerprint;
+2721 #ifdef ASSERT
+2722   if (_saved_code) FREE_C_HEAP_ARRAY(unsigned char, _saved_code);
+2723 #endif
+2724 }
+2725 
+2726 
+2727 #ifdef ASSERT
+2728 // Capture the code before relocation so that it can be compared
+2729 // against other versions.  If the code is captured after relocation
+2730 // then relative instructions won't be equivalent.
+2731 void AdapterHandlerEntry::save_code(unsigned char* buffer, int length) {
+2732   _saved_code = NEW_C_HEAP_ARRAY(unsigned char, length, mtCode);
+2733   _saved_code_length = length;
+2734   memcpy(_saved_code, buffer, length);
+2735 }
+2736 
+2737 
+2738 bool AdapterHandlerEntry::compare_code(unsigned char* buffer, int length) {
+2739   if (length != _saved_code_length) {
+2740     return false;
+2741   }
+2742 
+2743   return (memcmp(buffer, _saved_code, length) == 0) ? true : false;
+2744 }
+2745 #endif
+2746 
+2747 
+2748 /**
+2749  * Create a native wrapper for this native method.  The wrapper converts the
+2750  * Java-compiled calling convention to the native convention, handles
+2751  * arguments, and transitions to native.  On return from the native we transition
+2752  * back to java blocking if a safepoint is in progress.
+2753  */
+2754 void AdapterHandlerLibrary::create_native_wrapper(const methodHandle&amp; method) {
+2755   ResourceMark rm;
+2756   nmethod* nm = NULL;
+2757 
+2758   assert(method-&gt;is_native(), "must be native");
+2759   assert(method-&gt;is_method_handle_intrinsic() ||
+2760          method-&gt;has_native_function(), "must have something valid to call!");
+2761 
+2762   {
+2763     // Perform the work while holding the lock, but perform any printing outside the lock
+2764     MutexLocker mu(AdapterHandlerLibrary_lock);
+2765     // See if somebody beat us to it
+2766     if (method-&gt;code() != NULL) {
+2767       return;
+2768     }
+2769 
+2770     const int compile_id = CompileBroker::assign_compile_id(method, CompileBroker::standard_entry_bci);
+2771     assert(compile_id &gt; 0, "Must generate native wrapper");
+2772 
+2773 
+2774     ResourceMark rm;
+2775     BufferBlob*  buf = buffer_blob(); // the temporary code buffer in CodeCache
+2776     if (buf != NULL) {
+2777       CodeBuffer buffer(buf);
+2778       double locs_buf[20];
+2779       buffer.insts()-&gt;initialize_shared_locs((relocInfo*)locs_buf, sizeof(locs_buf) / sizeof(relocInfo));
+2780       MacroAssembler _masm(&amp;buffer);
+2781 
+2782       // Fill in the signature array, for the calling-convention call.
+2783       const int total_args_passed = method-&gt;size_of_parameters();
+2784 
+2785       BasicType* sig_bt = NEW_RESOURCE_ARRAY(BasicType, total_args_passed);
+2786       VMRegPair*   regs = NEW_RESOURCE_ARRAY(VMRegPair, total_args_passed);
+2787       int i=0;
+2788       if (!method-&gt;is_static())  // Pass in receiver first
+2789         sig_bt[i++] = T_OBJECT;
+2790       SignatureStream ss(method-&gt;signature());
+2791       for (; !ss.at_return_type(); ss.next()) {
+2792         sig_bt[i++] = ss.type();  // Collect remaining bits of signature
+2793         if (ss.type() == T_LONG || ss.type() == T_DOUBLE)
+2794           sig_bt[i++] = T_VOID;   // Longs &amp; doubles take 2 Java slots
+2795       }
+2796       assert(i == total_args_passed, "");
+2797       BasicType ret_type = ss.type();
+2798 
+2799       // Now get the compiled-Java layout as input (or output) arguments.
+2800       // NOTE: Stubs for compiled entry points of method handle intrinsics
+2801       // are just trampolines so the argument registers must be outgoing ones.
+2802       const bool is_outgoing = method-&gt;is_method_handle_intrinsic();
+2803       int comp_args_on_stack = SharedRuntime::java_calling_convention(sig_bt, regs, total_args_passed, is_outgoing);
+2804 
+2805       // Generate the compiled-to-native wrapper code
+2806       nm = SharedRuntime::generate_native_wrapper(&amp;_masm, method, compile_id, sig_bt, regs, ret_type);
+2807 
+2808       if (nm != NULL) {
+2809         method-&gt;set_code(method, nm);
+2810 
+2811         DirectiveSet* directive = DirectivesStack::getDefaultDirective(CompileBroker::compiler(CompLevel_simple));
+2812         if (directive-&gt;PrintAssemblyOption) {
+2813           nm-&gt;print_code();
+2814         }
+2815         DirectivesStack::release(directive);
+2816       }
+2817     }
+2818   } // Unlock AdapterHandlerLibrary_lock
+2819 
+2820 
+2821   // Install the generated code.
+2822   if (nm != NULL) {
+2823     const char *msg = method-&gt;is_static() ? "(static)" : "";
+2824     CompileTask::print_ul(nm, msg);
+2825     if (PrintCompilation) {
+2826       ttyLocker ttyl;
+2827       CompileTask::print(tty, nm, msg);
+2828     }
+2829     nm-&gt;post_compiled_method_load_event();
+2830   }
+2831 }
+2832 
+2833 JRT_ENTRY_NO_ASYNC(void, SharedRuntime::block_for_jni_critical(JavaThread* thread))
+2834   assert(thread == JavaThread::current(), "must be");
+2835   // The code is about to enter a JNI lazy critical native method and
+2836   // _needs_gc is true, so if this thread is already in a critical
+2837   // section then just return, otherwise this thread should block
+2838   // until needs_gc has been cleared.
+2839   if (thread-&gt;in_critical()) {
+2840     return;
+2841   }
+2842   // Lock and unlock a critical section to give the system a chance to block
+2843   GCLocker::lock_critical(thread);
+2844   GCLocker::unlock_critical(thread);
+2845 JRT_END
+2846 
+2847 // -------------------------------------------------------------------------
+2848 // Java-Java calling convention
+2849 // (what you use when Java calls Java)
+2850 
+2851 //------------------------------name_for_receiver----------------------------------
+2852 // For a given signature, return the VMReg for parameter 0.
+2853 VMReg SharedRuntime::name_for_receiver() {
+2854   VMRegPair regs;
+2855   BasicType sig_bt = T_OBJECT;
+2856   (void) java_calling_convention(&amp;sig_bt, &amp;regs, 1, true);
+2857   // Return argument 0 register.  In the LP64 build pointers
+2858   // take 2 registers, but the VM wants only the 'main' name.
+2859   return regs.first();
+2860 }
+2861 
+2862 VMRegPair *SharedRuntime::find_callee_arguments(Symbol* sig, bool has_receiver, bool has_appendix, int* arg_size) {
+2863   // This method is returning a data structure allocating as a
+2864   // ResourceObject, so do not put any ResourceMarks in here.
+2865   char *s = sig-&gt;as_C_string();
+2866   int len = (int)strlen(s);
+2867   s++; len--;                   // Skip opening paren
+2868 
+2869   BasicType *sig_bt = NEW_RESOURCE_ARRAY(BasicType, 256);
+2870   VMRegPair *regs = NEW_RESOURCE_ARRAY(VMRegPair, 256);
+2871   int cnt = 0;
+2872   if (has_receiver) {
+2873     sig_bt[cnt++] = T_OBJECT; // Receiver is argument 0; not in signature
+2874   }
+2875 
+2876   while (*s != ')') {          // Find closing right paren
+2877     switch (*s++) {            // Switch on signature character
+2878     case 'B': sig_bt[cnt++] = T_BYTE;    break;
+2879     case 'C': sig_bt[cnt++] = T_CHAR;    break;
+2880     case 'D': sig_bt[cnt++] = T_DOUBLE;  sig_bt[cnt++] = T_VOID; break;
+2881     case 'F': sig_bt[cnt++] = T_FLOAT;   break;
+2882     case 'I': sig_bt[cnt++] = T_INT;     break;
+2883     case 'J': sig_bt[cnt++] = T_LONG;    sig_bt[cnt++] = T_VOID; break;
+2884     case 'S': sig_bt[cnt++] = T_SHORT;   break;
+2885     case 'Z': sig_bt[cnt++] = T_BOOLEAN; break;
+2886     case 'V': sig_bt[cnt++] = T_VOID;    break;
+2887     case 'L':                   // Oop
+2888       while (*s++ != ';');   // Skip signature
+2889       sig_bt[cnt++] = T_OBJECT;
+2890       break;
+2891     case '[': {                 // Array
+2892       do {                      // Skip optional size
+2893         while (*s &gt;= '0' &amp;&amp; *s &lt;= '9') s++;
+2894       } while (*s++ == '[');   // Nested arrays?
+2895       // Skip element type
+2896       if (s[-1] == 'L')
+2897         while (*s++ != ';'); // Skip signature
+2898       sig_bt[cnt++] = T_ARRAY;
+2899       break;
+2900     }
+2901     default : ShouldNotReachHere();
+2902     }
+2903   }
+2904 
+2905   if (has_appendix) {
+2906     sig_bt[cnt++] = T_OBJECT;
+2907   }
+2908 
+2909   assert(cnt &lt; 256, "grow table size");
+2910 
+2911   int comp_args_on_stack;
+2912   comp_args_on_stack = java_calling_convention(sig_bt, regs, cnt, true);
+2913 
+2914   // the calling convention doesn't count out_preserve_stack_slots so
+2915   // we must add that in to get "true" stack offsets.
+2916 
+2917   if (comp_args_on_stack) {
+2918     for (int i = 0; i &lt; cnt; i++) {
+2919       VMReg reg1 = regs[i].first();
+2920       if (reg1-&gt;is_stack()) {
+2921         // Yuck
+2922         reg1 = reg1-&gt;bias(out_preserve_stack_slots());
+2923       }
+2924       VMReg reg2 = regs[i].second();
+2925       if (reg2-&gt;is_stack()) {
+2926         // Yuck
+2927         reg2 = reg2-&gt;bias(out_preserve_stack_slots());
+2928       }
+2929       regs[i].set_pair(reg2, reg1);
+2930     }
+2931   }
+2932 
+2933   // results
+2934   *arg_size = cnt;
+2935   return regs;
+2936 }
+2937 
+2938 // OSR Migration Code
+2939 //
+2940 // This code is used convert interpreter frames into compiled frames.  It is
+2941 // called from very start of a compiled OSR nmethod.  A temp array is
+2942 // allocated to hold the interesting bits of the interpreter frame.  All
+2943 // active locks are inflated to allow them to move.  The displaced headers and
+2944 // active interpreter locals are copied into the temp buffer.  Then we return
+2945 // back to the compiled code.  The compiled code then pops the current
+2946 // interpreter frame off the stack and pushes a new compiled frame.  Then it
+2947 // copies the interpreter locals and displaced headers where it wants.
+2948 // Finally it calls back to free the temp buffer.
+2949 //
+2950 // All of this is done NOT at any Safepoint, nor is any safepoint or GC allowed.
+2951 
+2952 JRT_LEAF(intptr_t*, SharedRuntime::OSR_migration_begin( JavaThread *thread) )
+2953 
+2954   //
+2955   // This code is dependent on the memory layout of the interpreter local
+2956   // array and the monitors. On all of our platforms the layout is identical
+2957   // so this code is shared. If some platform lays the their arrays out
+2958   // differently then this code could move to platform specific code or
+2959   // the code here could be modified to copy items one at a time using
+2960   // frame accessor methods and be platform independent.
+2961 
+2962   frame fr = thread-&gt;last_frame();
+2963   assert(fr.is_interpreted_frame(), "");
+2964   assert(fr.interpreter_frame_expression_stack_size()==0, "only handle empty stacks");
+2965 
+2966   // Figure out how many monitors are active.
+2967   int active_monitor_count = 0;
+2968   for (BasicObjectLock *kptr = fr.interpreter_frame_monitor_end();
+2969        kptr &lt; fr.interpreter_frame_monitor_begin();
+2970        kptr = fr.next_monitor_in_interpreter_frame(kptr) ) {
+2971     if (kptr-&gt;obj() != NULL) active_monitor_count++;
+2972   }
+2973 
+2974   // QQQ we could place number of active monitors in the array so that compiled code
+2975   // could double check it.
+2976 
+2977   Method* moop = fr.interpreter_frame_method();
+2978   int max_locals = moop-&gt;max_locals();
+2979   // Allocate temp buffer, 1 word per local &amp; 2 per active monitor
+2980   int buf_size_words = max_locals + active_monitor_count * BasicObjectLock::size();
+2981   intptr_t *buf = NEW_C_HEAP_ARRAY(intptr_t,buf_size_words, mtCode);
+2982 
+2983   // Copy the locals.  Order is preserved so that loading of longs works.
+2984   // Since there's no GC I can copy the oops blindly.
+2985   assert(sizeof(HeapWord)==sizeof(intptr_t), "fix this code");
+2986   Copy::disjoint_words((HeapWord*)fr.interpreter_frame_local_at(max_locals-1),
+2987                        (HeapWord*)&amp;buf[0],
+2988                        max_locals);
+2989 
+2990   // Inflate locks.  Copy the displaced headers.  Be careful, there can be holes.
+2991   int i = max_locals;
+2992   for (BasicObjectLock *kptr2 = fr.interpreter_frame_monitor_end();
+2993        kptr2 &lt; fr.interpreter_frame_monitor_begin();
+2994        kptr2 = fr.next_monitor_in_interpreter_frame(kptr2) ) {
+2995     if (kptr2-&gt;obj() != NULL) {         // Avoid 'holes' in the monitor array
+2996       BasicLock *lock = kptr2-&gt;lock();
+2997       // Inflate so the displaced header becomes position-independent
+2998       if (lock-&gt;displaced_header()-&gt;is_unlocked())
+2999         ObjectSynchronizer::inflate_helper(kptr2-&gt;obj());
+3000       // Now the displaced header is free to move
+3001       buf[i++] = (intptr_t)lock-&gt;displaced_header();
+3002       buf[i++] = cast_from_oop&lt;intptr_t&gt;(kptr2-&gt;obj());
+3003     }
+3004   }
+3005   assert(i - max_locals == active_monitor_count*2, "found the expected number of monitors");
+3006 
+3007   return buf;
+3008 JRT_END
+3009 
+3010 JRT_LEAF(void, SharedRuntime::OSR_migration_end( intptr_t* buf) )
+3011   FREE_C_HEAP_ARRAY(intptr_t, buf);
+3012 JRT_END
+3013 
+3014 bool AdapterHandlerLibrary::contains(const CodeBlob* b) {
+3015   AdapterHandlerTableIterator iter(_adapters);
+3016   while (iter.has_next()) {
+3017     AdapterHandlerEntry* a = iter.next();
+3018     if (b == CodeCache::find_blob(a-&gt;get_i2c_entry())) return true;
+3019   }
+3020   return false;
+3021 }
+3022 
+3023 void AdapterHandlerLibrary::print_handler_on(outputStream* st, const CodeBlob* b) {
+3024   AdapterHandlerTableIterator iter(_adapters);
+3025   while (iter.has_next()) {
+3026     AdapterHandlerEntry* a = iter.next();
+3027     if (b == CodeCache::find_blob(a-&gt;get_i2c_entry())) {
+3028       st-&gt;print("Adapter for signature: ");
+3029       a-&gt;print_adapter_on(tty);
+3030       return;
+3031     }
+3032   }
+3033   assert(false, "Should have found handler");
+3034 }
+3035 
+3036 void AdapterHandlerEntry::print_adapter_on(outputStream* st) const {
+3037   st-&gt;print_cr("AHE@" INTPTR_FORMAT ": %s i2c: " INTPTR_FORMAT " c2i: " INTPTR_FORMAT " c2iUV: " INTPTR_FORMAT,
+3038                p2i(this), fingerprint()-&gt;as_string(),
+3039                p2i(get_i2c_entry()), p2i(get_c2i_entry()), p2i(get_c2i_unverified_entry()));
+3040 
+3041 }
+3042 
+3043 #if INCLUDE_CDS
+3044 
+3045 void CDSAdapterHandlerEntry::init() {
+3046   assert(DumpSharedSpaces, "used during dump time only");
+3047   _c2i_entry_trampoline = (address)MetaspaceShared::misc_code_space_alloc(SharedRuntime::trampoline_size());
+3048   _adapter_trampoline = (AdapterHandlerEntry**)MetaspaceShared::misc_code_space_alloc(sizeof(AdapterHandlerEntry*));
+3049 };
+3050 
+3051 #endif // INCLUDE_CDS
+3052 
+3053 
+3054 #ifndef PRODUCT
+3055 
+3056 void AdapterHandlerLibrary::print_statistics() {
+3057   _adapters-&gt;print_statistics();
+3058 }
+3059 
+3060 #endif /* PRODUCT */
+3061 
+3062 JRT_LEAF(void, SharedRuntime::enable_stack_reserved_zone(JavaThread* thread))
+3063   assert(thread-&gt;is_Java_thread(), "Only Java threads have a stack reserved zone");
+3064   if (thread-&gt;stack_reserved_zone_disabled()) {
+3065   thread-&gt;enable_stack_reserved_zone();
+3066   }
+3067   thread-&gt;set_reserved_stack_activation(thread-&gt;stack_base());
+3068 JRT_END
+3069 
+3070 frame SharedRuntime::look_for_reserved_stack_annotated_method(JavaThread* thread, frame fr) {
+3071   ResourceMark rm(thread);
+3072   frame activation;
+3073   CompiledMethod* nm = NULL;
+3074   int count = 1;
+3075 
+3076   assert(fr.is_java_frame(), "Must start on Java frame");
+3077 
+3078   while (true) {
+3079     Method* method = NULL;
+3080     bool found = false;
+3081     if (fr.is_interpreted_frame()) {
+3082       method = fr.interpreter_frame_method();
+3083       if (method != NULL &amp;&amp; method-&gt;has_reserved_stack_access()) {
+3084         found = true;
+3085       }
+3086     } else {
+3087       CodeBlob* cb = fr.cb();
+3088       if (cb != NULL &amp;&amp; cb-&gt;is_compiled()) {
+3089         nm = cb-&gt;as_compiled_method();
+3090         method = nm-&gt;method();
+3091         // scope_desc_near() must be used, instead of scope_desc_at() because on
+3092         // SPARC, the pcDesc can be on the delay slot after the call instruction.
+3093         for (ScopeDesc *sd = nm-&gt;scope_desc_near(fr.pc()); sd != NULL; sd = sd-&gt;sender()) {
+3094           method = sd-&gt;method();
+3095           if (method != NULL &amp;&amp; method-&gt;has_reserved_stack_access()) {
+3096             found = true;
+3097       }
+3098     }
+3099       }
+3100     }
+3101     if (found) {
+3102       activation = fr;
+3103       warning("Potentially dangerous stack overflow in "
+3104               "ReservedStackAccess annotated method %s [%d]",
+3105               method-&gt;name_and_sig_as_C_string(), count++);
+3106       EventReservedStackActivation event;
+3107       if (event.should_commit()) {
+3108         event.set_method(method);
+3109         event.commit();
+3110       }
+3111     }
+3112     if (fr.is_first_java_frame()) {
+3113       break;
+3114     } else {
+3115       fr = fr.java_sender();
+3116     }
+3117   }
+3118   return activation;
+3119 }
+3120 
+3121 void SharedRuntime::on_slowpath_allocation_exit(JavaThread* thread) {
+3122   // After any safepoint, just before going back to compiled code,
+3123   // we inform the GC that we will be doing initializing writes to
+3124   // this object in the future without emitting card-marks, so
+3125   // GC may take any compensating steps.
+3126 
+3127   oop new_obj = thread-&gt;vm_result();
+3128   if (new_obj == NULL) return;
+3129 
+3130   BarrierSet *bs = BarrierSet::barrier_set();
+3131   bs-&gt;on_slowpath_allocation_exit(thread, new_obj);
+3132 }
+</pre></body></html>
