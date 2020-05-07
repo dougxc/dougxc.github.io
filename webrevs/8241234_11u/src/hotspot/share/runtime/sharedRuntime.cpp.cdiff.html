@@ -83,9 +83,25 @@ hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
 <center><a href='../../../../src/hotspot/share/jvmci/jvmciRuntime.cpp.cdiff.html' target='_top'>&lt prev</a> <a href='../../../../index.html' target='_top'>index</a> <a href='../../../../src/hotspot/share/runtime/sharedRuntime.hpp.cdiff.html' target='_top'>next &gt</a></center>
 <h2>src/hotspot/share/runtime/sharedRuntime.cpp</h2>
         <a class="print" href="javascript:print()">Print this page</a>
-<pre>rev <a href="https://bugs.openjdk.java.net/browse/JDK-52917">52917</a> : <a href="https://bugs.openjdk.java.net/browse/JDK-8241234">8241234</a>: Unify monitor enter/exit runtime entries.</pre>
+<pre></pre>
         <pre>
-<hr /><span class="oldmarker">*** 1980,1992 ****</span>
+<hr /><span class="oldmarker">*** 1,7 ****</span>
+  /*
+<span class="changed">!  * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.</span>
+   * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   *
+   * This code is free software; you can redistribute it and/or modify it
+   * under the terms of the GNU General Public License version 2 only, as
+   * published by the Free Software Foundation.
+<span class="newmarker">--- 1,7 ----</span>
+  /*
+<span class="changed">!  * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.</span>
+   * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   *
+   * This code is free software; you can redistribute it and/or modify it
+   * under the terms of the GNU General Public License version 2 only, as
+   * published by the Free Software Foundation.
+<hr /><span class="oldmarker">*** 1980,2051 ****</span>
   
   JRT_LEAF(void, SharedRuntime::reguard_yellow_pages())
     (void) JavaThread::current()-&gt;reguard_stack();
@@ -97,23 +113,14 @@ hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
     if (!SafepointSynchronize::is_synchronizing()) {
       // Only try quick_enter() if we're not trying to reach a safepoint
       // so that the calling thread reaches the safepoint more quickly.
-      if (ObjectSynchronizer::quick_enter(_obj, thread, lock)) return;
+<span class="changed">!     if (ObjectSynchronizer::quick_enter(_obj, thread, lock)) return;</span>
     }
-<span class="newmarker">--- 1980,1991 ----</span>
-  
-  JRT_LEAF(void, SharedRuntime::reguard_yellow_pages())
-    (void) JavaThread::current()-&gt;reguard_stack();
-  JRT_END
-  
-<span class="changed">! void SharedRuntime::monitor_enter_helper(oopDesc* _obj, BasicLock* lock, JavaThread* thread,</span>
-<span class="changed">!                                          bool use_inlined_fast_locking) {</span>
-    if (!SafepointSynchronize::is_synchronizing()) {
-      // Only try quick_enter() if we're not trying to reach a safepoint
-      // so that the calling thread reaches the safepoint more quickly.
-      if (ObjectSynchronizer::quick_enter(_obj, thread, lock)) return;
-    }
-<hr /><span class="oldmarker">*** 1998,2051 ****</span>
-    oop obj(_obj);
+    // NO_ASYNC required because an async exception on the state transition destructor
+    // would leave you with the lock held and it would never be released.
+    // The normal monitorenter NullPointerException is thrown without acquiring a lock
+    // and the model is that an exception implies the method failed.
+    JRT_BLOCK_NO_ASYNC
+<span class="changed">!   oop obj(_obj);</span>
     if (PrintBiasedLockingStatistics) {
       Atomic::inc(BiasedLocking::slow_path_entry_count_addr());
     }
@@ -154,7 +161,7 @@ hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
 <span class="changed">!   {</span>
       // Exit must be non-blocking, and therefore no exceptions can be thrown.
       EXCEPTION_MARK;
-<span class="changed">!     ObjectSynchronizer::slow_exit(obj, lock, THREAD);</span>
+      ObjectSynchronizer::slow_exit(obj, lock, THREAD);
     }
   
 <span class="changed">! #ifdef MIGHT_HAVE_PENDING</span>
@@ -167,13 +174,29 @@ hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
   #ifndef PRODUCT
   
   void SharedRuntime::print_statistics() {
-<span class="newmarker">--- 1997,2043 ----</span>
-    oop obj(_obj);
+<span class="newmarker">--- 1980,2041 ----</span>
+  
+  JRT_LEAF(void, SharedRuntime::reguard_yellow_pages())
+    (void) JavaThread::current()-&gt;reguard_stack();
+  JRT_END
+  
+<span class="changed">! void SharedRuntime::monitor_enter_helper(oopDesc* obj, BasicLock* lock, JavaThread* thread,</span>
+<span class="changed">!                                          bool use_inlined_fast_locking) {</span>
+    if (!SafepointSynchronize::is_synchronizing()) {
+      // Only try quick_enter() if we're not trying to reach a safepoint
+      // so that the calling thread reaches the safepoint more quickly.
+<span class="changed">!     if (ObjectSynchronizer::quick_enter(obj, thread, lock)) return;</span>
+    }
+    // NO_ASYNC required because an async exception on the state transition destructor
+    // would leave you with the lock held and it would never be released.
+    // The normal monitorenter NullPointerException is thrown without acquiring a lock
+    // and the model is that an exception implies the method failed.
+    JRT_BLOCK_NO_ASYNC
+<span class="changed">! </span>
     if (PrintBiasedLockingStatistics) {
       Atomic::inc(BiasedLocking::slow_path_entry_count_addr());
     }
     Handle h_obj(THREAD, obj);
-<span class="new">+   assert(oopDesc::is_oop(h_obj()), "must be NULL or an object");</span>
     if (UseBiasedLocking) {
       // Retry fast entry if bias is revoked to avoid unnecessary inflation
       ObjectSynchronizer::fast_enter(h_obj, lock, true, CHECK);
@@ -189,26 +212,25 @@ hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
 <span class="changed">! }</span>
   
 <span class="changed">! // Handles the uncommon case in locking, i.e., contention or an inflated lock.</span>
-<span class="changed">! JRT_BLOCK_ENTRY(void, SharedRuntime::complete_monitor_locking_C(oopDesc* _obj, BasicLock* lock, JavaThread* thread))</span>
-<span class="changed">!   SharedRuntime::monitor_enter_helper(_obj, lock, thread, true);</span>
+<span class="changed">! JRT_BLOCK_ENTRY(void, SharedRuntime::complete_monitor_locking_C(oopDesc* obj, BasicLock* lock, JavaThread* thread))</span>
+<span class="changed">!   SharedRuntime::monitor_enter_helper(obj, lock, thread, true);</span>
 <span class="changed">! JRT_END</span>
   
-<span class="changed">! void SharedRuntime::monitor_exit_helper(oop _obj, BasicLock* lock, JavaThread* thread,</span>
+<span class="changed">! void SharedRuntime::monitor_exit_helper(oopDesc* obj, BasicLock* lock, JavaThread* thread,</span>
 <span class="changed">!                                         bool use_inlined_fast_locking) {</span>
 <span class="changed">!   assert(JavaThread::current() == thread, "invariant");</span>
     // Exit must be non-blocking, and therefore no exceptions can be thrown.
     EXCEPTION_MARK;
-<span class="changed">!   if (use_inlined_fast_locking) {</span>
-<span class="changed">!     // When using fast locking, the compiled code has already tried the fast case</span>
-<span class="changed">!     ObjectSynchronizer::slow_exit(_obj, lock, THREAD);</span>
-<span class="changed">!   } else {</span>
-<span class="changed">!     ObjectSynchronizer::fast_exit(_obj, lock, THREAD);</span>
+<span class="new">+   if (use_inlined_fast_locking) {</span>
+<span class="new">+     // When using fast locking, the compiled code has already tried the fast case</span>
+      ObjectSynchronizer::slow_exit(obj, lock, THREAD);
+<span class="new">+   } else {</span>
+<span class="new">+     ObjectSynchronizer::fast_exit(obj, lock, THREAD);</span>
     }
 <span class="new">+ }</span>
   
 <span class="changed">! // Handles the uncommon cases of monitor unlocking in compiled code</span>
-<span class="changed">! JRT_LEAF(void, SharedRuntime::complete_monitor_unlocking_C(oopDesc* _obj, BasicLock* lock, JavaThread* thread))</span>
-<span class="changed">!   oop obj(_obj);</span>
+<span class="changed">! JRT_LEAF(void, SharedRuntime::complete_monitor_unlocking_C(oopDesc* obj, BasicLock* lock, JavaThread* thread))</span>
 <span class="changed">!   SharedRuntime::monitor_exit_helper(obj, lock, thread, true);</span>
   JRT_END
   
