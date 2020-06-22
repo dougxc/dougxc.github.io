@@ -1,0 +1,178 @@
+--- old/src/hotspot/share/jvmci/jvmciCompilerToVM.cpp	2020-06-22 11:53:41.000000000 +0200
++++ new/src/hotspot/share/jvmci/jvmciCompilerToVM.cpp	2020-06-22 11:53:40.000000000 +0200
+@@ -1034,7 +1034,7 @@
+ 
+   JavaArgumentUnboxer jap(signature, &jca, (arrayOop) JNIHandles::resolve(args), mh->is_static());
+   JavaValue result(jap.return_type());
+-  jca.set_alternative_target(nm);
++  jca.set_alternative_target(Handle(THREAD, JNIHandles::resolve(nmethod_mirror.as_jobject())));
+   JavaCalls::call(&result, mh, &jca, CHECK_NULL);
+ 
+   if (jap.return_type() == T_VOID) {
+--- old/src/hotspot/share/runtime/javaCalls.cpp	2020-06-22 11:53:42.000000000 +0200
++++ new/src/hotspot/share/runtime/javaCalls.cpp	2020-06-22 11:53:42.000000000 +0200
+@@ -30,6 +30,9 @@
+ #include "compiler/compileBroker.hpp"
+ #include "interpreter/interpreter.hpp"
+ #include "interpreter/linkResolver.hpp"
++#if INCLUDE_JVMCI
++#include "jvmci/jvmciJavaClasses.hpp"
++#endif
+ #include "memory/universe.hpp"
+ #include "oops/method.inline.hpp"
+ #include "oops/oop.inline.hpp"
+@@ -347,16 +350,14 @@
+   assert(!thread->handle_area()->no_handle_mark_active(), "cannot call out to Java here");
+ 
+ #if INCLUDE_JVMCI
+-  // Gets the nmethod (if any) that should be called instead of normal target
+-  nmethod* alternative_target = args->alternative_target();
+-  if (alternative_target == NULL) {
++  // Gets the alternative target (if any) that should be called
++  Handle alternative_target = args->alternative_target();
++  if (alternative_target.is_null()) {
+ #endif
+-// Verify the arguments
+-
+-  if (CheckJNICalls)  {
+-    args->verify(method, result->get_type());
+-  }
+-  else debug_only(args->verify(method, result->get_type()));
++    // Verify the arguments
++    if (DEBUG_ONLY(true ||) CheckJNICalls)  {
++      args->verify(method, result->get_type());
++    }
+ #if INCLUDE_JVMCI
+   }
+ #else
+@@ -414,17 +415,6 @@
+     os::map_stack_shadow_pages(sp);
+   }
+ 
+-#if INCLUDE_JVMCI
+-  if (alternative_target != NULL) {
+-    if (alternative_target->is_alive() && !alternative_target->is_unloading()) {
+-      thread->set_jvmci_alternate_call_target(alternative_target->verified_entry_point());
+-      entry_point = method->adapter()->get_i2c_entry();
+-    } else {
+-      THROW(vmSymbols::jdk_vm_ci_code_InvalidInstalledCodeException());
+-    }
+-  }
+-#endif
+-
+   // do call
+   { JavaCallWrapper link(method, receiver, result, CHECK);
+     { HandleMark hm(thread);  // HandleMark used by HandleMarkCleaner
+@@ -433,27 +423,52 @@
+       // the call to call_stub, the optimizer produces wrong code.
+       intptr_t* result_val_address = (intptr_t*)(result->get_value_addr());
+       intptr_t* parameter_address = args->parameters();
+-
+-      StubRoutines::call_stub()(
+-        (address)&link,
+-        // (intptr_t*)&(result->_value), // see NOTE above (compiler problem)
+-        result_val_address,          // see NOTE above (compiler problem)
+-        result_type,
+-        method(),
+-        entry_point,
+-        parameter_address,
+-        args->size_of_parameters(),
+-        CHECK
+-      );
+-
+-      result = link.result();  // circumvent MS C++ 5.0 compiler bug (result is clobbered across call)
+-      // Preserve oop return value across possible gc points
+-      if (oop_result_flag) {
+-        thread->set_vm_result((oop) result->get_jobject());
++#if INCLUDE_JVMCI
++      if (!alternative_target.is_null()) {
++        // Must extract verified entry point from HotSpotNmethod after VM to Java
++        // transition in JavaCallWrapper constructor so that it is safe with
++        // respect to nmethod sweeping.
++        address verified_entry_point = (address) HotSpotJVMCI::InstalledCode::entryPoint(NULL, alternative_target());
++        if (verified_entry_point != 0) {
++          thread->set_jvmci_alternate_call_target(verified_entry_point);
++          entry_point = method->adapter()->get_i2c_entry();
++        } else {
++          // Sweeper made nmethod non-entrant or zombie at VM to Java transition
++          entry_point = NULL;
++        }
++      }
++      if (entry_point != NULL) {
++#endif
++        StubRoutines::call_stub()(
++          (address)&link,
++          // (intptr_t*)&(result->_value), // see NOTE above (compiler problem)
++          result_val_address,          // see NOTE above (compiler problem)
++          result_type,
++          method(),
++          entry_point,
++          parameter_address,
++          args->size_of_parameters(),
++          CHECK
++        );
++
++        result = link.result();  // circumvent MS C++ 5.0 compiler bug (result is clobbered across call)
++        // Preserve oop return value across possible gc points
++        if (oop_result_flag) {
++          thread->set_vm_result((oop) result->get_jobject());
++        }
+       }
++#if INCLUDE_JVMCI
+     }
++#endif
+   } // Exit JavaCallWrapper (can block - potential return oop must be preserved)
+ 
++  #if INCLUDE_JVMCI
++    if (entry_point == NULL) {
++      // Cannot creation exception until back in VM from Java
++      THROW(vmSymbols::jdk_vm_ci_code_InvalidInstalledCodeException());
++    }
++  #endif
++
+   // Check if a thread stop or suspend should be executed
+   // The following assert was not realistic.  Thread.stop can set that bit at any moment.
+   //assert(!thread->has_special_runtime_exit_condition(), "no async. exceptions should be installed");
+--- old/src/hotspot/share/runtime/javaCalls.hpp	2020-06-22 11:53:43.000000000 +0200
++++ new/src/hotspot/share/runtime/javaCalls.hpp	2020-06-22 11:53:43.000000000 +0200
+@@ -88,7 +88,10 @@
+   int         _size;
+   int         _max_size;
+   bool        _start_at_zero;      // Support late setting of receiver
+-  JVMCI_ONLY(nmethod*    _alternative_target;) // Nmethod that should be called instead of normal target
++#if INCLUDE_JVMCI
++  Handle      _alternative_target; // HotSpotNmethod wrapping an nmethod whose verified entry point
++                                   // should be called instead of the normal target
++#endif
+ 
+   void initialize() {
+     // Starts at first element to support set_receiver.
+@@ -98,7 +101,6 @@
+     _max_size = _default_size;
+     _size = 0;
+     _start_at_zero = false;
+-    JVMCI_ONLY(_alternative_target = NULL;)
+   }
+ 
+   // Helper for push_oop and the like.  The value argument is a
+@@ -138,18 +140,17 @@
+       _max_size = max_size;
+       _size = 0;
+       _start_at_zero = false;
+-      JVMCI_ONLY(_alternative_target = NULL;)
+     } else {
+       initialize();
+     }
+   }
+ 
+ #if INCLUDE_JVMCI
+-  void set_alternative_target(nmethod* target) {
++  void set_alternative_target(Handle target) {
+     _alternative_target = target;
+   }
+ 
+-  nmethod* alternative_target() {
++  Handle alternative_target() {
+     return _alternative_target;
+   }
+ #endif
