@@ -1,0 +1,815 @@
+<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head><meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="-1" />
+<!--
+   Note to customizers: the body of the webrev is IDed as SUNWwebrev
+   to allow easy overriding by users of webrev via the userContent.css
+   mechanism available in some browsers.
+
+   For example, to have all "removed" information be red instead of
+   brown, set a rule in your userContent.css file like:
+
+       body#SUNWwebrev span.removed { color: red ! important; }
+-->
+<style type="text/css" media="screen">
+body {
+    background-color: #eeeeee;
+}
+hr {
+    border: none 0;
+    border-top: 1px solid #aaa;
+    height: 1px;
+}
+div.summary {
+    font-size: .8em;
+    border-bottom: 1px solid #aaa;
+    padding-left: 1em;
+    padding-right: 1em;
+}
+div.summary h2 {
+    margin-bottom: 0.3em;
+}
+div.summary table th {
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+span.lineschanged {
+    font-size: 0.7em;
+}
+span.oldmarker {
+    color: red;
+    font-size: large;
+    font-weight: bold;
+}
+span.newmarker {
+    color: green;
+    font-size: large;
+    font-weight: bold;
+}
+span.removed {
+    color: brown;
+}
+span.changed {
+    color: blue;
+}
+span.new {
+    color: blue;
+    font-weight: bold;
+}
+a.print { font-size: x-small; }
+
+</style>
+
+<style type="text/css" media="print">
+pre { font-size: 0.8em; font-family: courier, monospace; }
+span.removed { color: #444; font-style: italic }
+span.changed { font-weight: bold; }
+span.new { font-weight: bold; }
+span.newmarker { font-size: 1.2em; font-weight: bold; }
+span.oldmarker { font-size: 1.2em; font-weight: bold; }
+a.print {display: none}
+hr { border: none 0; border-top: 1px solid #aaa; height: 1px; }
+</style>
+
+    <script type="text/javascript" src="../../../../ancnav.js"></script>
+    </head>
+    <body id="SUNWwebrev" onkeypress="keypress(event);">
+    <a name="0"></a>
+    <pre></pre><hr></hr>
+<pre>
+   1 /*
+   2  * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+   3  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+   4  *
+   5  * This code is free software; you can redistribute it and/or modify it
+   6  * under the terms of the GNU General Public License version 2 only, as
+   7  * published by the Free Software Foundation.
+   8  *
+   9  * This code is distributed in the hope that it will be useful, but WITHOUT
+  10  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  11  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+  12  * version 2 for more details (a copy is included in the LICENSE file that
+  13  * accompanied this code).
+  14  *
+  15  * You should have received a copy of the GNU General Public License version
+  16  * 2 along with this work; if not, write to the Free Software Foundation,
+  17  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+  18  *
+  19  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+  20  * or visit www.oracle.com if you need additional information or have any
+  21  * questions.
+  22  *
+  23  */
+  24 
+  25 #include "precompiled.hpp"
+  26 #include "classfile/systemDictionary.hpp"
+  27 #include "classfile/vmSymbols.hpp"
+  28 #include "code/nmethod.hpp"
+  29 #include "compiler/compileBroker.hpp"
+  30 #include "interpreter/interpreter.hpp"
+  31 #include "interpreter/linkResolver.hpp"
+<a name="1" id="anc1"></a>
+
+
+  32 #include "memory/universe.hpp"
+  33 #include "oops/method.inline.hpp"
+  34 #include "oops/oop.inline.hpp"
+  35 #include "prims/jniCheck.hpp"
+  36 #include "runtime/compilationPolicy.hpp"
+  37 #include "runtime/handles.inline.hpp"
+  38 #include "runtime/interfaceSupport.inline.hpp"
+  39 #include "runtime/javaCalls.hpp"
+  40 #include "runtime/jniHandles.inline.hpp"
+  41 #include "runtime/mutexLocker.hpp"
+  42 #include "runtime/os.inline.hpp"
+  43 #include "runtime/sharedRuntime.hpp"
+  44 #include "runtime/signature.hpp"
+  45 #include "runtime/stubRoutines.hpp"
+  46 #include "runtime/thread.inline.hpp"
+  47 
+  48 // -----------------------------------------------------
+  49 // Implementation of JavaCallWrapper
+  50 
+  51 JavaCallWrapper::JavaCallWrapper(const methodHandle&amp; callee_method, Handle receiver, JavaValue* result, TRAPS) {
+  52   JavaThread* thread = (JavaThread *)THREAD;
+  53   bool clear_pending_exception = true;
+  54 
+  55   guarantee(thread-&gt;is_Java_thread(), "crucial check - the VM thread cannot and must not escape to Java code");
+  56   assert(!thread-&gt;owns_locks(), "must release all locks when leaving VM");
+  57   guarantee(thread-&gt;can_call_java(), "cannot make java calls from the native compiler");
+  58   _result   = result;
+  59 
+  60   // Allocate handle block for Java code. This must be done before we change thread_state to _thread_in_Java_or_stub,
+  61   // since it can potentially block.
+  62   JNIHandleBlock* new_handles = JNIHandleBlock::allocate_block(thread);
+  63 
+  64   // After this, we are official in JavaCode. This needs to be done before we change any of the thread local
+  65   // info, since we cannot find oops before the new information is set up completely.
+  66   ThreadStateTransition::transition(thread, _thread_in_vm, _thread_in_Java);
+  67 
+  68   // Make sure that we handle asynchronous stops and suspends _before_ we clear all thread state
+  69   // in JavaCallWrapper::JavaCallWrapper(). This way, we can decide if we need to do any pd actions
+  70   // to prepare for stop/suspend (flush register windows on sparcs, cache sp, or other state).
+  71   if (thread-&gt;has_special_runtime_exit_condition()) {
+  72     thread-&gt;handle_special_runtime_exit_condition();
+  73     if (HAS_PENDING_EXCEPTION) {
+  74       clear_pending_exception = false;
+  75     }
+  76   }
+  77 
+  78 
+  79   // Make sure to set the oop's after the thread transition - since we can block there. No one is GC'ing
+  80   // the JavaCallWrapper before the entry frame is on the stack.
+  81   _callee_method = callee_method();
+  82   _receiver = receiver();
+  83 
+  84 #ifdef CHECK_UNHANDLED_OOPS
+  85   THREAD-&gt;allow_unhandled_oop(&amp;_receiver);
+  86 #endif // CHECK_UNHANDLED_OOPS
+  87 
+  88   _thread       = (JavaThread *)thread;
+  89   _handles      = _thread-&gt;active_handles();    // save previous handle block &amp; Java frame linkage
+  90 
+  91   // For the profiler, the last_Java_frame information in thread must always be in
+  92   // legal state. We have no last Java frame if last_Java_sp == NULL so
+  93   // the valid transition is to clear _last_Java_sp and then reset the rest of
+  94   // the (platform specific) state.
+  95 
+  96   _anchor.copy(_thread-&gt;frame_anchor());
+  97   _thread-&gt;frame_anchor()-&gt;clear();
+  98 
+  99   debug_only(_thread-&gt;inc_java_call_counter());
+ 100   _thread-&gt;set_active_handles(new_handles);     // install new handle block and reset Java frame linkage
+ 101 
+ 102   assert (_thread-&gt;thread_state() != _thread_in_native, "cannot set native pc to NULL");
+ 103 
+ 104   // clear any pending exception in thread (native calls start with no exception pending)
+ 105   if(clear_pending_exception) {
+ 106     _thread-&gt;clear_pending_exception();
+ 107   }
+ 108 
+ 109   if (_anchor.last_Java_sp() == NULL) {
+ 110     _thread-&gt;record_base_of_stack_pointer();
+ 111   }
+ 112 }
+ 113 
+ 114 
+ 115 JavaCallWrapper::~JavaCallWrapper() {
+ 116   assert(_thread == JavaThread::current(), "must still be the same thread");
+ 117 
+ 118   // restore previous handle block &amp; Java frame linkage
+ 119   JNIHandleBlock *_old_handles = _thread-&gt;active_handles();
+ 120   _thread-&gt;set_active_handles(_handles);
+ 121 
+ 122   _thread-&gt;frame_anchor()-&gt;zap();
+ 123 
+ 124   debug_only(_thread-&gt;dec_java_call_counter());
+ 125 
+ 126   if (_anchor.last_Java_sp() == NULL) {
+ 127     _thread-&gt;set_base_of_stack_pointer(NULL);
+ 128   }
+ 129 
+ 130 
+ 131   // Old thread-local info. has been restored. We are not back in the VM.
+ 132   ThreadStateTransition::transition_from_java(_thread, _thread_in_vm);
+ 133 
+ 134   // State has been restored now make the anchor frame visible for the profiler.
+ 135   // Do this after the transition because this allows us to put an assert
+ 136   // the Java-&gt;vm transition which checks to see that stack is not walkable
+ 137   // on sparc/ia64 which will catch violations of the reseting of last_Java_frame
+ 138   // invariants (i.e. _flags always cleared on return to Java)
+ 139 
+ 140   _thread-&gt;frame_anchor()-&gt;copy(&amp;_anchor);
+ 141 
+ 142   // Release handles after we are marked as being inside the VM again, since this
+ 143   // operation might block
+ 144   JNIHandleBlock::release_block(_old_handles, _thread);
+ 145 }
+ 146 
+ 147 
+ 148 void JavaCallWrapper::oops_do(OopClosure* f) {
+ 149   f-&gt;do_oop((oop*)&amp;_receiver);
+ 150   handles()-&gt;oops_do(f);
+ 151 }
+ 152 
+ 153 
+ 154 // Helper methods
+ 155 static BasicType runtime_type_from(JavaValue* result) {
+ 156   switch (result-&gt;get_type()) {
+ 157     case T_BOOLEAN: // fall through
+ 158     case T_CHAR   : // fall through
+ 159     case T_SHORT  : // fall through
+ 160     case T_INT    : // fall through
+ 161 #ifndef _LP64
+ 162     case T_OBJECT : // fall through
+ 163     case T_ARRAY  : // fall through
+ 164 #endif
+ 165     case T_BYTE   : // fall through
+ 166     case T_VOID   : return T_INT;
+ 167     case T_LONG   : return T_LONG;
+ 168     case T_FLOAT  : return T_FLOAT;
+ 169     case T_DOUBLE : return T_DOUBLE;
+ 170 #ifdef _LP64
+ 171     case T_ARRAY  : // fall through
+ 172     case T_OBJECT:  return T_OBJECT;
+ 173 #endif
+ 174     default:
+ 175       ShouldNotReachHere();
+ 176       return T_ILLEGAL;
+ 177   }
+ 178 }
+ 179 
+ 180 // ============ Virtual calls ============
+ 181 
+ 182 void JavaCalls::call_virtual(JavaValue* result, Klass* spec_klass, Symbol* name, Symbol* signature, JavaCallArguments* args, TRAPS) {
+ 183   CallInfo callinfo;
+ 184   Handle receiver = args-&gt;receiver();
+ 185   Klass* recvrKlass = receiver.is_null() ? (Klass*)NULL : receiver-&gt;klass();
+ 186   LinkInfo link_info(spec_klass, name, signature);
+ 187   LinkResolver::resolve_virtual_call(
+ 188           callinfo, receiver, recvrKlass, link_info, true, CHECK);
+ 189   methodHandle method = callinfo.selected_method();
+ 190   assert(method.not_null(), "should have thrown exception");
+ 191 
+ 192   // Invoke the method
+ 193   JavaCalls::call(result, method, args, CHECK);
+ 194 }
+ 195 
+ 196 
+ 197 void JavaCalls::call_virtual(JavaValue* result, Handle receiver, Klass* spec_klass, Symbol* name, Symbol* signature, TRAPS) {
+ 198   JavaCallArguments args(receiver);
+ 199   call_virtual(result, spec_klass, name, signature, &amp;args, CHECK);
+ 200 }
+ 201 
+ 202 
+ 203 void JavaCalls::call_virtual(JavaValue* result, Handle receiver, Klass* spec_klass, Symbol* name, Symbol* signature, Handle arg1, TRAPS) {
+ 204   JavaCallArguments args(receiver);
+ 205   args.push_oop(arg1);
+ 206   call_virtual(result, spec_klass, name, signature, &amp;args, CHECK);
+ 207 }
+ 208 
+ 209 
+ 210 
+ 211 void JavaCalls::call_virtual(JavaValue* result, Handle receiver, Klass* spec_klass, Symbol* name, Symbol* signature, Handle arg1, Handle arg2, TRAPS) {
+ 212   JavaCallArguments args(receiver);
+ 213   args.push_oop(arg1);
+ 214   args.push_oop(arg2);
+ 215   call_virtual(result, spec_klass, name, signature, &amp;args, CHECK);
+ 216 }
+ 217 
+ 218 
+ 219 // ============ Special calls ============
+ 220 
+ 221 void JavaCalls::call_special(JavaValue* result, Klass* klass, Symbol* name, Symbol* signature, JavaCallArguments* args, TRAPS) {
+ 222   CallInfo callinfo;
+ 223   LinkInfo link_info(klass, name, signature);
+ 224   LinkResolver::resolve_special_call(callinfo, args-&gt;receiver(), link_info, CHECK);
+ 225   methodHandle method = callinfo.selected_method();
+ 226   assert(method.not_null(), "should have thrown exception");
+ 227 
+ 228   // Invoke the method
+ 229   JavaCalls::call(result, method, args, CHECK);
+ 230 }
+ 231 
+ 232 
+ 233 void JavaCalls::call_special(JavaValue* result, Handle receiver, Klass* klass, Symbol* name, Symbol* signature, TRAPS) {
+ 234   JavaCallArguments args(receiver);
+ 235   call_special(result, klass, name, signature, &amp;args, CHECK);
+ 236 }
+ 237 
+ 238 
+ 239 void JavaCalls::call_special(JavaValue* result, Handle receiver, Klass* klass, Symbol* name, Symbol* signature, Handle arg1, TRAPS) {
+ 240   JavaCallArguments args(receiver);
+ 241   args.push_oop(arg1);
+ 242   call_special(result, klass, name, signature, &amp;args, CHECK);
+ 243 }
+ 244 
+ 245 
+ 246 void JavaCalls::call_special(JavaValue* result, Handle receiver, Klass* klass, Symbol* name, Symbol* signature, Handle arg1, Handle arg2, TRAPS) {
+ 247   JavaCallArguments args(receiver);
+ 248   args.push_oop(arg1);
+ 249   args.push_oop(arg2);
+ 250   call_special(result, klass, name, signature, &amp;args, CHECK);
+ 251 }
+ 252 
+ 253 
+ 254 // ============ Static calls ============
+ 255 
+ 256 void JavaCalls::call_static(JavaValue* result, Klass* klass, Symbol* name, Symbol* signature, JavaCallArguments* args, TRAPS) {
+ 257   CallInfo callinfo;
+ 258   LinkInfo link_info(klass, name, signature);
+ 259   LinkResolver::resolve_static_call(callinfo, link_info, true, CHECK);
+ 260   methodHandle method = callinfo.selected_method();
+ 261   assert(method.not_null(), "should have thrown exception");
+ 262 
+ 263   // Invoke the method
+ 264   JavaCalls::call(result, method, args, CHECK);
+ 265 }
+ 266 
+ 267 
+ 268 void JavaCalls::call_static(JavaValue* result, Klass* klass, Symbol* name, Symbol* signature, TRAPS) {
+ 269   JavaCallArguments args;
+ 270   call_static(result, klass, name, signature, &amp;args, CHECK);
+ 271 }
+ 272 
+ 273 
+ 274 void JavaCalls::call_static(JavaValue* result, Klass* klass, Symbol* name, Symbol* signature, Handle arg1, TRAPS) {
+ 275   JavaCallArguments args(arg1);
+ 276   call_static(result, klass, name, signature, &amp;args, CHECK);
+ 277 }
+ 278 
+ 279 
+ 280 void JavaCalls::call_static(JavaValue* result, Klass* klass, Symbol* name, Symbol* signature, Handle arg1, Handle arg2, TRAPS) {
+ 281   JavaCallArguments args;
+ 282   args.push_oop(arg1);
+ 283   args.push_oop(arg2);
+ 284   call_static(result, klass, name, signature, &amp;args, CHECK);
+ 285 }
+ 286 
+ 287 
+ 288 void JavaCalls::call_static(JavaValue* result, Klass* klass, Symbol* name, Symbol* signature, Handle arg1, Handle arg2, Handle arg3, TRAPS) {
+ 289   JavaCallArguments args;
+ 290   args.push_oop(arg1);
+ 291   args.push_oop(arg2);
+ 292   args.push_oop(arg3);
+ 293   call_static(result, klass, name, signature, &amp;args, CHECK);
+ 294 }
+ 295 
+ 296 // ============ allocate and initialize new object instance ============
+ 297 
+ 298 Handle JavaCalls::construct_new_instance(InstanceKlass* klass, Symbol* constructor_signature, JavaCallArguments* args, TRAPS) {
+ 299   klass-&gt;initialize(CHECK_NH); // Quick no-op if already initialized.
+ 300   Handle obj = klass-&gt;allocate_instance_handle(CHECK_NH);
+ 301   JavaValue void_result(T_VOID);
+ 302   args-&gt;set_receiver(obj); // inserts &lt;obj&gt; as the first argument.
+ 303   JavaCalls::call_special(&amp;void_result, klass,
+ 304                           vmSymbols::object_initializer_name(),
+ 305                           constructor_signature, args, CHECK_NH);
+ 306   return obj;
+ 307 }
+ 308 
+ 309 Handle JavaCalls::construct_new_instance(InstanceKlass* klass, Symbol* constructor_signature, TRAPS) {
+ 310   JavaCallArguments args;
+ 311   return JavaCalls::construct_new_instance(klass, constructor_signature, &amp;args, CHECK_NH);
+ 312 }
+ 313 
+ 314 Handle JavaCalls::construct_new_instance(InstanceKlass* klass, Symbol* constructor_signature, Handle arg1, TRAPS) {
+ 315   JavaCallArguments args;
+ 316   args.push_oop(arg1);
+ 317   return JavaCalls::construct_new_instance(klass, constructor_signature, &amp;args, CHECK_NH);
+ 318 }
+ 319 
+ 320 Handle JavaCalls::construct_new_instance(InstanceKlass* klass, Symbol* constructor_signature, Handle arg1, Handle arg2, TRAPS) {
+ 321   JavaCallArguments args;
+ 322   args.push_oop(arg1);
+ 323   args.push_oop(arg2);
+ 324   return JavaCalls::construct_new_instance(klass, constructor_signature, &amp;args, CHECK_NH);
+ 325 }
+ 326 
+ 327 // -------------------------------------------------
+ 328 // Implementation of JavaCalls (low level)
+ 329 
+ 330 
+ 331 void JavaCalls::call(JavaValue* result, const methodHandle&amp; method, JavaCallArguments* args, TRAPS) {
+ 332   // Check if we need to wrap a potential OS exception handler around thread
+ 333   // This is used for e.g. Win32 structured exception handlers
+ 334   assert(THREAD-&gt;is_Java_thread(), "only JavaThreads can make JavaCalls");
+ 335   // Need to wrap each and every time, since there might be native code down the
+ 336   // stack that has installed its own exception handlers
+ 337   os::os_exception_wrapper(call_helper, result, method, args, THREAD);
+ 338 }
+ 339 
+ 340 void JavaCalls::call_helper(JavaValue* result, const methodHandle&amp; method, JavaCallArguments* args, TRAPS) {
+ 341 
+ 342   JavaThread* thread = (JavaThread*)THREAD;
+ 343   assert(thread-&gt;is_Java_thread(), "must be called by a java thread");
+ 344   assert(method.not_null(), "must have a method to call");
+ 345   assert(!SafepointSynchronize::is_at_safepoint(), "call to Java code during VM operation");
+ 346   assert(!thread-&gt;handle_area()-&gt;no_handle_mark_active(), "cannot call out to Java here");
+ 347 
+ 348 
+ 349   CHECK_UNHANDLED_OOPS_ONLY(thread-&gt;clear_unhandled_oops();)
+ 350 
+<a name="2" id="anc2"></a><span class="changed"> 351 #if INCLUDE_JVMCI</span>
+<span class="changed"> 352   // Gets the nmethod (if any) that should be called instead of normal target</span>
+<span class="changed"> 353   nmethod* alternative_target = args-&gt;alternative_target();</span>
+<span class="changed"> 354   if (alternative_target == NULL) {</span>
+<span class="changed"> 355 #endif</span>
+<span class="changed"> 356 // Verify the arguments</span>
+<span class="changed"> 357 </span>
+<span class="changed"> 358   if (CheckJNICalls)  {</span>
+ 359     args-&gt;verify(method, result-&gt;get_type());
+ 360   }
+<a name="3" id="anc3"></a><span class="removed"> 361   else debug_only(args-&gt;verify(method, result-&gt;get_type()));</span>
+<span class="removed"> 362 #if INCLUDE_JVMCI</span>
+<span class="removed"> 363   }</span>
+<span class="removed"> 364 #else</span>
+<span class="removed"> 365 </span>
+ 366   // Ignore call if method is empty
+<a name="4" id="anc4"></a><span class="changed"> 367   if (method-&gt;is_empty_method()) {</span>
+ 368     assert(result-&gt;get_type() == T_VOID, "an empty method must return a void value");
+ 369     return;
+ 370   }
+<a name="5" id="anc5"></a><span class="removed"> 371 #endif</span>
+ 372 
+ 373 #ifdef ASSERT
+ 374   { InstanceKlass* holder = method-&gt;method_holder();
+ 375     // A klass might not be initialized since JavaCall's might be used during the executing of
+ 376     // the &lt;clinit&gt;. For example, a Thread.start might start executing on an object that is
+ 377     // not fully initialized! (bad Java programming style)
+ 378     assert(holder-&gt;is_linked(), "rewriting must have taken place");
+ 379   }
+ 380 #endif
+ 381 
+ 382   CompilationPolicy::compile_if_required(method, CHECK);
+ 383 
+ 384   // Since the call stub sets up like the interpreter we call the from_interpreted_entry
+ 385   // so we can go compiled via a i2c. Otherwise initial entry method will always
+ 386   // run interpreted.
+ 387   address entry_point = method-&gt;from_interpreted_entry();
+ 388   if (JvmtiExport::can_post_interpreter_events() &amp;&amp; thread-&gt;is_interp_only_mode()) {
+ 389     entry_point = method-&gt;interpreter_entry();
+ 390   }
+ 391 
+ 392   // Figure out if the result value is an oop or not (Note: This is a different value
+ 393   // than result_type. result_type will be T_INT of oops. (it is about size)
+ 394   BasicType result_type = runtime_type_from(result);
+ 395   bool oop_result_flag = (result-&gt;get_type() == T_OBJECT || result-&gt;get_type() == T_ARRAY);
+ 396 
+ 397   // NOTE: if we move the computation of the result_val_address inside
+ 398   // the call to call_stub, the optimizer produces wrong code.
+ 399   intptr_t* result_val_address = (intptr_t*)(result-&gt;get_value_addr());
+ 400 
+ 401   // Find receiver
+ 402   Handle receiver = (!method-&gt;is_static()) ? args-&gt;receiver() : Handle();
+ 403 
+ 404   // When we reenter Java, we need to reenable the reserved/yellow zone which
+ 405   // might already be disabled when we are in VM.
+ 406   if (!thread-&gt;stack_guards_enabled()) {
+ 407     thread-&gt;reguard_stack();
+ 408   }
+ 409 
+ 410   // Check that there are shadow pages available before changing thread state
+ 411   // to Java. Calculate current_stack_pointer here to make sure
+ 412   // stack_shadow_pages_available() and bang_stack_shadow_pages() use the same sp.
+ 413   address sp = os::current_stack_pointer();
+ 414   if (!os::stack_shadow_pages_available(THREAD, method, sp)) {
+ 415     // Throw stack overflow exception with preinitialized exception.
+ 416     Exceptions::throw_stack_overflow_exception(THREAD, __FILE__, __LINE__, method);
+ 417     return;
+ 418   } else {
+ 419     // Touch pages checked if the OS needs them to be touched to be mapped.
+ 420     os::map_stack_shadow_pages(sp);
+ 421   }
+ 422 
+<a name="6" id="anc6"></a>
+
+
+
+ 423 #if INCLUDE_JVMCI
+<a name="7" id="anc7"></a><span class="changed"> 424   if (alternative_target != NULL) {</span>
+<span class="changed"> 425     if (alternative_target-&gt;is_alive()) {</span>
+<span class="changed"> 426       thread-&gt;set_jvmci_alternate_call_target(alternative_target-&gt;verified_entry_point());</span>
+
+
+
+
+
+
+ 427       entry_point = method-&gt;adapter()-&gt;get_i2c_entry();
+<a name="8" id="anc8"></a><span class="removed"> 428     } else {</span>
+<span class="removed"> 429       THROW(vmSymbols::jdk_vm_ci_code_InvalidInstalledCodeException());</span>
+ 430     }
+ 431   }
+ 432 #endif
+<a name="9" id="anc9"></a><span class="removed"> 433 </span>
+<span class="removed"> 434   // do call</span>
+<span class="removed"> 435   { JavaCallWrapper link(method, receiver, result, CHECK);</span>
+<span class="removed"> 436     { HandleMark hm(thread);  // HandleMark used by HandleMarkCleaner</span>
+<span class="removed"> 437 </span>
+ 438       StubRoutines::call_stub()(
+ 439         (address)&amp;link,
+ 440         // (intptr_t*)&amp;(result-&gt;_value), // see NOTE above (compiler problem)
+ 441         result_val_address,          // see NOTE above (compiler problem)
+ 442         result_type,
+ 443         method(),
+ 444         entry_point,
+ 445         args-&gt;parameters(),
+ 446         args-&gt;size_of_parameters(),
+ 447         CHECK
+ 448       );
+ 449 
+ 450       result = link.result();  // circumvent MS C++ 5.0 compiler bug (result is clobbered across call)
+ 451       // Preserve oop return value across possible gc points
+ 452       if (oop_result_flag) {
+ 453         thread-&gt;set_vm_result((oop) result-&gt;get_jobject());
+ 454       }
+ 455     }
+ 456   } // Exit JavaCallWrapper (can block - potential return oop must be preserved)
+ 457 
+ 458   // Check if a thread stop or suspend should be executed
+ 459   // The following assert was not realistic.  Thread.stop can set that bit at any moment.
+ 460   //assert(!thread-&gt;has_special_runtime_exit_condition(), "no async. exceptions should be installed");
+ 461 
+ 462   // Restore possible oop return
+ 463   if (oop_result_flag) {
+ 464     result-&gt;set_jobject((jobject)thread-&gt;vm_result());
+ 465     thread-&gt;set_vm_result(NULL);
+ 466   }
+ 467 }
+ 468 
+ 469 
+ 470 //--------------------------------------------------------------------------------------
+ 471 // Implementation of JavaCallArguments
+ 472 
+ 473 inline bool is_value_state_indirect_oop(uint state) {
+ 474   assert(state != JavaCallArguments::value_state_oop,
+ 475          "Checking for handles after removal");
+ 476   assert(state &lt; JavaCallArguments::value_state_limit,
+ 477          "Invalid value state %u", state);
+ 478   return state != JavaCallArguments::value_state_primitive;
+ 479 }
+ 480 
+ 481 inline oop resolve_indirect_oop(intptr_t value, uint state) {
+ 482   switch (state) {
+ 483   case JavaCallArguments::value_state_handle:
+ 484   {
+ 485     oop* ptr = reinterpret_cast&lt;oop*&gt;(value);
+ 486     return Handle::raw_resolve(ptr);
+ 487   }
+ 488 
+ 489   case JavaCallArguments::value_state_jobject:
+ 490   {
+ 491     jobject obj = reinterpret_cast&lt;jobject&gt;(value);
+ 492     return JNIHandles::resolve(obj);
+ 493   }
+ 494 
+ 495   default:
+ 496     ShouldNotReachHere();
+ 497     return NULL;
+ 498   }
+ 499 }
+ 500 
+ 501 intptr_t* JavaCallArguments::parameters() {
+ 502   // First convert all handles to oops
+ 503   for(int i = 0; i &lt; _size; i++) {
+ 504     uint state = _value_state[i];
+ 505     assert(state != value_state_oop, "Multiple handle conversions");
+ 506     if (is_value_state_indirect_oop(state)) {
+ 507       oop obj = resolve_indirect_oop(_value[i], state);
+ 508       _value[i] = cast_from_oop&lt;intptr_t&gt;(obj);
+ 509       _value_state[i] = value_state_oop;
+ 510     }
+ 511   }
+ 512   // Return argument vector
+ 513   return _value;
+ 514 }
+ 515 
+ 516 
+ 517 class SignatureChekker : public SignatureIterator {
+ 518  private:
+ 519    int _pos;
+ 520    BasicType _return_type;
+ 521    u_char* _value_state;
+ 522    intptr_t* _value;
+ 523 
+ 524  public:
+ 525   bool _is_return;
+ 526 
+ 527   SignatureChekker(Symbol* signature,
+ 528                    BasicType return_type,
+ 529                    bool is_static,
+ 530                    u_char* value_state,
+ 531                    intptr_t* value) :
+ 532     SignatureIterator(signature),
+ 533     _pos(0),
+ 534     _return_type(return_type),
+ 535     _value_state(value_state),
+ 536     _value(value),
+ 537     _is_return(false)
+ 538   {
+ 539     if (!is_static) {
+ 540       check_value(true); // Receiver must be an oop
+ 541     }
+ 542   }
+ 543 
+ 544   void check_value(bool type) {
+ 545     uint state = _value_state[_pos++];
+ 546     if (type) {
+ 547       guarantee(is_value_state_indirect_oop(state),
+ 548                 "signature does not match pushed arguments: %u at %d",
+ 549                 state, _pos - 1);
+ 550     } else {
+ 551       guarantee(state == JavaCallArguments::value_state_primitive,
+ 552                 "signature does not match pushed arguments: %u at %d",
+ 553                 state, _pos - 1);
+ 554     }
+ 555   }
+ 556 
+ 557   void check_doing_return(bool state) { _is_return = state; }
+ 558 
+ 559   void check_return_type(BasicType t) {
+ 560     guarantee(_is_return &amp;&amp; t == _return_type, "return type does not match");
+ 561   }
+ 562 
+ 563   void check_int(BasicType t) {
+ 564     if (_is_return) {
+ 565       check_return_type(t);
+ 566       return;
+ 567     }
+ 568     check_value(false);
+ 569   }
+ 570 
+ 571   void check_double(BasicType t) { check_long(t); }
+ 572 
+ 573   void check_long(BasicType t) {
+ 574     if (_is_return) {
+ 575       check_return_type(t);
+ 576       return;
+ 577     }
+ 578 
+ 579     check_value(false);
+ 580     check_value(false);
+ 581   }
+ 582 
+ 583   void check_obj(BasicType t) {
+ 584     if (_is_return) {
+ 585       check_return_type(t);
+ 586       return;
+ 587     }
+ 588 
+ 589     intptr_t v = _value[_pos];
+ 590     if (v != 0) {
+ 591       // v is a "handle" referring to an oop, cast to integral type.
+ 592       // There shouldn't be any handles in very low memory.
+ 593       guarantee((size_t)v &gt;= (size_t)os::vm_page_size(),
+ 594                 "Bad JNI oop argument %d: " PTR_FORMAT, _pos, v);
+ 595       // Verify the pointee.
+ 596       oop vv = resolve_indirect_oop(v, _value_state[_pos]);
+ 597       guarantee(oopDesc::is_oop_or_null(vv, true),
+ 598                 "Bad JNI oop argument %d: " PTR_FORMAT " -&gt; " PTR_FORMAT,
+ 599                 _pos, v, p2i(vv));
+ 600     }
+ 601 
+ 602     check_value(true);          // Verify value state.
+ 603   }
+ 604 
+ 605   void do_bool()                       { check_int(T_BOOLEAN);       }
+ 606   void do_char()                       { check_int(T_CHAR);          }
+ 607   void do_float()                      { check_int(T_FLOAT);         }
+ 608   void do_double()                     { check_double(T_DOUBLE);     }
+ 609   void do_byte()                       { check_int(T_BYTE);          }
+ 610   void do_short()                      { check_int(T_SHORT);         }
+ 611   void do_int()                        { check_int(T_INT);           }
+ 612   void do_long()                       { check_long(T_LONG);         }
+ 613   void do_void()                       { check_return_type(T_VOID);  }
+ 614   void do_object(int begin, int end)   { check_obj(T_OBJECT);        }
+ 615   void do_array(int begin, int end)    { check_obj(T_OBJECT);        }
+ 616 };
+ 617 
+ 618 
+ 619 void JavaCallArguments::verify(const methodHandle&amp; method, BasicType return_type) {
+ 620   guarantee(method-&gt;size_of_parameters() == size_of_parameters(), "wrong no. of arguments pushed");
+ 621 
+ 622   // Treat T_OBJECT and T_ARRAY as the same
+ 623   if (return_type == T_ARRAY) return_type = T_OBJECT;
+ 624 
+ 625   // Check that oop information is correct
+ 626   Symbol* signature = method-&gt;signature();
+ 627 
+ 628   SignatureChekker sc(signature,
+ 629                       return_type,
+ 630                       method-&gt;is_static(),
+ 631                       _value_state,
+ 632                       _value);
+ 633   sc.iterate_parameters();
+ 634   sc.check_doing_return(true);
+ 635   sc.iterate_returntype();
+ 636 }
+<a name="10" id="anc10"></a><b style="font-size: large; color: red">--- EOF ---</b>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</pre><form name="eof"><input name="value" value="10" type="hidden" /></form></body></html>
